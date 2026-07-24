@@ -201,8 +201,20 @@ static noun do_rub(noun a, uint64_t *cur) {
 
     /* read len bits as the atom value */
     uint64_t limb_count = (len + 63) / 64;
-    if (limb_count > (uint64_t)BN_MAX_LIMBS) nock_crash("cue: atom too large");
-    uint64_t scratch[BN_MAX_LIMBS];
+    /*
+     * Embedded atoms in large hoonc jams can exceed BN_MAX_LIMBS (stack
+     * bignum limit).  Use high-RAM scratch for cue only (not .bss).
+     */
+#define CUE_RUB_MAX_LIMBS  16384u   /* 128 KiB limbs */
+#define CUE_RUB_SCRATCH    0x0C000000u
+    if (limb_count == 0) return NOUN_ZERO;
+    if (limb_count > CUE_RUB_MAX_LIMBS) nock_crash("cue: atom too large");
+    uint64_t *scratch;
+    uint64_t stack_sc[BN_MAX_LIMBS];
+    if (limb_count <= (uint64_t)BN_MAX_LIMBS)
+        scratch = stack_sc;
+    else
+        scratch = (uint64_t *)(uintptr_t)CUE_RUB_SCRATCH;
     for (uint64_t i = 0; i < limb_count; i++) scratch[i] = 0;
     for (uint64_t i = 0; i < len; i++)
         scratch[i >> 6] |= (uint64_t)atom_bit_at(a, (*cur)++) << (i & 63);
@@ -211,15 +223,20 @@ static noun do_rub(noun a, uint64_t *cur) {
 }
 
 /* ── cue cache: bit position → noun ──────────────────────────────────────── */
-
-#define CUE_CACHE_SZ 128
+/*
+ * Large hoonc jams (100k+ cells) need a big backref table.  A multi-MB static
+ * .bss array would overlay FORTH_BASE (~0x90000); keep the table in high RAM.
+ */
+#define CUE_CACHE_SZ   1048576u      /* 1M slots — hoonc jams are dense */
+#define CUE_CACHE_BASE 0x0A000000u   /* high RAM; not .bss (Forth overlap) */
 
 typedef struct { uint64_t pos; noun val; int used; } ccent_t;
 
-static ccent_t g_ccache[CUE_CACHE_SZ];
+static ccent_t *g_ccache = (ccent_t *)(uintptr_t)CUE_CACHE_BASE;
 
 static void ccache_init(void) {
-    for (int i = 0; i < CUE_CACHE_SZ; i++) g_ccache[i].used = 0;
+    for (uint32_t i = 0; i < CUE_CACHE_SZ; i++)
+        g_ccache[i].used = 0;
 }
 
 static void ccache_put(uint64_t pos, noun val) {
@@ -227,10 +244,13 @@ static void ccache_put(uint64_t pos, noun val) {
     for (uint32_t i = 0; i < CUE_CACHE_SZ; i++) {
         uint32_t idx = (h + i) & (CUE_CACHE_SZ - 1);
         if (!g_ccache[idx].used || g_ccache[idx].pos == pos) {
-            g_ccache[idx].pos = pos; g_ccache[idx].val = val; g_ccache[idx].used = 1;
+            g_ccache[idx].pos = pos;
+            g_ccache[idx].val = val;
+            g_ccache[idx].used = 1;
             return;
         }
     }
+    nock_crash("cue: backref cache full");
 }
 
 static noun ccache_get(uint64_t pos) {

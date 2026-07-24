@@ -3,6 +3,7 @@
 #include "noun.h"
 #include "memory.h"
 #include "blake3.h"
+#include "uart.h"
 
 /*
  * Noun heap allocator — bump allocator within HEAP_BASE..HEAP_TOP.
@@ -282,68 +283,84 @@ int noun_eq(noun a, noun b) {
  *
  * Static scratch avoids stack overflow for large pills (~1MB limit).
  */
-#define PILL_MAX_BYTES  (1024U * 1024U)
+#define PILL_MAX_BYTES  PILL_SCRATCH_SIZE
 #define PILL_MAX_LIMBS  (PILL_MAX_BYTES / 8U)
 
 int noun_pill_shape = 0;       /* 0=Arvo, 1=Shrine; set by pill_load */
 uint32_t noun_pill_version = 0;
-
-static uint64_t pill_scratch[PILL_MAX_LIMBS];
 
 /* Embedded pill: linked into .rodata via src/pill_embed.s (.incbin pill.bin). */
 extern uint8_t _pill_embed_start[];
 extern uint8_t _pill_embed_end[];
 
 noun pill_load(void) {
-    const uint8_t *base;
-    uint64_t nbytes = 0;
-
     /*
-     * Priority 1: QEMU -device loader places pill at PILL_BASE.
-     *   QEMU raspi4b requires -m 2G; with that, 0x10000000 is accessible RAM.
-     *   Read nbytes; if non-zero, the loader placed a pill there.
-     * Priority 2: pill embedded in the binary via .incbin (real hardware).
-     *   On bare metal the GPU firmware zeroes RAM, so PILL_BASE has nbytes=0.
+     * Priority 1: QEMU loader at PILL_BASE.  Priority 2: embedded pill.bin.
+     *
+     * Do NOT put large scratch in .bss (overlays FORTH_BASE ~0x90000).
+     * Small pills: stack buffer. Large: high RAM at PILL_SCRATCH_BASE.
      */
-    const uint8_t *qbase = (const uint8_t *)PILL_BASE;
-    uint64_t qnbytes = 0;
-    for (int i = 0; i < 8; i++)
-        qnbytes |= (uint64_t)qbase[i] << (i * 8);
+    volatile uint8_t *q = (volatile uint8_t *)(uintptr_t)PILL_BASE;
+    uint64_t nbytes = 0;
+    int i;
+    for (i = 0; i < 8; i++)
+        nbytes |= (uint64_t)q[i] << (i * 8);
 
-    if (qnbytes > 0) {
-        base   = qbase;
-        nbytes = qnbytes;
+    const volatile uint8_t *base;
+    if (nbytes > 0) {
+        base = q;
     } else {
-        base = _pill_embed_start;
-        if (base >= _pill_embed_end)
-            return 0;           /* no embedded pill */
-        for (int i = 0; i < 8; i++)
+        base = (const volatile uint8_t *)_pill_embed_start;
+        if ((const uint8_t *)base >= _pill_embed_end)
+            return 0;
+        nbytes = 0;
+        for (i = 0; i < 8; i++)
             nbytes |= (uint64_t)base[i] << (i * 8);
     }
 
     if (nbytes == 0)
-        return 0;   /* C null — sentinel for "no pill"; KERNEL checks cbz x0 */
+        return 0;
+    if (nbytes > PILL_MAX_BYTES) {
+        uart_puts("pill: nbytes too large\r\n");
+        return 0;
+    }
 
-    /* Read shape byte and version (bytes 9-12 LE) */
     noun_pill_shape = (int)base[8];
     noun_pill_version = (uint32_t)base[9]
                       | ((uint32_t)base[10] << 8)
                       | ((uint32_t)base[11] << 16)
                       | ((uint32_t)base[12] << 24);
 
-    /* Jam data starts at offset 16 (16-byte aligned) */
     uint64_t nlimbs = (nbytes + 7) / 8;
-    if (nlimbs > PILL_MAX_LIMBS) nlimbs = PILL_MAX_LIMBS;
+    if (nlimbs == 0)
+        nlimbs = 1;
+    if (nlimbs > PILL_MAX_LIMBS)
+        nlimbs = PILL_MAX_LIMBS;
 
-    uint8_t *dst = (uint8_t *)pill_scratch;
-    volatile uint8_t *src = (volatile uint8_t *)(base + 16);
-    for (uint64_t i = 0; i < nlimbs * 8; i++)
-        dst[i] = (i < nbytes) ? src[i] : 0;
+    uint64_t limbs_local[64];
+    uint64_t *limbs;
+    if (nlimbs <= 64) {
+        limbs = limbs_local;
+    } else {
+        limbs = (uint64_t *)(uintptr_t)PILL_SCRATCH_BASE;
+    }
 
-    /* Strip trailing zero limbs */
-    uint64_t sig = nlimbs;
-    while (sig > 1 && pill_scratch[sig - 1] == 0)
-        sig--;
+    {
+        uint8_t *dst = (uint8_t *)limbs;
+        uint64_t copy = nbytes;
+        uint64_t j;
+        if (copy > nlimbs * 8)
+            copy = nlimbs * 8;
+        for (j = 0; j < copy; j++)
+            dst[j] = base[16 + j];
+        for (j = copy; j < nlimbs * 8; j++)
+            dst[j] = 0;
+    }
 
-    return make_atom(pill_scratch, sig);
+    {
+        uint64_t sig = nlimbs;
+        while (sig > 1 && limbs[sig - 1] == 0)
+            sig--;
+        return make_atom(limbs, sig);
+    }
 }

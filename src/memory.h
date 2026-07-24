@@ -71,6 +71,18 @@
 #define PILL_BASE  0x10000000
 
 /*
+ * Scratch for pill_load jam limbs. MUST NOT live in .bss under FORTH_BASE
+ * (a 1MB static array there overlays the dictionary/stacks and brick the VM
+ * if anything touches past the first few KB).  Place between cold store and
+ * PILL_BASE.
+ */
+#define PILL_SCRATCH_BASE  0x07900000
+#define PILL_SCRATCH_SIZE  0x00100000   /* 1 MB */
+#if (PILL_SCRATCH_BASE + PILL_SCRATCH_SIZE) > PILL_BASE
+#error "pill scratch overlaps PILL_BASE"
+#endif
+
+/*
  * UART receive buffer: static window between TIB end and dictionary base.
  * Used by RECV-NOUN to accumulate incoming jam bytes before decoding.
  * Limit: ~28KB. Sufficient for Phase 6 test events.
