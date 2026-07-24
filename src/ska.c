@@ -150,6 +150,16 @@ static nomm1_t *fcache_lookup(noun fml)
     return (nomm1_t *)0;
 }
 
+void ska_cache_clear(void)
+{
+    fcache_arena_off = 0;
+    for (uint32_t i = 0; i < FCACHE_SIZE; i++) {
+        fcache[i].occupied = 0;
+        fcache[i].fml = 0;
+        fcache[i].entry = (nomm1_t *)0;
+    }
+}
+
 static void fcache_insert(noun fml, nomm1_t *entry)
 {
     uint32_t h = fhash(fml);

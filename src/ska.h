@@ -367,6 +367,9 @@ noun    run_nomm1(const nomm1_t *n, noun subject,
 /* Reclaim all nomm_t / nomm1_t / boil_t arena allocations. */
 void  ska_arena_reset(void);
 
+/* Clear Stage 9g formula cache (call on hot-swap / jet invalidation). */
+void  ska_cache_clear(void);
+
 /*
  * ska_print_stats: run ska_analyze and print a one-line dashboard to UART.
  * Output format:  "SKA: N call sites (D direct, J jetted)\n"

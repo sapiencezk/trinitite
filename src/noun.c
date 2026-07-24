@@ -276,7 +276,8 @@ int noun_eq(noun a, noun b) {
  * PILL format v2:
  *   bytes  0-7:   uint64_t (LE) = byte count of jam data
  *   byte   8:     kernel shape  (0=Arvo, 1=Shrine)
- *   bytes  9-15:  reserved/padding
+ *   bytes  9-12:  uint32_t (LE) version (0 = unversioned)
+ *   bytes 13-15:  reserved
  *   bytes  16+:   raw jam bytes (16-byte aligned)
  *
  * Static scratch avoids stack overflow for large pills (~1MB limit).
@@ -284,7 +285,8 @@ int noun_eq(noun a, noun b) {
 #define PILL_MAX_BYTES  (1024U * 1024U)
 #define PILL_MAX_LIMBS  (PILL_MAX_BYTES / 8U)
 
-int noun_pill_shape = 0;   /* 0=Arvo, 1=Shrine; set by pill_load */
+int noun_pill_shape = 0;       /* 0=Arvo, 1=Shrine; set by pill_load */
+uint32_t noun_pill_version = 0;
 
 static uint64_t pill_scratch[PILL_MAX_LIMBS];
 
@@ -322,8 +324,12 @@ noun pill_load(void) {
     if (nbytes == 0)
         return 0;   /* C null — sentinel for "no pill"; KERNEL checks cbz x0 */
 
-    /* Read shape byte and store in global */
+    /* Read shape byte and version (bytes 9-12 LE) */
     noun_pill_shape = (int)base[8];
+    noun_pill_version = (uint32_t)base[9]
+                      | ((uint32_t)base[10] << 8)
+                      | ((uint32_t)base[11] << 16)
+                      | ((uint32_t)base[12] << 24);
 
     /* Jam data starts at offset 16 (16-byte aligned) */
     uint64_t nlimbs = (nbytes + 7) / 8;

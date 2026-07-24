@@ -217,13 +217,48 @@ CI: QEMU 9.2.0 from source (raspi4b).
 
 ## Immediate Tasks for This Agent
 
-Phase 9 is complete (all 411 tests passing). The PoC gate (Phases 0–9) is cleared.
+Phase 9 is complete (all 411+ tests passing). The PoC gate (Phases 0–9) is cleared.
 The Forth dictionary IS the jet dashboard — thesis demonstrated.
+
+**Industrial Phase 1 (timing foundation): COMPLETE**
+- Words: `TFREQ@` `DL!` `DL@` `TMOUT?` `ELAPS@` `ETOUT` `W/DL` (+ existing `TIMER@` `BENCH`)
+- Kernel loops check deadline after `nock()`; on expiry emit `%timeout`, discard result.
+
+**Industrial Phase 2 (cooperative FIFO scheduler): COMPLETE**
+- Words: `ENQ` `ENQL` `DEQ` `QPEEK` `QCLR` `QLEN`
+- Shared event queue; Shrine causes append; Arvo/Shrine share `kernel_loop()`.
+
+**Industrial Phase 3 (effects + MMIO + IRQ ring): COMPLETE**
+- Words: `MMIO@` `MMIO!` `MSCR` `IRQP` `IRQDRN`
+- Effects: `%mmio` `%tmrarm` `%tmrcan` `%irq` (+ existing `%out` `%blit` `%timeout`)
+
+**Industrial Phase 4 (multi-core bring-up): COMPLETE**
+- Words: `CID@` `CSTART` `CSTOP` `CSEND` `CHB@` (+ `BUSY` `MFILL`)
+- Cores 1–3: C workers, private stacks, SPSC mailboxes; heartbeat per message.
+
+**Industrial Phase 5 (RAM cold store): COMPLETE**
+- Words: `CFMT` `CSTOR` `CLOAD` `LOGEV` `LOGLEN` `LOG@` `SNAP!` `SNAP@`
+- Content-addressed jam blobs at `COLD_BASE` (8MB RAM). SD backend later.
+
+**Industrial Phase 6 (live update / hot-swap): COMPLETE**
+- Words: `KVER@` `PVER@` `STAGE` `HSWAP` `HSTAT` `HCAN` `SAPPLY`
+- Cooperative kernel-noun swap + version; SKA cache clear; `%swapped` effect.
+
+**Industrial Phase 7 (observability & hardening): COMPLETE**
+- Words: `TON` `TOFF` `TCLR` `TREC` `TLEN` `TLAST@` `WDT!` `WDTK` `WDT?` `CANARY?`
+- Trace ring + soft WDT + canary check. No GIC/MPU. Nock untouched.
+
+**Industrial Phase 8 (networking stubs): COMPLETE**
+- Words: `NLOOP` `NSTAT` `NRX@` `NCLR` `ETX` `MTX` `CTX`
+- Effects `%etx`/`%mtx`/`%ctx` with loopback → event queue. No real NIC.
+- **Industrial enablement roadmap (Phases 1–8) complete.** Nock untouched.
 
 Next priorities:
 - **Phase 10**: North integration (pending external dependency)
 - **Phase 11**: SKA Phase 2 / full Hoon subset
-- **Phase 12**: Large atom cold store (SD card backing)
+- **Phase 12**: Large atom cold store (SD backend behind atom store)
+
+Guiding principle for industrial work: **keep it dumb and simple**.
 
 ## SKA Layer Relationship
 

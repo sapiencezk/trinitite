@@ -235,6 +235,46 @@ defcode "TIMER@", 6, timer_fetch, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// TFREQ@ ( -- u )  timer frequency in Hz (CNTFRQ_EL0)
+defcode "TFREQ@", 6, timer_freq, 0
+    mrs     x0, cntfrq_el0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// DL! ( abs -- )  set absolute deadline in CNTVCT ticks; 0 = disarmed
+defcode "DL!", 3, deadline_store, 0
+    ldr     x0, [DSP], #8
+    bl      deadline_set
+    NEXT
+
+// DL@ ( -- abs )  get absolute deadline; 0 if disarmed
+defcode "DL@", 3, deadline_fetch, 0
+    bl      deadline_get
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// TMOUT? ( -- f )  true (-1) if deadline armed and TIMER@ >= deadline
+defcode "TMOUT?", 6, timeout_q, 0
+    bl      deadline_expired
+    cmp     x0, #0
+    csetm   x0, ne                  // x0 = -1 if expired, else 0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// ELAPS@ ( start -- u )  ticks since start: TIMER@ - start
+defcode "ELAPS@", 6, elapsed_fetch, 0
+    ldr     x1, [DSP]
+    mrs     x0, cntvct_el0
+    sub     x0, x0, x1
+    str     x0, [DSP]
+    NEXT
+
+// ETOUT ( -- )  emit a %timeout effect (elapsed = 0) via DO-FX path
+defcode "ETOUT", 5, emit_timeout_word, 0
+    mov     x0, #0
+    bl      emit_timeout
+    NEXT
+
 // ═════════════════════════════════════════════════════════════════════════════
 // ARITHMETIC PRIMITIVES
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2516,10 +2556,381 @@ defcode "NOUN-TX", 7, send_noun, 0
     bl      uart_send_noun          // kernel.c
     NEXT
 
-// DO-FX ( effects -- )   walk effect list, dispatch %out/%blit to UART
+// DO-FX ( effects -- )   walk effect list, dispatch known tags
 defcode "DO-FX", 5, dispatch_fx, 0
     ldr     x0, [DSP], #8
     bl      dispatch_effects        // kernel.c
+    NEXT
+
+// ── Phase 3 — MMIO + IRQ ring ─────────────────────────────────────────────
+
+// MMIO@ ( addr -- u )  32-bit physical load, zero-extended
+defcode "MMIO@", 5, mmio_fetch, 0
+    ldr     x0, [DSP]
+    bl      mmio_read32
+    str     x0, [DSP]
+    NEXT
+
+// MMIO! ( u addr -- )  32-bit physical store (low 32 bits of u)
+defcode "MMIO!", 5, mmio_store, 0
+    ldr     x1, [DSP], #8           // addr
+    ldr     x0, [DSP], #8           // val
+    mov     x2, x0                  // save val
+    mov     x0, x1                  // addr in x0 for mmio_write32(addr,val)
+    mov     x1, x2
+    bl      mmio_write32
+    NEXT
+
+// MSCR ( -- addr )  address of RAM scratch word for MMIO tests
+defcode "MSCR", 4, mscr, 0
+    bl      mmio_scratch_addr
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// IRQP ( code -- f )  push code into IRQ ring; true if accepted
+defcode "IRQP", 4, irqp, 0
+    ldr     x0, [DSP]
+    bl      irq_ring_push
+    cmp     x0, #0
+    csetm   x0, ne
+    str     x0, [DSP]
+    NEXT
+
+// IRQDRN ( -- )  drain IRQ ring into event queue (same as kernel loop)
+defcode "IRQDRN", 6, irqdrn, 0
+    bl      irq_ring_drain
+    NEXT
+
+// IRQC ( -- )  clear IRQ ring (drop pending codes)
+defcode "IRQC", 4, irqc, 0
+    bl      irq_ring_clear
+    NEXT
+
+// ── Phase 4 — multi-core (core 0 Forth only) ──────────────────────────────
+
+// CID@ ( -- n )  this core's id (0 on the REPL)
+defcode "CID@", 4, core_id_fetch, 0
+    bl      core_id
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// CSTART ( n -- )  cooperative start of core n (1..3)
+defcode "CSTART", 6, core_start_word, 0
+    ldr     x0, [DSP], #8
+    bl      core_start
+    NEXT
+
+// CSTOP ( n -- )  cooperative stop of core n
+defcode "CSTOP", 5, core_stop_word, 0
+    ldr     x0, [DSP], #8
+    bl      core_stop
+    NEXT
+
+// CSEND ( code n -- f )  send code to core n; true if queued
+defcode "CSEND", 5, core_send_word, 0
+    ldr     x0, [DSP], #8           // n (id)
+    ldr     x1, [DSP]               // code
+    // core_send(id, code): x0=id, x1=code — already correct order
+    bl      core_send
+    cmp     x0, #0
+    csetm   x0, ne
+    str     x0, [DSP]
+    NEXT
+
+// CHB@ ( n -- u )  heartbeat counter for core n
+defcode "CHB@", 4, core_hb_fetch, 0
+    ldr     x0, [DSP]
+    bl      core_heartbeat_get
+    str     x0, [DSP]
+    NEXT
+
+// ── Phase 5 — RAM cold store (content-addressed jam blobs) ────────────────
+
+// CFMT ( -- )  wipe and reformat cold region
+defcode "CFMT", 4, cold_fmt, 0
+    bl      cold_format
+    NEXT
+
+// CSTOR ( noun -- hash62 )  jam+store; 0 on error
+defcode "CSTOR", 5, cold_stor, 0
+    ldr     x0, [DSP]
+    bl      cold_store
+    str     x0, [DSP]
+    NEXT
+
+// CLOAD ( hash62 -- noun )  load+cue; 0 if missing
+defcode "CLOAD", 5, cold_load_word, 0
+    ldr     x0, [DSP]
+    bl      cold_load
+    str     x0, [DSP]
+    NEXT
+
+// LOGEV ( noun -- )  append jammed event to log
+defcode "LOGEV", 5, cold_logev, 0
+    ldr     x0, [DSP], #8
+    bl      cold_log
+    NEXT
+
+// LOGLEN ( -- n )
+defcode "LOGLEN", 6, cold_loglen, 0
+    bl      cold_log_len
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// LOG@ ( i -- noun )  log entry i; 0 if OOB
+defcode "LOG@", 4, cold_logat, 0
+    ldr     x0, [DSP]
+    bl      cold_log_at
+    str     x0, [DSP]
+    NEXT
+
+// SNAP! ( noun -- )  save snapshot root
+defcode "SNAP!", 5, cold_snap_store, 0
+    ldr     x0, [DSP], #8
+    bl      cold_snap_save
+    NEXT
+
+// SNAP@ ( -- noun )  load snapshot; 0 if none
+defcode "SNAP@", 5, cold_snap_fetch, 0
+    bl      cold_snap_load
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// ── Phase 6 — cooperative kernel hot-swap ─────────────────────────────────
+
+// KVER@ ( -- u )  live kernel version
+defcode "KVER@", 5, kver_fetch, 0
+    bl      swap_live_version
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// PVER@ ( -- u )  version from last pill_load header (bytes 9-12)
+defcode "PVER@", 5, pver_fetch, 0
+    ldr     x0, =noun_pill_version
+    ldr     w0, [x0]
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// STAGE ( noun shape ver -- )  stage a kernel swap (does not apply)
+defcode "STAGE", 5, swap_stage_word, 0
+    ldr     x2, [DSP], #8           // ver
+    ldr     x1, [DSP], #8           // shape
+    ldr     x0, [DSP], #8           // noun
+    // swap_stage(kernel, shape, version): x0, x1, x2 — already correct
+    bl      swap_stage
+    NEXT
+
+// HSWAP ( -- f )  request apply at safe point; true if applied now
+defcode "HSWAP", 5, hswap_word, 0
+    bl      swap_request
+    cmp     x0, #0
+    csetm   x0, ne
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// HSTAT ( -- n )  0=idle 1=staged 2=pending
+defcode "HSTAT", 5, hstat_word, 0
+    bl      swap_status
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// HCAN ( -- )  cancel staged/pending swap
+defcode "HCAN", 4, hcan_word, 0
+    bl      swap_cancel
+    NEXT
+
+// SAPPLY ( -- f )  try apply once (tests / manual safe-point)
+defcode "SAPPLY", 6, sapply_word, 0
+    bl      swap_apply_if_ready
+    cmp     x0, #0
+    csetm   x0, ne
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// ── Phase 7 — observability (trace / WDT / canary) ────────────────────────
+
+// TON ( -- )  enable tracing
+defcode "TON", 3, ton, 0
+    mov     x0, #1
+    bl      trace_enable
+    NEXT
+
+// TOFF ( -- )  disable tracing
+defcode "TOFF", 4, toff, 0
+    mov     x0, #0
+    bl      trace_enable
+    NEXT
+
+// TCLR ( -- )  clear trace ring
+defcode "TCLR", 4, tclr, 0
+    bl      trace_clear
+    NEXT
+
+// TREC ( tag data -- )  manual record if enabled
+defcode "TREC", 4, trec, 0
+    ldr     x1, [DSP], #8           // data
+    ldr     x0, [DSP], #8           // tag
+    bl      trace_rec
+    NEXT
+
+// TLEN ( -- n )
+defcode "TLEN", 4, tlen, 0
+    bl      trace_len
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// TLAST@ ( -- tag data )  last record; 0 0 if empty
+defcode "TLAST@", 6, tlast, 0
+    sub     sp, sp, #16
+    add     x0, sp, #0              // &tag
+    add     x1, sp, #8              // &data
+    bl      trace_last
+    cbz     x0, 1f
+    ldr     w2, [sp]                // tag
+    ldr     w3, [sp, #8]            // data
+    str     x2, [DSP, #-8]!
+    str     x3, [DSP, #-8]!
+    add     sp, sp, #16
+    NEXT
+1:  str     xzr, [DSP, #-8]!
+    str     xzr, [DSP, #-8]!
+    add     sp, sp, #16
+    NEXT
+
+// WDT! ( period -- )  set software WDT period in ticks; 0 = off
+defcode "WDT!", 4, wdt_store, 0
+    ldr     x0, [DSP], #8
+    bl      wdt_set
+    NEXT
+
+// WDTK ( -- )  kick WDT
+defcode "WDTK", 4, wdt_kick_word, 0
+    bl      wdt_kick
+    NEXT
+
+// WDT? ( -- f )  true if expired (records T_WDT and re-kicks)
+defcode "WDT?", 4, wdt_q, 0
+    bl      wdt_check
+    cmp     x0, #0
+    csetm   x0, ne
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// CANARY? ( -- f )  stack canary intact?
+defcode "CANARY?", 7, canary_q, 0
+    bl      canary_ok
+    cmp     x0, #0
+    csetm   x0, ne
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// ── Phase 8 — networking stubs ────────────────────────────────────────────
+
+// NLOOP ( f -- )  loopback on (-1) / off (0)
+defcode "NLOOP", 5, nloop, 0
+    ldr     x0, [DSP], #8
+    cmp     x0, #0
+    cset    x0, ne
+    bl      net_set_loopback
+    NEXT
+
+// NSTAT ( fam -- n )  TX count; fam 0=eth 1=mb 2=can
+defcode "NSTAT", 5, nstat, 0
+    ldr     x0, [DSP]
+    bl      net_stat_tx
+    str     x0, [DSP]
+    NEXT
+
+// NRX@ ( fam -- n )  RX (loopback inject) count
+defcode "NRX@", 4, nrx_fetch, 0
+    ldr     x0, [DSP]
+    bl      net_stat_rx
+    str     x0, [DSP]
+    NEXT
+
+// NCLR ( -- )  clear net stats
+defcode "NCLR", 4, nclr, 0
+    bl      net_stats_clear
+    NEXT
+
+// ETX ( frame -- )  emit %etx effect via DO-FX path
+defcode "ETX", 3, etx_word, 0
+    ldr     x0, [DSP], #8
+    bl      net_handle_etx
+    NEXT
+
+// MTX ( pdu -- )  emit %mtx
+defcode "MTX", 3, mtx_word, 0
+    ldr     x0, [DSP], #8
+    bl      net_handle_mtx
+    NEXT
+
+// CTX ( id data -- )  emit %ctx with [id data]
+defcode "CTX", 3, ctx_word, 0
+    ldr     x1, [DSP], #8           // data
+    ldr     x0, [DSP], #8           // id
+    // alloc_cell(id, data) then net_handle_ctx
+    bl      alloc_cell              // x0=head id, x1=tail data — AAPCS
+    bl      net_handle_ctx
+    NEXT
+
+// ── Phase 2 — cooperative FIFO event queue ────────────────────────────────
+// Queue lives in kernel.c (g_evq).  Head = next event.  ENQ appends.
+
+// ENQ ( event -- )  append event noun to FIFO
+defcode "ENQ", 3, enq, 0
+    ldr     x0, [DSP], #8
+    bl      evq_enq
+    NEXT
+
+// ENQL ( list -- )  append each element of a Nock list [e0 e1 ... 0]
+defcode "ENQL", 4, enql, 0
+    ldr     x0, [DSP], #8
+    bl      evq_enq_list
+    NEXT
+
+// DEQ ( -- event true | false )
+//   Pop head.  true = -1.  Empty → single 0.
+defcode "DEQ", 3, deq, 0
+    sub     sp, sp, #16
+    mov     x0, sp
+    bl      evq_deq                 // x0 = 1 if ok
+    cbz     x0, 1f
+    ldr     x1, [sp]                // event
+    str     x1, [DSP, #-8]!
+    mov     x0, #-1                 // true
+    str     x0, [DSP, #-8]!
+    add     sp, sp, #16
+    NEXT
+1:  str     xzr, [DSP, #-8]!        // false
+    add     sp, sp, #16
+    NEXT
+
+// QPEEK ( -- event true | false )  look at head without removing
+defcode "QPEEK", 5, qpeek, 0
+    sub     sp, sp, #16
+    mov     x0, sp
+    bl      evq_peek
+    cbz     x0, 1f
+    ldr     x1, [sp]
+    str     x1, [DSP, #-8]!
+    mov     x0, #-1
+    str     x0, [DSP, #-8]!
+    add     sp, sp, #16
+    NEXT
+1:  str     xzr, [DSP, #-8]!
+    add     sp, sp, #16
+    NEXT
+
+// QCLR ( -- )  empty the queue
+defcode "QCLR", 4, qclr, 0
+    bl      evq_clear
+    NEXT
+
+// QLEN ( -- n )  number of queued events
+defcode "QLEN", 4, qlen, 0
+    bl      evq_len
+    str     x0, [DSP, #-8]!
     NEXT
 
 // ALOOP ( kernel -- )   Arvo-shaped kernel event loop, never returns
@@ -2833,6 +3244,27 @@ str_bench_def:
     .ascii  ": BENCH TIMER@ ROT ROT BEGIN OVER EXECUTE 1 - DUP 0 = UNTIL DROP DROP TIMER@ SWAP - ;"
 str_bench_def_end:
 
+// W/DL ( xt rel -- )  WITH-DEADLINE: arm absolute = now+rel, run xt,
+// emit %timeout on expiry, always disarm.
+str_wdl_def:
+    .ascii  ": W/DL TIMER@ + DL! EXECUTE TMOUT? IF ETOUT THEN 0 DL! ;"
+str_wdl_def_end:
+
+// IFILL ( -- )  push 63 codes into IRQ ring (fills to capacity).
+str_ifill_def:
+    .ascii  ": IFILL 0 BEGIN DUP 63 < WHILE DUP IRQP DROP 1+ REPEAT DROP ;"
+str_ifill_def_end:
+
+// BUSY ( -- )  short spin for multi-core tests (let secondaries run).
+str_busy_def:
+    .ascii  ": BUSY 0 BEGIN 1+ DUP 200000 = UNTIL DROP ;"
+str_busy_def_end:
+
+// MFILL ( -- )  fill core-1 mailbox to capacity (15 messages).
+str_mfill_def:
+    .ascii  ": MFILL 0 BEGIN DUP 15 < WHILE DUP 1 CSEND DROP 1+ REPEAT DROP ;"
+str_mfill_def_end:
+
 // ═════════════════════════════════════════════════════════════════════════════
 // COLD START
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2877,6 +3309,28 @@ forth_main:
     // BENCH: ( xt n -- cycles ) — execute xt n times, return elapsed CNTVCT ticks.
     ldr     x0, =str_bench_def
     ldr     x1, =str_bench_def_end
+    sub     x1, x1, x0
+    bl      forth_eval_string
+
+    // W/DL: ( xt rel -- ) — run xt under a relative deadline
+    ldr     x0, =str_wdl_def
+    ldr     x1, =str_wdl_def_end
+    sub     x1, x1, x0
+    bl      forth_eval_string
+
+    // IFILL: fill IRQ ring to capacity (63)
+    ldr     x0, =str_ifill_def
+    ldr     x1, =str_ifill_def_end
+    sub     x1, x1, x0
+    bl      forth_eval_string
+
+    // BUSY / MFILL: multi-core test helpers
+    ldr     x0, =str_busy_def
+    ldr     x1, =str_busy_def_end
+    sub     x1, x1, x0
+    bl      forth_eval_string
+    ldr     x0, =str_mfill_def
+    ldr     x1, =str_mfill_def_end
     sub     x1, x1, x0
     bl      forth_eval_string
 

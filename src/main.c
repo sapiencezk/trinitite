@@ -2,6 +2,7 @@
 #include "uart.h"
 #include "memory.h"
 #include "noun.h"
+#include "cold.h"
 
 extern void forth_main(void);
 
@@ -12,6 +13,7 @@ void main(void) {
     *(volatile uint32_t*)DSTACK_GUARD = STACK_CANARY;
 
     noun_heap_init();
+    cold_init();
 
     forth_main();   /* never returns */
 }

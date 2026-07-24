@@ -77,3 +77,21 @@
  */
 #define UART_RXBUF_BASE  0x00089100
 #define UART_RXBUF_SIZE  0x00006F00
+
+/*
+ * Phase 4 — secondary core C stacks (between atom store and PILL).
+ * Grow down from TOP. Core 0 keeps the boot stack below 0x80000.
+ */
+#define NCORES              4
+#define CORE_STACK_SIZE     0x4000      /* 16 KB each */
+#define CORE1_STACK_TOP     0x07004000
+#define CORE2_STACK_TOP     0x07008000
+#define CORE3_STACK_TOP     0x0700C000
+
+/*
+ * Phase 5 — RAM-backed cold store (content-addressed jam blobs).
+ * Between core stacks and PILL.  SD backend can replace cold_read/write later.
+ */
+#define COLD_BASE           0x07100000
+#define COLD_SIZE           0x00800000  /* 8 MB */
+#define COLD_TOP            (COLD_BASE + COLD_SIZE)

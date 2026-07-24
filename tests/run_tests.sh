@@ -1026,6 +1026,273 @@ T "9g: BENCH returns ticks>0" "FFFFFFFFFFFFFFFF" \
 T "9g: SKNOCK cached formula" "000000000000002A" \
     "0 N>N  1 N>N 42 N>N CONS  SKNOCK  NOUN> ."
 
+# ── Phase 1 industrial — timing foundation ────────────────────────────────
+# TFREQ@, DL!/DL@, TMOUT?, ELAPS@, W/DL, ETOUT / %timeout via DO-FX.
+# Cooperative only; Nock evaluator untouched.
+
+# TFREQ@ reads CNTFRQ_EL0 (non-zero on QEMU/RPi)
+T "t1: TFREQ@ non-zero" "FFFFFFFFFFFFFFFF" \
+    "TFREQ@ 0 > ."
+
+# Disarmed deadline never expires
+T "t1: TMOUT? clear" "0000000000000000" \
+    "0 DL!  TMOUT? ."
+
+# Deadline in the past is expired
+T "t1: TMOUT? past" "FFFFFFFFFFFFFFFF" \
+    "TIMER@ 1 - DL!  TMOUT? ."
+
+# DL@ returns what DL! stored
+T "t1: DL@ roundtrip" "000000000000007B" \
+    "123 DL!  DL@ ."
+
+# ELAPS@ is non-negative (delta from a prior TIMER@ read)
+T "t1: ELAPS@ >= 0" "FFFFFFFFFFFFFFFF" \
+    "TIMER@ ELAPS@  0 >= ."
+
+# W/DL with huge relative budget: NOOP finishes, deadline disarmed after
+T "t1: W/DL no timeout" "0000000000000000" \
+    "' NOOP  1000000000  W/DL  TMOUT? ."
+
+# W/DL with rel=0: deadline = now; after EXECUTE, TMOUT? was true so ETOUT ran;
+# always ends with DL disarmed
+T "t1: W/DL timeout disarms" "0000000000000000" \
+    "' NOOP  0  W/DL  DL@ ."
+
+# %timeout effect via DO-FX (construct [[tag 0] 0]); may print "timeout" on UART
+T "t1: DO-FX %timeout" "0000000000000001" \
+    "32780218601924980 >NOUN  0 >NOUN CONS  0 >NOUN CONS  DO-FX  1 ."
+
+# ETOUT is a no-crash shortcut for the same effect
+T "t1: ETOUT" "0000000000000001" \
+    "ETOUT  1 ."
+
+# ── Phase 2 industrial — cooperative FIFO event queue ─────────────────────
+# ENQ/DEQ/QPEEK/QCLR/QLEN/ENQL.  Shared by Arvo+Shrine kernel loops.
+# Shrine causes append via ENQL (not replace).  Nock untouched.
+
+T "t2: empty DEQ" "0000000000000000" \
+    "QCLR  DEQ ."
+
+T "t2: ENQ DEQ roundtrip" "000000000000002A" \
+    "QCLR  42 ENQ  DEQ DROP ."
+
+T "t2: FIFO first" "0000000000000001" \
+    "QCLR  1 ENQ  2 ENQ  3 ENQ  DEQ DROP ."
+
+T "t2: FIFO second" "0000000000000002" \
+    "DEQ DROP ."
+
+T "t2: FIFO third" "0000000000000003" \
+    "DEQ DROP ."
+
+T "t2: empty after drain" "0000000000000000" \
+    "DEQ ."
+
+T "t2: QPEEK value" "000000000000002A" \
+    "QCLR  42 ENQ  QPEEK DROP ."
+
+T "t2: QPEEK keeps" "000000000000002A" \
+    "DEQ DROP ."
+
+T "t2: QLEN" "0000000000000002" \
+    "QCLR  1 ENQ  2 ENQ  QLEN ."
+
+T "t2: QCLR" "0000000000000000" \
+    "QCLR  QLEN ."
+
+# ENQL: list [1 [2 0]] → deq 1 then 2
+T "t2: ENQL first" "0000000000000001" \
+    "QCLR  1 >NOUN  2 >NOUN  0 >NOUN CONS CONS  ENQL  DEQ DROP NOUN> ."
+
+T "t2: ENQL second" "0000000000000002" \
+    "DEQ DROP NOUN> ."
+
+# ── Phase 3 industrial — MMIO + effects + IRQ ring ────────────────────────
+# MMIO@/MMIO! 32-bit.  Effects: %mmio %tmrarm %tmrcan %irq.
+# IRQ ring: IRQP inject, IRQDRN → ENQ.  No GIC.  Nock untouched.
+# Cords: mmio=1869180269 tmrarm=120338028588404 tmrcan=121364559326580 irq=7434857
+# UART_FR = 0xFE201018 = 4263514136
+
+# Read PL011 flag register (should not crash; value is a 32-bit word)
+T "t3: MMIO@ UART_FR" "FFFFFFFFFFFFFFFF" \
+    "4263514136 MMIO@  4294967296 < ."
+
+# Scratch RAM round-trip via MMIO!
+T "t3: MMIO! scratch" "000000000000BEEF" \
+    "48879 MSCR MMIO!  MSCR MMIO@ ."
+
+# %mmio effect writes scratch: [[%mmio [addr val]] 0]
+T "t3: DO-FX %mmio" "000000000000DEAD" \
+    "MSCR  57005 CONS  1869180269 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  MSCR MMIO@ ."
+
+# %tmrarm with past absolute deadline → TMOUT?
+T "t3: %tmrarm expires" "FFFFFFFFFFFFFFFF" \
+    "TIMER@ 1 -  120338028588404 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  TMOUT? ."
+
+# %tmrcan disarms
+T "t3: %tmrcan clears" "0000000000000000" \
+    "TIMER@ 1 - DL!  121364559326580 >NOUN  0 >NOUN CONS  0 >NOUN CONS  DO-FX  TMOUT? ."
+
+# %irq enqueues event noun
+T "t3: %irq ENQ" "0000000000000007" \
+    "QCLR  7434857 >NOUN  7 >NOUN CONS  0 >NOUN CONS  DO-FX  DEQ DROP ."
+
+# IRQP + IRQDRN → event queue
+T "t3: IRQP drain" "000000000000002A" \
+    "QCLR  42 IRQP DROP  IRQDRN  DEQ DROP ."
+
+# Ring full: capacity 63; IFILL fills; next push fails; then clear
+T "t3: IRQP full" "0000000000000000" \
+    "IRQC  IFILL  99 IRQP  IRQC ."
+
+# ── Phase 4 industrial — multi-core bring-up ──────────────────────────────
+# Core 0 = Forth/Nock. Cores 1–3 = C workers + mailboxes. No Nock on 1–3.
+# Words: CID@ CSTART CSTOP CSEND CHB@  helpers: BUSY MFILL
+
+T "t4: CID@ is 0" "0000000000000000" \
+    "CID@ ."
+
+# Start core 1, send one message, wait, heartbeat > 0
+T "t4: core1 heartbeat" "FFFFFFFFFFFFFFFF" \
+    "1 CSTOP  1 CSTART  1 1 CSEND DROP  BUSY  BUSY  1 CHB@  0 > ."
+
+# Mailbox full: 15 ok, 16th fails (core stopped so it does not drain)
+T "t4: mbox full" "0000000000000000" \
+    "1 CSTOP  MFILL  99 1 CSEND ."
+
+# Core 2 smoke
+T "t4: core2 heartbeat" "FFFFFFFFFFFFFFFF" \
+    "2 CSTOP  2 CSTART  7 2 CSEND DROP  BUSY  BUSY  2 CHB@  0 > ."
+
+# Core 3 smoke
+T "t4: core3 heartbeat" "FFFFFFFFFFFFFFFF" \
+    "3 CSTOP  3 CSTART  3 3 CSEND DROP  BUSY  BUSY  3 CHB@  0 > ."
+
+# Stop: after CSTOP, queued work may still drain once started; clear by
+# stop, start (clears HB), stop without send → HB stays 0
+T "t4: stop clears path" "0000000000000000" \
+    "1 CSTOP  1 CSTART  1 CSTOP  BUSY  1 CHB@ ."
+
+# ── Phase 5 industrial — RAM cold store ───────────────────────────────────
+# CFMT CSTOR CLOAD LOGEV LOGLEN LOG@ SNAP! SNAP@
+# Content-addressed jam blobs in COLD_BASE (8MB RAM). No SD. Nock untouched.
+
+T "t5: format empty snap" "0000000000000000" \
+    "CFMT  SNAP@ ."
+
+T "t5: store load atom" "000000000000002A" \
+    "CFMT  42 >NOUN CSTOR  CLOAD  NOUN> ."
+
+T "t5: store load cell" "FFFFFFFFFFFFFFFF" \
+    "CFMT  1 >NOUN 2 >NOUN CONS  DUP CSTOR  CLOAD  =NOUN ."
+
+T "t5: idempotent hash" "FFFFFFFFFFFFFFFF" \
+    "CFMT  99 >NOUN  DUP CSTOR  SWAP CSTOR  = ."
+
+T "t5: missing load" "0000000000000000" \
+    "CFMT  12345 CLOAD ."
+
+T "t5: log length" "0000000000000003" \
+    "CFMT  1 >NOUN LOGEV  2 >NOUN LOGEV  3 >NOUN LOGEV  LOGLEN ."
+
+T "t5: log order" "0000000000000014" \
+    "CFMT  10 >NOUN LOGEV  20 >NOUN LOGEV  1 LOG@ NOUN> ."
+
+T "t5: snap roundtrip" "0000000000000064" \
+    "CFMT  100 >NOUN SNAP!  SNAP@ NOUN> ."
+
+# ── Phase 6 industrial — live update / hot-swap ───────────────────────────
+# STAGE HSWAP HSTAT HCAN KVER@ PVER@ SAPPLY  %swapped effect
+# Cooperative: apply when event queue empty. REPL applies immediately.
+
+T "t6: KVER@ initial" "0000000000000000" \
+    "KVER@ ."
+
+T "t6: stage hstat" "0000000000000001" \
+    "HCAN  0 >NOUN  0  7 STAGE  HSTAT ."
+
+T "t6: hswap applies" "0000000000000007" \
+    "HCAN  0 >NOUN  0  7 STAGE  HSWAP DROP  KVER@ ."
+
+T "t6: hswap flag true" "FFFFFFFFFFFFFFFF" \
+    "HCAN  0 >NOUN  0  3 STAGE  HSWAP ."
+
+T "t6: cancel" "0000000000000000" \
+    "HCAN  0 >NOUN  0  9 STAGE  HCAN  HSTAT ."
+
+T "t6: sapply after pending" "0000000000000005" \
+    "HCAN  QCLR  0 >NOUN  0  5 STAGE  HSWAP DROP  KVER@ ."
+
+# %swapped cord = 28259031267243891
+T "t6: DO-FX %swapped" "0000000000000001" \
+    "28259031267243891 >NOUN  1 >NOUN CONS  0 >NOUN CONS  DO-FX  1 ."
+
+T "t6: PVER@ defined" "FFFFFFFFFFFFFFFF" \
+    "PVER@  0 >= ."
+
+# ── Phase 7 industrial — observability & hardening ────────────────────────
+# TON TOFF TCLR TREC TLEN TLAST@  WDT! WDTK WDT?  CANARY?
+# Soft WDT + trace ring. No GIC/MPU. Nock untouched.
+
+T "t7: canary ok" "FFFFFFFFFFFFFFFF" \
+    "CANARY? ."
+
+T "t7: trace off silent" "0000000000000000" \
+    "TOFF  TCLR  1 42 TREC  TLEN ."
+
+T "t7: trace on rec" "0000000000000001" \
+    "TON  TCLR  1 42 TREC  TLEN ."
+
+T "t7: TLAST@ data" "000000000000002A" \
+    "TON  TCLR  1 42 TREC  TLAST@  SWAP DROP ."
+
+T "t7: TLAST@ tag" "0000000000000001" \
+    "TON  TCLR  1 42 TREC  TLAST@  DROP ."
+
+T "t7: TCLR" "0000000000000000" \
+    "TON  TCLR  1 1 TREC  TCLR  TLEN ."
+
+# WDT period 1 tick: after a short spin, WDT? should fire
+T "t7: WDT? fires" "FFFFFFFFFFFFFFFF" \
+    "TON  TCLR  1 WDT!  BUSY  WDT? ."
+
+T "t7: WDT off" "0000000000000000" \
+    "0 WDT!  WDT? ."
+
+# %wdt cord = 7627895
+T "t7: DO-FX %wdt" "0000000000000001" \
+    "7627895 >NOUN  0 >NOUN CONS  0 >NOUN CONS  DO-FX  1 ."
+
+# ── Phase 8 industrial — networking stubs ─────────────────────────────────
+# ETX/MTX/CTX + loopback → ENQ as %erx/%mrx/%crx. No real NIC.
+# Cords: etx=7894117 erx=7893605 mtx=7894125 mrx=7893613 ctx=7894115 crx=7893603
+
+T "t8: etx loopback tag" "0000000000787265" \
+    "QCLR NCLR  -1 NLOOP  42 >NOUN ETX  DEQ DROP  CAR NOUN> ."
+
+T "t8: etx loopback data" "000000000000002A" \
+    "QCLR NCLR  -1 NLOOP  42 >NOUN ETX  DEQ DROP  CDR NOUN> ."
+
+T "t8: etx tx count" "0000000000000001" \
+    "NCLR  -1 NLOOP  1 >NOUN ETX  0 NSTAT ."
+
+T "t8: etx rx count" "0000000000000001" \
+    "NCLR  -1 NLOOP  1 >NOUN ETX  0 NRX@ ."
+
+T "t8: loopback off" "0000000000000000" \
+    "QCLR NCLR  0 NLOOP  1 >NOUN ETX  DEQ ."
+
+T "t8: mtx loopback" "0000000000000063" \
+    "QCLR NCLR  -1 NLOOP  99 >NOUN MTX  DEQ DROP  CDR NOUN> ."
+
+T "t8: ctx loopback id" "0000000000000007" \
+    "QCLR NCLR  -1 NLOOP  7 >NOUN  8 >NOUN CTX  DEQ DROP  CDR CAR NOUN> ."
+
+# DO-FX %etx through effect dispatch
+T "t8: DO-FX %etx" "0000000000000001" \
+    "QCLR NCLR  -1 NLOOP  7894117 >NOUN  5 >NOUN CONS  0 >NOUN CONS  DO-FX  0 NSTAT ."
+
 # ── Crash Recovery Hardening ───────────────────────────────────────────────
 # Each BEFORE triggers a nock_crash → longjmp, the T after verifies the REPL
 # recovers cleanly. Covers all nock_crash() sites in nock.c.
@@ -1338,8 +1605,15 @@ while [[ $bi -lt ${#BEFORE_LINES[@]} ]]; do
     (( ++bi ))
 done
 
+# macOS Homebrew coreutils ships gtimeout; Linux has timeout.
+TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
+if [[ -z "$TIMEOUT_BIN" ]]; then
+    echo "ERROR: need timeout or gtimeout (brew install coreutils)" >&2
+    exit 1
+fi
+
 RAW=$({ printf '%s\n' "$INPUT"; sleep 5; printf '\001x'; } | \
-    timeout 60 qemu-system-aarch64 -machine raspi4b -m 2G -kernel kernel8.img \
+    "$TIMEOUT_BIN" 60 qemu-system-aarch64 -machine raspi4b -m 2G -kernel kernel8.img \
         -display none -nographic || true)
 
 # Extract results from output lines.

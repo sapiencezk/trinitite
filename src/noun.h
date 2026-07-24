@@ -107,4 +107,5 @@ atom_t *atom_store_get(uint64_t hash62);
    Returns 0 (C null) if no pill is present; otherwise a valid tagged noun.
    CUE the result to decode. */
 extern int noun_pill_shape;
+extern uint32_t noun_pill_version;  /* PILL v2 bytes 9-12 LE; 0 if unversioned */
 noun  pill_load(void);

@@ -1,26 +1,56 @@
 #pragma once
+#include <stdint.h>
 #include "noun.h"
 
 /*
- * Phase 6 — Kernel Loop helpers.
+ * Kernel loop + industrial Phases 1–6.
  *
- * uart_recv_noun: read a length-framed cue-decoded noun from UART.
- *   Wire format: [8-byte LE length][raw jam bytes]
+ * Effects: walk [[tag data] rest]. Known tags (cords, LSB-first ASCII):
+ *   %out %blit %timeout %mmio %tmrarm %tmrcan %irq
+ *   %swapped  28259031267243891  data = version atom
+ *   %wdt      7627895            software watchdog fired
+ *   %etx/%mtx/%ctx  net stubs (see net.h); loopback → evq RX events
  *
- * uart_send_noun: jam a noun and write it length-framed to UART.
- *
- * dispatch_effects: walk a Nock effect list [[tag data] rest] and
- *   dispatch known tags to UART.  Unknown tags are silently ignored.
- *   Phase 6 tags:
- *     %out  (7632239)   — uart output of data atom as raw bytes
- *     %blit (1953066082) — same
- *
- * arvo_loop / shrine_loop: enter the respective kernel event loop.
- *   Both never return.  On nock crash: print error, continue loop.
+ * Phase 6 hot-swap: STAGE + HSWAP at cooperative safe points (empty evq).
+ * Phase 7: trace ring + soft WDT + canary (see trace.h).
+ * Phase 8: networking stubs (see net.h).
+ * arvo_loop / shrine_loop: never return.
  */
 
 noun uart_recv_noun(void);
 void uart_send_noun(noun n);
 void dispatch_effects(noun effects);
-void arvo_loop(noun kernel);     /* never returns */
-void shrine_loop(noun kernel);   /* never returns */
+void arvo_loop(noun kernel);
+void shrine_loop(noun kernel);
+
+/* Phase 1 — deadline */
+void     deadline_set(uint64_t abs);
+uint64_t deadline_get(void);
+int      deadline_expired(void);
+void     emit_timeout(uint64_t elapsed);
+
+/* Phase 2 — event queue */
+void     evq_enq(noun event);
+int      evq_deq(noun *out);
+int      evq_peek(noun *out);
+void     evq_clear(void);
+uint64_t evq_len(void);
+void     evq_enq_list(noun list);
+
+/* Phase 3 — MMIO (32-bit) */
+uint32_t mmio_read32(uint64_t addr);
+void     mmio_write32(uint64_t addr, uint32_t val);
+uint64_t mmio_scratch_addr(void);   /* RAM scratch for tests */
+
+/* Phase 3 — IRQ ring (SPSC, single-core; no GIC yet) */
+int  irq_ring_push(uint64_t code);  /* 1 ok, 0 full */
+void irq_ring_drain(void);          /* pop all → evq_enq(direct(code)) */
+void irq_ring_clear(void);
+
+/* Phase 6 — cooperative kernel hot-swap */
+void     swap_stage(noun kernel, int shape, uint32_t version);
+int      swap_request(void);          /* arm pending; try apply; 1 if applied */
+int      swap_apply_if_ready(void);   /* 1 if applied this call */
+void     swap_cancel(void);
+uint32_t swap_live_version(void);
+int      swap_status(void);           /* 0 idle, 1 staged, 2 pending */

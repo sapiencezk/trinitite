@@ -552,6 +552,186 @@ regression suite).
 
 ---
 
+## Industrial Runtime Roadmap (post PoC)
+
+Guiding principle: keep it dumb and simple. Pure Nock stays untouched; new
+capability lives in Forth, effect dispatch, and cooperative kernel shells.
+
+### Industrial Phase 1 — Timing Foundation
+
+**STATUS: COMPLETE**
+
+| Word | Stack | Description |
+|------|-------|-------------|
+| `TIMER@` | `( -- u )` | `CNTVCT_EL0` (existing) |
+| `TFREQ@` | `( -- u )` | `CNTFRQ_EL0` (Hz) |
+| `DL!` | `( abs -- )` | set absolute deadline; `0` disarms |
+| `DL@` | `( -- abs )` | get deadline |
+| `TMOUT?` | `( -- f )` | armed and now ≥ deadline? |
+| `ELAPS@` | `( start -- u )` | `TIMER@ - start` |
+| `ETOUT` | `( -- )` | emit `[%timeout 0]` effect |
+| `W/DL` | `( xt rel -- )` | run `xt` under relative deadline; ETOUT if late; always disarm |
+| `BENCH` | `( xt n -- cycles )` | existing |
+
+- One global absolute deadline (`g_deadline` in `kernel.c`); shared by Forth and kernel loops.
+- Cooperative check **after** `nock()` in `arvo_loop` / `shrine_loop`: on expiry, emit `%timeout`, disarm, **do not commit** kernel.
+- `%timeout` cord = `32780218601924980` (`"timeout"`); dispatch prints `timeout\r\n`.
+- No longjmp for timeout, no cycle budgets, no Nock changes.
+
+### Industrial Phase 2 — Cooperative Multi-Event Scheduler
+
+**STATUS: COMPLETE**
+
+FIFO of event nouns (Nock list). Kernel: DEQ or UART → nock → DO-FX →
+append Shrine causes. No EDF, no priority bands, no preemption.
+
+| Word | Stack | Description |
+|------|-------|-------------|
+| `ENQ` | `( event -- )` | append event to FIFO |
+| `ENQL` | `( list -- )` | append each element of a Nock list |
+| `DEQ` | `( -- event true \| false )` | pop head |
+| `QPEEK` | `( -- event true \| false )` | look at head |
+| `QCLR` | `( -- )` | empty queue |
+| `QLEN` | `( -- n )` | queue length |
+
+- Shared `g_evq` in `kernel.c`; Arvo and Shrine use one `kernel_loop()`.
+- Shrine causes **append** (fixes prior replace-only bug).
+- Crash recovery clears the queue.
+- Phase 1 deadline still checked after each `nock()`; queue retained on timeout.
+
+### Industrial Phase 3 — Effect Framework & Hardware Abstraction
+
+**STATUS: COMPLETE**
+
+| Word | Stack | Description |
+|------|-------|-------------|
+| `MMIO@` | `( addr -- u )` | 32-bit physical load |
+| `MMIO!` | `( u addr -- )` | 32-bit physical store |
+| `MSCR` | `( -- addr )` | RAM scratch for tests |
+| `IRQP` | `( code -- f )` | push IRQ ring; true if accepted |
+| `IRQDRN` | `( -- )` | drain ring → event queue |
+| `IRQC` | `( -- )` | clear IRQ ring |
+| `IFILL` | `( -- )` | fill ring to capacity (bootstrap colon) |
+
+| Effect | Cord | Data | Action |
+|--------|------|------|--------|
+| `%mmio` | 1869180269 | `[addr val]` | `mmio_write32` |
+| `%tmrarm` | 120338028588404 | abs ticks | `deadline_set` |
+| `%tmrcan` | 121364559326580 | ignored | disarm deadline |
+| `%irq` | 7434857 | event noun | `evq_enq` |
+
+- SPSC IRQ ring (64 slots, cap 63); no GIC / no real IRQ handlers yet.
+- Kernel drains ring before DEQ/UART each loop.
+- Existing `%out` `%blit` `%timeout` unchanged.
+- Nock evaluator untouched. GPIO/I2C/SPI/PWM drivers deferred.
+
+### Industrial Phase 4 — Multi-Core Bring-up
+
+**STATUS: COMPLETE**
+
+| Word | Stack | Description |
+|------|-------|-------------|
+| `CID@` | `( -- n )` | this core id (`0` on REPL) |
+| `CSTART` | `( n -- )` | start worker core n (1–3); clears heartbeat |
+| `CSTOP` | `( n -- )` | cooperative stop |
+| `CSEND` | `( code n -- f )` | push code to core n mailbox |
+| `CHB@` | `( n -- u )` | heartbeat (messages processed) |
+| `BUSY` | `( -- )` | spin helper for tests |
+| `MFILL` | `( -- )` | fill core-1 mailbox to capacity |
+
+- Cores 1–3: private 16KB stacks at `0x07004000`+; SPSC mailbox (cap 15).
+- Worker: any message → `heartbeat++`. No Nock/Forth/heap on secondaries.
+- Boot: core 0 zeros BSS, sets `cores_ready`, `SEV`; secondaries wait then park/run.
+- Core 0 remains sole owner of Forth, Nock, UART, event queue.
+
+### Industrial Phase 5 — Persistence (RAM cold store)
+
+**STATUS: COMPLETE** (RAM backend; SD is a later drop-in)
+
+| Word | Stack | Description |
+|------|-------|-------------|
+| `CFMT` | `( -- )` | wipe + format cold region |
+| `CSTOR` | `( noun -- hash62 )` | jam, BLAKE3, append blob |
+| `CLOAD` | `( hash62 -- noun )` | load+cue; `0` if missing |
+| `LOGEV` | `( noun -- )` | append log event |
+| `LOGLEN` | `( -- n )` | log entry count |
+| `LOG@` | `( i -- noun )` | log entry i |
+| `SNAP!` | `( noun -- )` | save snapshot root |
+| `SNAP@` | `( -- noun )` | load snapshot; `0` if none |
+
+- Region: `COLD_BASE` `0x07100000`, 8 MB, append-only objects after 4K superblock.
+- Content-addressed; store is idempotent on hash match.
+- Backend = memcpy; `cold_read`/`cold_write` swap for SD later without API change.
+- No auto boot restore; no Nock changes.
+
+### Industrial Phase 6 — Live Update Safety
+
+**STATUS: COMPLETE**
+
+| Word | Stack | Description |
+|------|-------|-------------|
+| `KVER@` | `( -- u )` | live kernel version |
+| `PVER@` | `( -- u )` | version from last pill header |
+| `STAGE` | `( noun shape ver -- )` | stage swap (no apply) |
+| `HSWAP` | `( -- f )` | request apply; true if applied now |
+| `HSTAT` | `( -- n )` | 0 idle / 1 staged / 2 pending |
+| `HCAN` | `( -- )` | cancel staged/pending |
+| `SAPPLY` | `( -- f )` | try apply once (empty queue) |
+
+- Swaps **kernel noun + shape + version** only (not full dict).
+- Safe point: top of `kernel_loop` when event queue empty; REPL applies immediately.
+- On apply: `ska_cache_clear()`, emit `%swapped` (cord `28259031267243891`).
+- PILL v2 bytes 9–12 = uint32 LE version (`mkpill.py --version N`).
+- Jets remain live-patchable via existing dict / `%tame`.
+
+### Industrial Phase 7 — Observability & Hardening
+
+**STATUS: COMPLETE**
+
+| Word | Stack | Description |
+|------|-------|-------------|
+| `TON` / `TOFF` | `( -- )` | enable / disable trace |
+| `TCLR` | `( -- )` | clear ring |
+| `TREC` | `( tag data -- )` | manual record if on |
+| `TLEN` | `( -- n )` | pending records |
+| `TLAST@` | `( -- tag data )` | last record (`0 0` if empty) |
+| `WDT!` | `( period -- )` | soft WDT period (ticks); `0` = off |
+| `WDTK` | `( -- )` | kick |
+| `WDT?` | `( -- f )` | expired? (records + re-kick) |
+| `CANARY?` | `( -- f )` | stack canary intact |
+
+- Trace ring: 256 × 16 B; drop oldest when full. Tags: MARK/EV0/EV1/TOUT/SWAP/WDT/CAN.
+- Kernel loop: EV0/EV1 latency when `TON`; WDT check/kick; canary warn.
+- Software WDT only (no GIC/PM_WDOG). No MPU. `%wdt` effect cord `7627895`.
+- Nock evaluator untouched.
+
+### Industrial Phase 8 — Networking Stubs
+
+**STATUS: COMPLETE** (stubs only; no real NIC/Modbus/CAN hardware)
+
+| Word | Stack | Description |
+|------|-------|-------------|
+| `NLOOP` | `( f -- )` | loopback on/off (default on) |
+| `NSTAT` | `( fam -- n )` | TX count; fam 0=eth 1=mb 2=can |
+| `NRX@` | `( fam -- n )` | loopback RX inject count |
+| `NCLR` | `( -- )` | clear stats |
+| `ETX` | `( frame -- )` | ethernet TX stub |
+| `MTX` | `( pdu -- )` | modbus TX stub |
+| `CTX` | `( id data -- )` | CAN TX stub `[id data]` |
+
+| Effect | Cord | Data | Loopback event |
+|--------|------|------|----------------|
+| `%etx` | 7894117 | frame atom | `[%erx frame]` → `evq` |
+| `%mtx` | 7894125 | PDU atom | `[%mrx pdu]` |
+| `%ctx` | 7894115 | `[id data]` | `[%crx [id data]]` |
+
+- Real drivers can replace `net_handle_*` without changing tags.
+- Trace: `T_NTX` / `T_NRX` when `TON`.
+- **Industrial Phases 1–8 complete** as bare-metal substrate.
+
+---
+
+
 ## Phases 11–12 — Planned (Active)
 
 ### Phase 11 — SKA Phase 2 / Full Hoon Subset

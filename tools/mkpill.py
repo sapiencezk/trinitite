@@ -16,8 +16,12 @@ Arguments:
 PILL v2 format:
     bytes  0-7:   uint64_t LE = byte count of jam data
     byte   8:     kernel shape (0=Arvo, 1=Shrine)
-    bytes  9-15:  reserved/padding (zeros)
+    bytes  9-12:  uint32_t LE version (0 = unversioned)
+    bytes 13-15:  reserved (zeros)
     bytes  16+:   raw jam bytes (little-endian atom, no leading zero bytes)
+
+Optional:
+    --version N   set pill version field (default 0)
 """
 
 import sys
@@ -37,16 +41,26 @@ def atom_to_bytes(n: int) -> bytes:
     return bytes(out)
 
 
-def build_pill(jam_data: bytes, shape_byte: int) -> bytes:
+def build_pill(jam_data: bytes, shape_byte: int, version: int = 0) -> bytes:
     nbytes = len(jam_data)
     header = struct.pack('<Q', nbytes)   # bytes 0-7: LE length
     header += bytes([shape_byte])        # byte 8: shape
-    header += bytes(7)                   # bytes 9-15: padding
+    header += struct.pack('<I', version & 0xFFFFFFFF)  # bytes 9-12: version
+    header += bytes(3)                   # bytes 13-15: reserved
     return header + jam_data
 
 
 def main():
     args = sys.argv[1:]
+    version = 0
+    if '--version' in args:
+        i = args.index('--version')
+        try:
+            version = int(args[i + 1])
+        except (IndexError, ValueError):
+            print("error: --version requires an integer", file=sys.stderr)
+            sys.exit(1)
+        args = args[:i] + args[i + 2:]
 
     if len(args) == 4 and args[0] == '-n':
         # Decimal atom mode: strip Urbit dot-separators then parse
@@ -75,7 +89,7 @@ def main():
         print(f"error: shape must be 'arvo' or 'shrine', got {shape_arg!r}", file=sys.stderr)
         sys.exit(1)
 
-    pill = build_pill(jam_data, SHAPES[shape_arg])
+    pill = build_pill(jam_data, SHAPES[shape_arg], version)
 
     with open(out_file, 'wb') as f:
         f.write(pill)
