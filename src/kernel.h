@@ -3,13 +3,18 @@
 #include "noun.h"
 
 /*
- * Kernel loop + industrial Phases 1–6.
+ * Kernel loop + industrial Phases 1–8 + multi-arm timers.
  *
  * Effects: walk [[tag data] rest]. Known tags (cords, LSB-first ASCII):
  *   %out %blit %timeout %mmio %tmrarm %tmrcan %irq
+ *   %tset     1952805748         data = [id period]  multi-arm periodic
+ *   %tcan     1851876212         data = id           cancel arm
  *   %swapped  28259031267243891  data = version atom
  *   %wdt      7627895            software watchdog fired
  *   %etx/%mtx/%ctx  net stubs (see net.h); loopback → evq RX events
+ *
+ * Multi-arm timers fire [%ei id %TICK 0] into the event queue (slip on overrun).
+ * Legacy %tmrarm/%tmrcan remain the single global cooperative deadline.
  *
  * Phase 6 hot-swap: STAGE + HSWAP at cooperative safe points (empty evq).
  * Phase 7: trace ring + soft WDT + canary (see trace.h).
@@ -28,6 +33,15 @@ void     deadline_set(uint64_t abs);
 uint64_t deadline_get(void);
 int      deadline_expired(void);
 void     emit_timeout(uint64_t elapsed);
+
+/* Multi-arm periodic timers (%tset / %tcan) — IEC host contract */
+void     tarm_set(uint64_t id, uint64_t period);  /* period 0 = cancel */
+void     tarm_can(uint64_t id);
+void     tarm_poll(void);           /* fire due arms → evq as [%ei id %TICK 0] */
+void     tarm_clear(void);          /* disarm all (tests / crash recovery) */
+int      tarm_active(uint64_t id);  /* 1 if armed */
+uint64_t tarm_next(uint64_t id);    /* next abs deadline, 0 if inactive */
+void     tarm_force_due(uint64_t id); /* test helper: next = now-1 if armed */
 
 /* Phase 2 — event queue */
 void     evq_enq(noun event);

@@ -1293,6 +1293,55 @@ T "t8: ctx loopback id" "0000000000000007" \
 T "t8: DO-FX %etx" "0000000000000001" \
     "QCLR NCLR  -1 NLOOP  7894117 >NOUN  5 >NOUN CONS  0 >NOUN CONS  DO-FX  0 NSTAT ."
 
+# ── Multi-arm timers (%tset / %tcan) — IEC host ───────────────────────────
+# Cords: tset=1952805748 tcan=1851876212 ei=26981 TICK=1262700884
+# %tset data = [id period]; fire → [%ei id %TICK 0]; slip next=now+period.
+# TDUE forces next=now-1 for deterministic fire tests (no busy-wait).
+
+# TACLR disarms; inactive arm → TACT? = 0
+T "tset: TACLR inactive" "0000000000000000" \
+    "TACLR  7 TACT? ."
+
+# DO-FX %tset [7 1000] arms id 7
+T "tset: DO-FX arms" "FFFFFFFFFFFFFFFF" \
+    "TACLR  7 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  7 TACT? ."
+
+# TNXT@ after set is in the future ( > TIMER@ )
+T "tset: TNXT@ future" "FFFFFFFFFFFFFFFF" \
+    "TACLR  7 100000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  7 TNXT@ TIMER@ > ."
+
+# %tcan disarms
+T "tset: %tcan clears" "0000000000000000" \
+    "TACLR  7 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  7 >NOUN  1851876212 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  7 TACT? ."
+
+# period 0 via %tset cancels
+T "tset: period 0 cancels" "0000000000000000" \
+    "TACLR  3 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  3 0 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  3 TACT? ."
+
+# Independent arms: set 1 and 2; cancel 1; 2 still active
+T "tset: multi-arm independent" "FFFFFFFFFFFFFFFF" \
+    "TACLR  1 5000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  2 5000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  1 >NOUN  1851876212 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  2 TACT? ."
+
+# Fire path: TDUE + TPOLL → event head = %ei
+T "tset: fire %ei tag" "0000000000006965" \
+    "TACLR QCLR  9 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
+
+# Fire path: event id field
+T "tset: fire id" "0000000000000009" \
+    "TACLR QCLR  9 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  TPOLL  DEQ DROP  CDR CAR NOUN> ."
+
+# Fire path: event name = %TICK
+T "tset: fire %TICK" "000000004B434954" \
+    "TACLR QCLR  9 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  TPOLL  DEQ DROP  CDR CDR CAR NOUN> ."
+
+# After fire, arm still active (periodic)
+T "tset: still armed after fire" "FFFFFFFFFFFFFFFF" \
+    "TACLR QCLR  4 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  4 TDUE  TPOLL  DEQ DROP DROP  4 TACT? ."
+
+# No fire before due (large period, no TDUE)
+T "tset: no premature fire" "0000000000000000" \
+    "TACLR QCLR  5 100000000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  TPOLL  QLEN ."
+
 # ── Crash Recovery Hardening ───────────────────────────────────────────────
 # Each BEFORE triggers a nock_crash → longjmp, the T after verifies the REPL
 # recovers cleanly. Covers all nock_crash() sites in nock.c.

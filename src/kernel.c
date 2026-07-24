@@ -17,9 +17,17 @@
 #define CORD_MMIO    1869180269ULL           /* %mmio     */
 #define CORD_TMRARM  120338028588404ULL      /* %tmrarm   */
 #define CORD_TMRCAN  121364559326580ULL      /* %tmrcan   */
+#define CORD_TSET    1952805748ULL           /* %tset     */
+#define CORD_TCAN    1851876212ULL           /* %tcan     */
 #define CORD_IRQ     7434857ULL              /* %irq      */
 #define CORD_SWAPPED 28259031267243891ULL    /* %swapped  */
 #define CORD_WDT     7627895ULL              /* %wdt = "wdt" */
+
+/* Kernel event ISA cords for timer fire (IEC host → kernel) */
+#define CORD_EI      26981ULL                /* %ei       */
+#define CORD_TICK    1262700884ULL           /* %TICK     */
+
+#define TARM_MAX     16
 
 #define HSTAT_IDLE    0
 #define HSTAT_STAGED  1
@@ -66,6 +74,115 @@ uint64_t deadline_get(void)
 int deadline_expired(void)
 {
     return g_deadline != 0 && cntvct() >= g_deadline;
+}
+
+/* ── Multi-arm periodic timers (%tset / %tcan) ───────────────────────────── */
+/*
+ * Each arm: absolute next fire time + period in CNTVCT ticks.
+ * On fire: enqueue [%ei id %TICK 0], then next = now + period (slip on overrun).
+ * Legacy g_deadline (%tmrarm) is independent — step-timeout, not IEC periods.
+ */
+
+typedef struct {
+    int      active;
+    uint64_t id;
+    uint64_t period;
+    uint64_t next;
+} tarm_t;
+
+static tarm_t g_tarms[TARM_MAX];
+
+static int tarm_find(uint64_t id)
+{
+    for (int i = 0; i < TARM_MAX; i++) {
+        if (g_tarms[i].active && g_tarms[i].id == id)
+            return i;
+    }
+    return -1;
+}
+
+static int tarm_free_slot(void)
+{
+    for (int i = 0; i < TARM_MAX; i++) {
+        if (!g_tarms[i].active)
+            return i;
+    }
+    return -1;
+}
+
+void tarm_set(uint64_t id, uint64_t period)
+{
+    if (period == 0) {
+        tarm_can(id);
+        return;
+    }
+    int i = tarm_find(id);
+    if (i < 0) {
+        i = tarm_free_slot();
+        if (i < 0)
+            return;   /* full — silent drop (host capacity limit) */
+    }
+    g_tarms[i].active = 1;
+    g_tarms[i].id     = id;
+    g_tarms[i].period = period;
+    g_tarms[i].next   = cntvct() + period;
+}
+
+void tarm_can(uint64_t id)
+{
+    int i = tarm_find(id);
+    if (i >= 0)
+        g_tarms[i].active = 0;
+}
+
+void tarm_clear(void)
+{
+    for (int i = 0; i < TARM_MAX; i++)
+        g_tarms[i].active = 0;
+}
+
+int tarm_active(uint64_t id)
+{
+    return tarm_find(id) >= 0;
+}
+
+uint64_t tarm_next(uint64_t id)
+{
+    int i = tarm_find(id);
+    if (i < 0)
+        return 0;
+    return g_tarms[i].next;
+}
+
+static noun make_tick_event(uint64_t id)
+{
+    /* [%ei id %TICK 0]  ≡  [ei [id [TICK 0]]] */
+    return alloc_cell(direct(CORD_EI),
+           alloc_cell(direct(id),
+           alloc_cell(direct(CORD_TICK), NOUN_ZERO)));
+}
+
+void tarm_force_due(uint64_t id)
+{
+    int i = tarm_find(id);
+    if (i < 0)
+        return;
+    uint64_t now = cntvct();
+    g_tarms[i].next = (now > 0) ? now - 1 : 0;
+}
+
+void tarm_poll(void)
+{
+    uint64_t now = cntvct();
+    for (int i = 0; i < TARM_MAX; i++) {
+        if (!g_tarms[i].active)
+            continue;
+        if (now < g_tarms[i].next)
+            continue;
+        evq_enq(make_tick_event(g_tarms[i].id));
+        /* slip: do not catch up missed periods */
+        g_tarms[i].next = now + g_tarms[i].period;
+    }
 }
 
 /* ── Phase 3 — MMIO ──────────────────────────────────────────────────────── */
@@ -305,6 +422,17 @@ static void dispatch_one(noun tag, noun data) {
         deadline_set(0);
         return;
     }
+    if (t == CORD_TSET) {
+        /* data = [id period] */
+        if (!noun_is_cell(data)) return;
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(data);
+        tarm_set(atom_u64(c->head), atom_u64(c->tail));
+        return;
+    }
+    if (t == CORD_TCAN) {
+        tarm_can(atom_u64(data));
+        return;
+    }
     if (t == CORD_IRQ) {
         evq_enq(data);
         return;
@@ -450,6 +578,7 @@ static void kernel_loop(noun kernel_init, int shrine)
             uart_puts("\r\nkernel crash\r\n");
             evq_clear();
             irq_ring_clear();
+            tarm_clear();
             continue;
         }
 
@@ -467,6 +596,9 @@ static void kernel_loop(noun kernel_init, int shrine)
 
         /* Phase 3: IRQ ring → event queue before schedule */
         irq_ring_drain();
+
+        /* Multi-arm timers → [%ei id %TICK 0] into queue */
+        tarm_poll();
 
         noun event;
         if (!evq_deq(&event))

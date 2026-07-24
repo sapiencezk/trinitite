@@ -2943,6 +2943,41 @@ defcode "SLOOP", 5, shrine_loop_word, 0
     ldr     x0, [DSP], #8
     bl      shrine_loop             // kernel.c; never returns
 
+// ── Multi-arm timers (%tset / %tcan) — IEC host ────────────────────────────
+// Effects %tset [id period] / %tcan id via DO-FX; TPOLL fires due arms into EVQ.
+
+// TPOLL ( -- )  fire due multi-arm timers → enq [%ei id %TICK 0]
+defcode "TPOLL", 5, tpoll, 0
+    bl      tarm_poll
+    NEXT
+
+// TACLR ( -- )  disarm all multi-arm timers
+defcode "TACLR", 5, taclr, 0
+    bl      tarm_clear
+    NEXT
+
+// TACT? ( id -- f )  true (-1) if arm id is active
+defcode "TACT?", 5, tact_q, 0
+    ldr     x0, [DSP]
+    bl      tarm_active
+    cmp     x0, #0
+    csetm   x0, ne
+    str     x0, [DSP]
+    NEXT
+
+// TNXT@ ( id -- abs )  next fire deadline for arm id; 0 if inactive
+defcode "TNXT@", 5, tnxt_fetch, 0
+    ldr     x0, [DSP]
+    bl      tarm_next
+    str     x0, [DSP]
+    NEXT
+
+// TDUE ( id -- )  force arm due (next=now-1) for deterministic tests
+defcode "TDUE", 4, tdue, 0
+    ldr     x0, [DSP], #8
+    bl      tarm_force_due
+    NEXT
+
 // KERNEL ( -- )
 //   Load PILL, decode kernel gate, dispatch to Arvo or Shrine loop
 //   based on the shape byte in the PILL header (stored in KSHAPE).
