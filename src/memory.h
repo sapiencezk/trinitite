@@ -11,20 +11,27 @@
 
 /*
  * C .bss (linker.ld): absolute window, NOT adjacent to the image.
- * Must not overlap Forth (0x8f000 TIB / 0x90000 dictionary) or arenas.
- * Size is currently ~0.7 MB; 16 MB reserved for growth.
+ * Must not overlap Forth or arenas. ~0.7 MB used; 16 MB reserved.
  */
 #define BSS_BASE            0x08000000
 #define BSS_SIZE            0x01000000  /* 16 MB reserve */
 #define BSS_TOP             (BSS_BASE + BSS_SIZE)
 
-/* Forth region: dictionary grows up, stacks grow down */
-#define FORTH_BASE          0x00090000
-#define FORTH_SIZE          0x00400000  /* 4MB */
+/*
+ * Forth region: dictionary grows up, stacks grow down.
+ * Starts at 1 MB so the kernel image (loaded at 0x80000) can grow past
+ * the old 0x90000 boundary without stomping the dictionary / TIB.
+ * Ends at ARENA_BASE (0x490000).
+ */
+#define FORTH_BASE          0x00100000
+#define FORTH_SIZE          0x00390000  /* → 0x00490000 = ARENA_BASE */
 #define FORTH_TOP           (FORTH_BASE + FORTH_SIZE)
 
 #if BSS_BASE < FORTH_TOP
 #error "BSS_BASE overlaps Forth region"
+#endif
+#if FORTH_TOP > 0x00490000
+#error "Forth region overlaps ARENA_BASE"
 #endif
 
 /* Forth stacks at top of region, growing down */
@@ -96,12 +103,14 @@
 #endif
 
 /*
- * UART receive buffer: static window between TIB end and dictionary base.
- * Used by RECV-NOUN to accumulate incoming jam bytes before decoding.
- * Limit: ~28KB. Sufficient for Phase 6 test events.
+ * UART receive buffer: below TIB (0xFF000). Used by uart_recv_noun.
+ * ~28 KB — enough for Phase 6 test events / modest jam payloads.
  */
-#define UART_RXBUF_BASE  0x00089100
-#define UART_RXBUF_SIZE  0x00006F00
+#define UART_RXBUF_BASE  0x000F8000
+#define UART_RXBUF_SIZE  0x00007000
+#if (UART_RXBUF_BASE + UART_RXBUF_SIZE) > 0x000FF000
+#error "UART_RXBUF overlaps TIB"
+#endif
 
 /*
  * Phase 4 — secondary core C stacks (between atom store and PILL).

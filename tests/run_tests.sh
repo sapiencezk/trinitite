@@ -656,6 +656,54 @@ T "jet mod: mod(10,3)=1"       "0000000000000001" \
 T "jet mod: mod(12,4)=0"       "0000000000000000" \
     "0 N>N  6582125 N>N  12 N>N  4 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
 
+# ── WP3 — structural / list / bit jets (C hot_state; no Forth shadow) ─────
+# Cords: eq=29029 lsh=6845292 rsh=6845298 con=7237475 dis=7563620 mix=7891309
+#        cap=7364963 mas=7561581 peg=6776176
+#        lent=1953391980 flop=1886350438 weld=1684825463
+# These labels have no Forth dict entries → pure C jet path under NOCK+%wild.
+
+T "jet eq: same atoms YES"     "0000000000000000" \
+    "0 N>N  29029 N>N  7 N>N  7 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
+T "jet eq: diff atoms NO"      "0000000000000001" \
+    "0 N>N  29029 N>N  7 N>N  8 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
+T "jet eq: same cells YES"     "0000000000000000" \
+    "0 N>N  29029 N>N  1 N>N 2 N>N CONS  1 N>N 2 N>N CONS  JCORE2 JD JWRAP  NOCK  NOUN> ."
+
+T "jet lsh: 1<<3=8"            "0000000000000008" \
+    "0 N>N  6845292 N>N  3 N>N  1 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
+T "jet rsh: 8>>3=1"            "0000000000000001" \
+    "0 N>N  6845298 N>N  3 N>N  8 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
+T "jet con: 5|3=7"             "0000000000000007" \
+    "0 N>N  7237475 N>N  5 N>N  3 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
+T "jet dis: 5&3=1"             "0000000000000001" \
+    "0 N>N  7563620 N>N  5 N>N  3 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
+T "jet mix: 5^3=6"             "0000000000000006" \
+    "0 N>N  7891309 N>N  5 N>N  3 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
+
+T "jet cap: 4→2"               "0000000000000002" \
+    "0 N>N  7364963 N>N  4 N>N  JCORE1 JD JWRAP  NOCK  NOUN> ."
+T "jet cap: 6→3"               "0000000000000003" \
+    "0 N>N  7364963 N>N  6 N>N  JCORE1 JD JWRAP  NOCK  NOUN> ."
+T "jet mas: 5→3"               "0000000000000003" \
+    "0 N>N  7561581 N>N  5 N>N  JCORE1 JD JWRAP  NOCK  NOUN> ."
+T "jet peg: 2 peg 2 =4"        "0000000000000004" \
+    "0 N>N  6776176 N>N  2 N>N  2 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
+T "jet peg: 3 peg 2 =6"        "0000000000000006" \
+    "0 N>N  6776176 N>N  3 N>N  2 N>N  JCORE2 JD JWRAP  NOCK  NOUN> ."
+
+# list [1 2 3 ~] = 1 2 CONS 3 SWAP CONS 0 SWAP CONS? Wait: list is [1 [2 [3 0]]]
+# Build: 3 N>N 0 N>N CONS  2 N>N SWAP CONS  1 N>N SWAP CONS
+T "jet lent: 3-list"           "0000000000000003" \
+    "0 N>N  1953391980 N>N  3 N>N 0 N>N CONS 2 N>N SWAP CONS 1 N>N SWAP CONS  JCORE1 JD JWRAP  NOCK  NOUN> ."
+T "jet lent: null"             "0000000000000000" \
+    "0 N>N  1953391980 N>N  0 N>N  JCORE1 JD JWRAP  NOCK  NOUN> ."
+T "jet flop: [1 2 3] head"     "0000000000000003" \
+    "0 N>N  1886350438 N>N  3 N>N 0 N>N CONS 2 N>N SWAP CONS 1 N>N SWAP CONS  JCORE1 JD JWRAP  NOCK  CAR NOUN> ."
+T "jet weld: [1]++[2] head"    "0000000000000001" \
+    "0 N>N  1684825463 N>N  1 N>N 0 N>N CONS  2 N>N 0 N>N CONS  JCORE2 JD JWRAP  NOCK  CAR NOUN> ."
+T "jet weld: [1]++[2] 2nd"     "0000000000000002" \
+    "0 N>N  1684825463 N>N  1 N>N 0 N>N CONS  2 N>N 0 N>N CONS  JCORE2 JD JWRAP  NOCK  CDR CAR NOUN> ."
+
 # ── Phase 7 — Kernel Loop ─────────────────────────────────────────────────
 T "KSHAPE default zero"        "0000000000000000" \
     "KSHAPE @  ."

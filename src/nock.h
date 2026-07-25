@@ -2,14 +2,16 @@
 #include "noun.h"
 
 /*
- * Nock 4K evaluator — Phase 3b.
+ * Nock 4K evaluator + jets + slam budget.
  *
  * nock(subject, formula)            → product  (crashes on error)
  * nock_ex(subject, formula, j, sky) → product  (full API)
  * slot(axis, subject)               → noun     (Nock / operator)
  *
- * Crash behaviour: nock_crash() prints to UART and halts the CPU.
- * longjmp recovery (back to QUIT) is deferred to Phase 3c.
+ * Jet pack (C hot_state, pure — no MMIO): arithmetic + WP3 structural/list/bit
+ *   %dec %add %sub %mul %lth %gth %lte %gte %div %mod
+ *   %eq %lsh %rsh %con %dis %mix %cap %mas %peg %lent %flop %weld
+ * KERNEL path (nock_eval op9): C only. SKA nock_op9_continue: Forth then C.
  */
 
 /* ── Scry handler (Nock 12) ────────────────────────────────────────────── */

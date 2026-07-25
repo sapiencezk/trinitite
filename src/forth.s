@@ -27,10 +27,10 @@
 //
 // ── Memory map (must match memory.h) ─────────────────────────────────────────
 
-.set DICT_BASE,    0x00090000
+.set DICT_BASE,    0x00100000          /* must match FORTH_BASE in memory.h */
 .set DSTACK_TOP,   0x00480000
 .set RSTACK_TOP,   0x00490000
-.set TIB_BASE,     0x0008f000
+.set TIB_BASE,     0x000FF000          /* just below FORTH_BASE */
 .set TIB_SIZE,     256
 
 // ── UART (PL011) ─────────────────────────────────────────────────────────────

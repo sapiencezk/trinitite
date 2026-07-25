@@ -235,6 +235,178 @@ static noun jet_mod(noun core, const wilt_t *jets, sky_fn_t sky) {
     return bn_mod(a, b);
 }
 
+/* ── WP3 structural / list / bit jets ─────────────────────────────────────── */
+
+/* Low 64 bits of an atom for axes and shift counts; larger → crash. */
+static uint64_t jet_atom_u64(noun a, const char *who)
+{
+    if (!noun_is_atom(a))
+        nock_crash(who);
+    if (noun_is_direct(a))
+        return direct_val(a);
+    atom_t *at = atom_store_get(indirect_hash(a));
+    if (!at || at->size == 0)
+        return 0;
+    if (at->size > 1)
+        nock_crash(who);
+    return at->limbs[0];
+}
+
+/* %eq — structural equality (same as Nock op5 / noun_eq). sample [a b] */
+static noun jet_eq(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun a = slot(direct(12), core);
+    noun b = slot(direct(13), core);
+    return noun_eq(a, b) ? NOUN_YES : NOUN_NO;
+}
+
+/* %lsh — left shift: sample [k a] → a << k */
+static noun jet_lsh(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun k = slot(direct(12), core);
+    noun a = slot(direct(13), core);
+    if (!noun_is_atom(a)) nock_crash("jet lsh: non-atom");
+    return bn_lsh(a, jet_atom_u64(k, "jet lsh: bad shift"));
+}
+
+/* %rsh — right shift: sample [k a] → a >> k */
+static noun jet_rsh(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun k = slot(direct(12), core);
+    noun a = slot(direct(13), core);
+    if (!noun_is_atom(a)) nock_crash("jet rsh: non-atom");
+    return bn_rsh(a, jet_atom_u64(k, "jet rsh: bad shift"));
+}
+
+/* %con — bitwise OR (Hoon con) */
+static noun jet_con(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun a = slot(direct(12), core);
+    noun b = slot(direct(13), core);
+    if (!noun_is_atom(a) || !noun_is_atom(b)) nock_crash("jet con: non-atom");
+    return bn_or(a, b);
+}
+
+/* %dis — bitwise AND (Hoon dis) */
+static noun jet_dis(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun a = slot(direct(12), core);
+    noun b = slot(direct(13), core);
+    if (!noun_is_atom(a) || !noun_is_atom(b)) nock_crash("jet dis: non-atom");
+    return bn_and(a, b);
+}
+
+/* %mix — bitwise XOR (Hoon mix) */
+static noun jet_mix(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun a = slot(direct(12), core);
+    noun b = slot(direct(13), core);
+    if (!noun_is_atom(a) || !noun_is_atom(b)) nock_crash("jet mix: non-atom");
+    return bn_xor(a, b);
+}
+
+/* %cap — tree axis side: 2 (head) or 3 (tail). sample = axis */
+static noun jet_cap(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    uint64_t a = jet_atom_u64(slot(direct(6), core), "jet cap: bad axis");
+    if (a < 2) nock_crash("jet cap: axis < 2");
+    while (a > 3)
+        a >>= 1;
+    return direct(a);
+}
+
+/* %mas — address within head/tail subtree of axis */
+static uint64_t axis_mas(uint64_t a)
+{
+    if (a <= 3)
+        return 1;
+    return (axis_mas(a >> 1) << 1) | (a & 1);
+}
+
+static noun jet_mas(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    uint64_t a = jet_atom_u64(slot(direct(6), core), "jet mas: bad axis");
+    if (a < 2) nock_crash("jet mas: axis < 2");
+    return direct(axis_mas(a));
+}
+
+/* %peg — compose axes: navigate a then b. sample [a b] */
+static uint64_t axis_peg(uint64_t a, uint64_t b)
+{
+    if (b == 1)
+        return a;
+    if (b == 2)
+        return a << 1;
+    if (b == 3)
+        return (a << 1) | 1;
+    uint64_t c = axis_peg(a, b >> 1);
+    return (b & 1) ? ((c << 1) | 1) : (c << 1);
+}
+
+static noun jet_peg(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    uint64_t a = jet_atom_u64(slot(direct(12), core), "jet peg: bad a");
+    uint64_t b = jet_atom_u64(slot(direct(13), core), "jet peg: bad b");
+    if (a == 0 || b == 0) nock_crash("jet peg: axis 0");
+    return direct(axis_peg(a, b));
+}
+
+/* %lent — list length (null = 0 atom). sample = list */
+static noun jet_lent(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun list = slot(direct(6), core);
+    uint64_t n = 0;
+    while (noun_is_cell(list)) {
+        if (++n > 1000000ULL)
+            nock_crash("jet lent: list too long");
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(list);
+        list = c->tail;
+    }
+    return direct(n);
+}
+
+/* %flop — reverse null-terminated list. sample = list */
+static noun jet_flop(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun list = slot(direct(6), core);
+    noun acc  = NOUN_ZERO;
+    uint64_t n = 0;
+    while (noun_is_cell(list)) {
+        if (++n > 1000000ULL)
+            nock_crash("jet flop: list too long");
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(list);
+        acc  = alloc_cell(c->head, acc);
+        list = c->tail;
+    }
+    return acc;
+}
+
+/* %weld — append lists a ++ b. sample [a b] */
+static noun jet_weld(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun a = slot(direct(12), core);
+    noun b = slot(direct(13), core);
+    /* reverse a, then reverse onto b (iterative, bounded) */
+    noun rev = NOUN_ZERO;
+    noun cur = a;
+    uint64_t n = 0;
+    while (noun_is_cell(cur)) {
+        if (++n > 1000000ULL)
+            nock_crash("jet weld: list too long");
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(cur);
+        rev = alloc_cell(c->head, rev);
+        cur = c->tail;
+    }
+    noun out = b;
+    cur = rev;
+    while (noun_is_cell(cur)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(cur);
+        out = alloc_cell(c->head, out);
+        cur = c->tail;
+    }
+    return out;
+}
+
 /* ── Hot state ────────────────────────────────────────────────────────────── */
 
 /*
@@ -242,10 +414,15 @@ static noun jet_mod(noun core, const wilt_t *jets, sky_fn_t sky) {
  * Jets are matched against label atoms registered via %wild hints.
  * Cord values: each char contributes 8 bits, LSB = first character.
  *   e.g. %dec = 'd' + 'e'<<8 + 'c'<<16 = 100 + 101*256 + 99*65536 = 6514020
+ *
+ * Dispatch priority (KERNEL / pure nock_eval op9): C hot_state only.
+ * SKA nock_op9_continue: Forth dictionary (find_by_cord) first, then C.
+ * Prefer C jets for production KERNEL path; Forth may shadow in REPL/SKA.
  */
 typedef struct { uint64_t label_cord; jet_fn_t fn; } hot_entry_t;
 
 static const hot_entry_t hot_state[] = {
+    /* arithmetic (Phase 5b) */
     { 6514020, jet_dec },   /* %dec */
     { 6579297, jet_add },   /* %add */
     { 6452595, jet_sub },   /* %sub */
@@ -256,7 +433,20 @@ static const hot_entry_t hot_state[] = {
     { 6648935, jet_gte },   /* %gte */
     { 7760228, jet_div },   /* %div */
     { 6582125, jet_mod },   /* %mod */
-    { 0, NULL }             /* sentinel */
+    /* WP3 structural / list / bit */
+    { 29029,       jet_eq   },  /* %eq   */
+    { 6845292,     jet_lsh  },  /* %lsh  */
+    { 6845298,     jet_rsh  },  /* %rsh  */
+    { 7237475,     jet_con  },  /* %con  */
+    { 7563620,     jet_dis  },  /* %dis  */
+    { 7891309,     jet_mix  },  /* %mix  */
+    { 7364963,     jet_cap  },  /* %cap  */
+    { 7561581,     jet_mas  },  /* %mas  */
+    { 6776176,     jet_peg  },  /* %peg  */
+    { 1953391980,  jet_lent },  /* %lent */
+    { 1886350438,  jet_flop },  /* %flop */
+    { 1684825463,  jet_weld },  /* %weld */
+    { 0, NULL }                 /* sentinel */
 };
 
 jet_fn_t hot_lookup(noun label) {
