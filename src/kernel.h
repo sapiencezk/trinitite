@@ -16,6 +16,10 @@
  * Multi-arm timers fire [%ei id %TICK 0] into the event queue (slip on overrun).
  * Legacy %tmrarm/%tmrcan remain the single global cooperative deadline.
  *
+ * Idle schedule: when the event queue is empty the loop polls UART RX
+ * (non-blocking), tarm_poll, and soft WDT — it does not block forever in
+ * uart_recv_noun, so %tset arms can fire without a second UART poke.
+ *
  * Phase 6 hot-swap: STAGE + HSWAP at cooperative safe points (empty evq).
  * Phase 7: trace ring + soft WDT + canary (see trace.h).
  * Phase 8: networking stubs (see net.h).

@@ -26,6 +26,19 @@ char uart_getc(void) {
     return UART_DR & 0xFF;
 }
 
+int uart_rx_ready(void) {
+    /* FR bit 4 = RXFE (receive FIFO empty) */
+    return (UART_FR & (1 << 4)) ? 0 : 1;
+}
+
+int uart_getc_nb(uint8_t *out) {
+    if (UART_FR & (1 << 4))
+        return 0;
+    if (out)
+        *out = (uint8_t)(UART_DR & 0xFF);
+    return 1;
+}
+
 void uart_puts(const char *s) {
     while (*s) {
         if (*s == '\n') uart_putc('\r');

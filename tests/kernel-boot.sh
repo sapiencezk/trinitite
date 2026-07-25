@@ -14,6 +14,9 @@
 # hint kernels emit:  slog: 000000000000002a
 # when sent event = atom 42 (jam(42) = 5456 = bytes 0x50 0x15)
 #
+# WP1 idle-timer pill (built below): first slam arms %tset; second slam (host
+# TICK, no further UART) emits %out OK — proves timers progress while idle.
+#
 # Usage:  bash tests/kernel-boot.sh [--verbose]
 
 set -euo pipefail
@@ -38,7 +41,7 @@ check() {
         (( ++FAIL ))
         echo -e "${RED}FAIL${NC}  $name"
         echo "      expected to find: $pattern"
-        printf '%s\n' "$out" | head -8 | sed 's/^/      got: /'
+        printf '%s\n' "$out" | head -20 | sed 's/^/      got: /'
     fi
 }
 
@@ -50,6 +53,36 @@ python3 tools/mkpill.py -n 3533463315829630395733151849237          arvo   "$TMP
 python3 tools/mkpill.py -n 103461740246623566125433280773           arvo   "$TMPDIR_PILLS/hint-arvo.pill"
 python3 tools/mkpill.py -n 89337781013                              shrine "$TMPDIR_PILLS/null-shrine.pill"
 python3 tools/mkpill.py -n 13497664181327658059184875019360517      shrine "$TMPDIR_PILLS/hint-shrine.pill"
+
+# WP1: cold slam → %tset [1 period], next gate prints %out OK on TICK (no causes).
+# period must miss the immediate loop-head tarm_poll so the idle path is exercised.
+python3 - "$TMPDIR_PILLS/timer-idle.pill" <<'PY'
+import struct, sys
+from pathlib import Path
+sys.path.insert(0, "tools")
+from jam import jam, cue
+
+def cord(s: str) -> int:
+    v = 0
+    for i, c in enumerate(s.encode()):
+        v |= c << (8 * i)
+    return v
+
+out, ok = cord("out"), cord("OK")
+tset, tcan = cord("tset"), cord("tcan")
+# g1: %tcan arm + %out OK once (cancel so idle poll does not flood OK)
+effects_out = ((tcan, 1), ((out, ok), 0))
+g1 = (((1, effects_out), ((0, 1), (1, 0))), (0, 0))
+# g0: %tset [1 50000], next=g1, empty causes — host must fire TICK while idle
+period = 50000
+fx = ((tset, (1, period)), 0)
+g0 = (((1, fx), ((1, g1), (1, 0))), (0, 0))
+assert cue(jam(g0)) == g0
+raw = jam(g0).to_bytes((jam(g0).bit_length() + 7) // 8 or 1, "little")
+pill = struct.pack("<Q", len(raw)) + bytes([1]) + struct.pack("<I", 1) + bytes(3) + raw
+Path(sys.argv[1]).write_bytes(pill)
+print(f"timer-idle.pill {len(raw)}B jam", file=sys.stderr)
+PY
 
 QEMU="qemu-system-aarch64 -machine raspi4b -m 2G -display none -nographic"
 IMG="-kernel kernel8.img"
@@ -89,6 +122,21 @@ boot_pill_event42() {
           || true
 }
 
+# One cold poke only; wait for host timer → TICK → %out (no second UART noun).
+boot_pill_timer_idle() {
+    local pill="$1"
+    { sleep 1
+      printf 'KERNEL\n'
+      sleep 2
+      python3 -c "import sys; sys.stdout.buffer.write(bytes([2,0,0,0,0,0,0,0,0x50,0x15]))"
+      # Allow CNTVCT + idle poll to fire %tset and slam the OK gate
+      sleep 3
+      printf '\001x'
+    } | timeout 12 $QEMU $IMG \
+          -device "loader,addr=0x10000000,force-raw=on,file=$pill" \
+          || true
+}
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 check "no-pill: REPL boot"         "Trinitite v0.1"        "$(boot_nopill)"
@@ -96,6 +144,8 @@ check "null-arvo: kernel banner"   "trinitite arvo"        "$(boot_pill   "$TMPD
 check "null-shrine: kernel banner" "trinitite shrine"      "$(boot_pill   "$TMPDIR_PILLS/null-shrine.pill")"
 check "hint-arvo: %slog on event"  "000000000000002a"      "$(boot_pill_event42 "$TMPDIR_PILLS/hint-arvo.pill")"
 check "hint-shrine: %slog on event" "000000000000002a"     "$(boot_pill_event42 "$TMPDIR_PILLS/hint-shrine.pill")"
+check "WP1 idle timer: %out OK without 2nd UART" "OK" \
+    "$(boot_pill_timer_idle "$TMPDIR_PILLS/timer-idle.pill")"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""

@@ -601,8 +601,33 @@ static void kernel_loop(noun kernel_init, int shrine)
         tarm_poll();
 
         noun event;
-        if (!evq_deq(&event))
-            event = uart_recv_noun();
+        if (!evq_deq(&event)) {
+            /*
+             * Idle path (WP1): do not block forever in uart_recv_noun.
+             * While the queue is empty and no UART frame has started,
+             * keep polling multi-arm timers + soft WDT so period-driven
+             * IEC graphs advance without a second host poke.
+             *
+             * Once RX has a byte, take a full framed noun (remaining
+             * bytes may still block briefly mid-frame — acceptable).
+             */
+            for (;;) {
+                if (uart_rx_ready()) {
+                    event = uart_recv_noun();
+                    break;
+                }
+                tarm_poll();
+                if (evq_deq(&event))
+                    break;
+                if (wdt_check())
+                    emit_wdt();
+                wdt_kick();
+                if (!canary_ok()) {
+                    trace_rec(T_CAN, 0);
+                    uart_puts("canary\r\n");
+                }
+            }
+        }
 
         uint64_t t0 = 0;
         if (trace_enabled()) {

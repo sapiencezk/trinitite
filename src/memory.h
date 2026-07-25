@@ -9,10 +9,23 @@
  * in noun cells — never region-relative offsets.
  */
 
+/*
+ * C .bss (linker.ld): absolute window, NOT adjacent to the image.
+ * Must not overlap Forth (0x8f000 TIB / 0x90000 dictionary) or arenas.
+ * Size is currently ~0.7 MB; 16 MB reserved for growth.
+ */
+#define BSS_BASE            0x08000000
+#define BSS_SIZE            0x01000000  /* 16 MB reserve */
+#define BSS_TOP             (BSS_BASE + BSS_SIZE)
+
 /* Forth region: dictionary grows up, stacks grow down */
 #define FORTH_BASE          0x00090000
 #define FORTH_SIZE          0x00400000  /* 4MB */
 #define FORTH_TOP           (FORTH_BASE + FORTH_SIZE)
+
+#if BSS_BASE < FORTH_TOP
+#error "BSS_BASE overlaps Forth region"
+#endif
 
 /* Forth stacks at top of region, growing down */
 #define RSTACK_TOP          (FORTH_TOP)
