@@ -27,6 +27,8 @@
  * UART "overflow" once until clear). Unknown effect tags: T_UFX + UART
  * "unkfx" once/session. Crash: hard clears tarms (default); soft keeps them.
  *
+ * Full host contract for IEC authors: docs/HOST-CONTRACT.md
+ *
  * Phase 6 hot-swap: STAGE + HSWAP at cooperative safe points (empty evq).
  * Phase 7: trace ring + soft WDT + canary (see trace.h).
  * Phase 8: networking stubs (see net.h).
