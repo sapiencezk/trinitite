@@ -1161,6 +1161,7 @@ static inline noun fallback(noun subj, noun fml,
 static noun eval_nomm(const nomm_t *n, noun sub,
                       const wilt_t *jets, sky_fn_t sky)
 {
+    nock_budget_tick();
     if (!n) {
         nock_crash("ska: eval_nomm null node");
         return NOUN_ZERO;  /* unreachable */
@@ -1565,6 +1566,7 @@ static nomm1_t *cook_nomm(const nomm_t *n, const wilt_t *jets)
 noun run_nomm1(const nomm1_t *n, noun sub,
                const wilt_t *jets, sky_fn_t sky)
 {
+    nock_budget_tick();
     if (!n) {
         nock_crash("run_nomm1: null node");
         return NOUN_ZERO;

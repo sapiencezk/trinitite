@@ -11,12 +11,13 @@
 #define T_MARK  1u   /* manual TREC */
 #define T_EV0   2u   /* event start */
 #define T_EV1   3u   /* event end; data = duration low 32 */
-#define T_TOUT  4u   /* deadline timeout */
+#define T_TOUT  4u   /* deadline / budget timeout */
 #define T_SWAP  5u   /* hot-swap applied; data = version */
 #define T_WDT   6u   /* software watchdog fired */
 #define T_CAN   7u   /* stack canary failure */
 #define T_NTX   8u   /* net TX stub; data = family 0/1/2 */
 #define T_NRX   9u   /* net RX loopback inject; data = family */
+#define T_BUD   10u  /* slam op budget fired; data = ops used low 32 */
 
 typedef struct {
     uint64_t t;

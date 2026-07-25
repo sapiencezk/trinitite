@@ -564,21 +564,54 @@ static noun build_slam_formula(void) {
 
 /* ── Kernel event loops ──────────────────────────────────────────────────── */
 
+/* Default slam op budget (WP2). 0 = unlimited. Large enough for moderate
+ * Nock products; runaway self-calls abort without hanging QEMU. */
+#ifndef SLAM_BUDGET_DEFAULT
+#define SLAM_BUDGET_DEFAULT  1000000ULL
+#endif
+
+static uint64_t g_slam_budget = SLAM_BUDGET_DEFAULT;
+
+void slam_budget_set(uint64_t max_ops)
+{
+    g_slam_budget = max_ops;
+}
+
+uint64_t slam_budget_get(void)
+{
+    return g_slam_budget;
+}
+
 static void kernel_loop(noun kernel_init, int shrine)
 {
     g_kernel       = kernel_init;
     g_shrine_mode  = shrine ? 1 : 0;
     g_live_version = noun_pill_version;  /* from pill header if any */
     noun slam = build_slam_formula();
+    /* Mid-eval wall: poll deadline every 256 ops inside nock_budget_tick */
+    nock_wall_check_set(deadline_expired);
     uart_puts(g_shrine_mode ? "\r\ntrinitite shrine\r\n"
                              : "\r\ntrinitite arvo\r\n");
 
     for (;;) {
-        if (setjmp(nock_abort) != 0) {
+        int jr = setjmp(nock_abort);
+        if (jr == NOCK_ABORT_CRASH) {
             uart_puts("\r\nkernel crash\r\n");
             evq_clear();
             irq_ring_clear();
             tarm_clear();
+            continue;
+        }
+        if (jr == NOCK_ABORT_BUDGET) {
+            /*
+             * WP2: budget / mid-eval wall — no product commit, keep tarms
+             * (unlike crash). Emit %timeout so apps see the same host effect
+             * as cooperative deadline; UART marks "budget" for operators.
+             */
+            uart_puts("\r\nbudget\r\n");
+            trace_rec(T_BUD, (uint32_t)nock_ops_used());
+            emit_timeout(nock_ops_used());
+            deadline_set(0);
             continue;
         }
 
@@ -635,6 +668,7 @@ static void kernel_loop(noun kernel_init, int shrine)
             trace_rec(T_EV0, 0);
         }
 
+        nock_budget_set(g_slam_budget);
         noun subject = alloc_cell(g_kernel, event);
         noun result  = nock(subject, slam);
 

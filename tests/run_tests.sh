@@ -1342,6 +1342,27 @@ T "tset: still armed after fire" "FFFFFFFFFFFFFFFF" \
 T "tset: no premature fire" "0000000000000000" \
     "TACLR QCLR  5 100000000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  TPOLL  QLEN ."
 
+# ── WP2 — slam op budget ──────────────────────────────────────────────────
+# BUDGET! n arms max Nock ops for subsequent NOCK; 0 = unlimited.
+# Infinite arm: core=[[9 2 [0 1]] 0] formula=[9 2 [1 core]] self-calls forever.
+
+T "budget: unlimited default" "0000000000000000" \
+    "0 BUDGET!  BUDGET@ ."
+
+T "budget: op0 within limit" "000000000000002A" \
+    "100 BUDGET!  42 N>N  0 N>N 1 N>N CONS  NOCK NOUN> .  0 BUDGET!"
+
+T "budget: OPS@ counts op0" "0000000000000001" \
+    "100 BUDGET!  42 N>N  0 N>N 1 N>N CONS  NOCK DROP  OPS@ .  0 BUDGET!"
+
+# Tiny budget: even *[42 [0 1]] needs 1 op — budget 0 means unlimited; use 1 ok
+T "budget: exact 1 op ok" "000000000000002A" \
+    "1 BUDGET!  42 N>N  0 N>N 1 N>N CONS  NOCK NOUN> .  0 BUDGET!"
+
+# Infinite self-arm under tight budget → longjmp; next line recovers
+BEFORE "5000 BUDGET!  0 N>N 1 N>N CONS 2 N>N SWAP CONS 9 N>N SWAP CONS  0 N>N CONS  1 N>N SWAP CONS 2 N>N SWAP CONS 9 N>N SWAP CONS  0 N>N SWAP NOCK DROP"
+T "budget: infinite arm aborts"  "000000000000002A" "0 BUDGET!  42 ."
+
 # ── Crash Recovery Hardening ───────────────────────────────────────────────
 # Each BEFORE triggers a nock_crash → longjmp, the T after verifies the REPL
 # recovers cleanly. Covers all nock_crash() sites in nock.c.

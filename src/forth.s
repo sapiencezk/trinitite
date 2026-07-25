@@ -275,6 +275,24 @@ defcode "ETOUT", 5, emit_timeout_word, 0
     bl      emit_timeout
     NEXT
 
+// BUDGET! ( n -- )  set Nock op budget for subsequent NOCK/SKNOCK; 0 = unlimited
+defcode "BUDGET!", 7, budget_store, 0
+    ldr     x0, [DSP], #8
+    bl      nock_budget_set
+    NEXT
+
+// BUDGET@ ( -- n )  current max op budget (0 = unlimited)
+defcode "BUDGET@", 7, budget_fetch, 0
+    bl      nock_budget_get
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// OPS@ ( -- n )  ops consumed since last BUDGET!
+defcode "OPS@", 4, ops_fetch, 0
+    bl      nock_ops_used
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // ═════════════════════════════════════════════════════════════════════════════
 // ARITHMETIC PRIMITIVES
 // ═════════════════════════════════════════════════════════════════════════════

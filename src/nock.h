@@ -35,12 +35,30 @@ typedef noun (*jet_fn_t)(noun core, const wilt_t *jets, sky_fn_t sky);
 
 /* ── Crash recovery ──────────────────────────────────────────────────────── */
 /* QUIT's restart path calls setjmp(nock_abort) to establish the recovery    */
-/* point.  nock_crash() calls longjmp(nock_abort,1) to unwind back to it.   */
+/* point.  nock_crash() calls longjmp(nock_abort, NOCK_ABORT_CRASH).         */
+/* Slam budget exhaustion uses longjmp(nock_abort, NOCK_ABORT_BUDGET).      */
 #include "setjmp.h"
 extern jmp_buf nock_abort;
 
+#define NOCK_ABORT_CRASH  1
+#define NOCK_ABORT_BUDGET 2
+
 /* ── Crash ───────────────────────────────────────────────────────────────── */
 __attribute__((noreturn)) void nock_crash(const char *msg);
+
+/* ── Slam op budget (WP2) ────────────────────────────────────────────────── */
+/*
+ * Deterministic op counter checked on every nock_eval / SKA eval entry.
+ * max_ops == 0 → unlimited (REPL / unit tests default).
+ * On fire: longjmp(nock_abort, NOCK_ABORT_BUDGET) — no product returned.
+ * Optional wall: every 256 ops call wall_check if set (kernel deadline).
+ */
+void     nock_budget_set(uint64_t max_ops);   /* also resets ops_used */
+uint64_t nock_budget_get(void);               /* current max (0 = off) */
+uint64_t nock_ops_used(void);
+void     nock_wall_check_set(int (*fn)(void)); /* 1 → budget abort */
+/* Tick one op; may longjmp. Public so SKA eval paths share the same budget. */
+void     nock_budget_tick(void);
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 noun nock(noun subject, noun formula);

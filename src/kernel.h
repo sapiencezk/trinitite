@@ -16,9 +16,12 @@
  * Multi-arm timers fire [%ei id %TICK 0] into the event queue (slip on overrun).
  * Legacy %tmrarm/%tmrcan remain the single global cooperative deadline.
  *
- * Idle schedule: when the event queue is empty the loop polls UART RX
+ * Idle schedule (WP1): when the event queue is empty the loop polls UART RX
  * (non-blocking), tarm_poll, and soft WDT — it does not block forever in
  * uart_recv_noun, so %tset arms can fire without a second UART poke.
+ *
+ * Slam budget (WP2): each event arms nock_budget_set(slam_budget); runaway
+ * eval longjmps NOCK_ABORT_BUDGET — no product commit, tarms kept, %timeout.
  *
  * Phase 6 hot-swap: STAGE + HSWAP at cooperative safe points (empty evq).
  * Phase 7: trace ring + soft WDT + canary (see trace.h).
@@ -37,6 +40,10 @@ void     deadline_set(uint64_t abs);
 uint64_t deadline_get(void);
 int      deadline_expired(void);
 void     emit_timeout(uint64_t elapsed);
+
+/* WP2 — per-slam Nock op budget (0 = unlimited; default 1e6 in kernel_loop) */
+void     slam_budget_set(uint64_t max_ops);
+uint64_t slam_budget_get(void);
 
 /* Multi-arm periodic timers (%tset / %tcan) — IEC host contract */
 void     tarm_set(uint64_t id, uint64_t period);  /* period 0 = cancel */

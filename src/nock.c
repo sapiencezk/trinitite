@@ -16,7 +16,45 @@ void nock_crash(const char *msg) {
     uart_puts("\r\nnock crash: ");
     uart_puts(msg);
     uart_puts("\r\n");
-    longjmp(nock_abort, 1);   /* unwind to QUIT restart */
+    longjmp(nock_abort, NOCK_ABORT_CRASH);   /* unwind to QUIT / kernel */
+}
+
+/* ── Slam op budget (WP2) ────────────────────────────────────────────────── */
+
+static uint64_t g_budget_max;          /* 0 = unlimited */
+static uint64_t g_ops_used;
+static int (*g_wall_check)(void);
+
+void nock_budget_set(uint64_t max_ops)
+{
+    g_budget_max = max_ops;
+    g_ops_used   = 0;
+}
+
+uint64_t nock_budget_get(void)
+{
+    return g_budget_max;
+}
+
+uint64_t nock_ops_used(void)
+{
+    return g_ops_used;
+}
+
+void nock_wall_check_set(int (*fn)(void))
+{
+    g_wall_check = fn;
+}
+
+void nock_budget_tick(void)
+{
+    /* Allow exactly max_ops entries: abort when the next would exceed. */
+    if (g_budget_max != 0 && g_ops_used >= g_budget_max)
+        longjmp(nock_abort, NOCK_ABORT_BUDGET);
+    g_ops_used++;
+    /* Cooperative wall deadline: poll every 256 ops when armed */
+    if (g_wall_check && (g_ops_used & 0xFFu) == 0 && g_wall_check())
+        longjmp(nock_abort, NOCK_ABORT_BUDGET);
 }
 
 /* ── Noun printer (%slog, %xray) ─────────────────────────────────────────── */
@@ -354,6 +392,7 @@ static noun nock_eval(noun subject, noun formula,
                       const wilt_t *jets, sky_fn_t sky) {
     wilt_t wild_buf;    /* local %wild registration buffer */
 loop:
+    nock_budget_tick();
     if (!noun_is_cell(formula))
         nock_crash("nock atom");
 
