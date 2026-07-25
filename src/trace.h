@@ -18,6 +18,8 @@
 #define T_NTX   8u   /* net TX stub; data = family 0/1/2 */
 #define T_NRX   9u   /* net RX loopback inject; data = family */
 #define T_BUD   10u  /* slam op budget fired; data = ops used low 32 */
+#define T_OVF   11u  /* event queue overflow (drop-newest); data = total drops */
+#define T_UFX   12u  /* unknown effect tag; data = cord low 32 */
 
 typedef struct {
     uint64_t t;

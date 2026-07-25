@@ -2951,6 +2951,48 @@ defcode "QLEN", 4, qlen, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// QCAP@ ( -- n )  event queue capacity (EVQ_CAP)
+defcode "QCAP@", 5, qcap_fetch, 0
+    bl      evq_cap
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// QHWM@ ( -- n )  high-water mark depth this session
+defcode "QHWM@", 5, qhwm_fetch, 0
+    bl      evq_hwm
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// QOVF@ ( -- n )  drop-newest overflow count
+defcode "QOVF@", 5, qovf_fetch, 0
+    bl      evq_overflows
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// QMETR ( -- )  reset overflow + hwm metrics
+defcode "QMETR", 5, qmetr, 0
+    bl      evq_metrics_reset
+    NEXT
+
+// SOFT! ( f -- )  crash policy: nonzero = soft (keep tarms on nock_crash)
+defcode "SOFT!", 5, soft_store, 0
+    ldr     x0, [DSP], #8
+    bl      crash_soft_set
+    NEXT
+
+// SOFT? ( -- f )  true if soft crash policy
+defcode "SOFT?", 5, soft_q, 0
+    bl      crash_soft_get
+    cmp     x0, #0
+    csetm   x0, ne
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// CREC ( -- )  apply host crash recovery (same as kernel_loop nock_crash path)
+defcode "CREC", 4, crec, 0
+    bl      crash_recover_host
+    NEXT
+
 // ALOOP ( kernel -- )   Arvo-shaped kernel event loop, never returns
 defcode "ALOOP", 5, arvo_loop_word, 0
     ldr     x0, [DSP], #8

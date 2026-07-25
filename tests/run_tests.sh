@@ -60,6 +60,7 @@ PREAMBLE=': N>N >NOUN ;
 : NOOP ;
 : MAXD 9223372036854775807 N>N ;
 : I63 MAXD 4 N>N 0 N>N 1 N>N CONS CONS NOCK ;
+: QFILL 0 BEGIN DUP QCAP@ < WHILE DUP ENQ 1+ REPEAT DROP ;
 HERE @ DUP SCORD ! 80 + HERE !
 SCORD @ 6144071398889562170 SWAP !
 SCORD @ 8 + 5714573285181694032 SWAP !
@@ -1155,6 +1156,42 @@ T "t2: ENQL first" "0000000000000001" \
 
 T "t2: ENQL second" "0000000000000002" \
     "DEQ DROP NOUN> ."
+
+# ── WP4 — queue cap + unknown effects + crash policy ──────────────────────
+# EVQ_CAP=256 drop-newest; QOVF@ counts drops; unknown DO-FX → T_UFX (12).
+
+T "wp4: QCAP@ is 256" "0000000000000100" \
+    "QCAP@ ."
+
+T "wp4: fill to cap" "0000000000000100" \
+    "QCLR QMETR  QFILL  QLEN ."
+
+T "wp4: drop-newest overflow" "0000000000000001" \
+    "QCLR QMETR  QFILL  999 ENQ  QOVF@ ."
+
+T "wp4: len stays at cap" "0000000000000100" \
+    "QCLR QMETR  QFILL  999 ENQ  QLEN ."
+
+T "wp4: hwm tracks fill" "0000000000000100" \
+    "QCLR QMETR  QFILL  QHWM@ ."
+
+T "wp4: deq frees a slot" "00000000000000FF" \
+    "QCLR QMETR  QFILL  DEQ DROP DROP  QLEN ."
+
+# Unknown tag cord 9999 → trace T_UFX=12
+T "wp4: unknown fx T_UFX" "000000000000000C" \
+    "TON TCLR  9999 >NOUN  0 >NOUN CONS  0 >NOUN CONS  DO-FX  TLAST@ DROP ."
+
+T "wp4: soft default off" "0000000000000000" \
+    "0 SOFT!  SOFT? ."
+
+# Hard CREC clears tarms
+T "wp4: hard CREC clears tarm" "0000000000000000" \
+    "0 SOFT!  TACLR  7 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  CREC  7 TACT? ."
+
+# Soft CREC keeps tarms
+T "wp4: soft CREC keeps tarm" "FFFFFFFFFFFFFFFF" \
+    "-1 SOFT!  TACLR  7 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  CREC  7 TACT?  0 SOFT! ."
 
 # ── Phase 3 industrial — MMIO + effects + IRQ ring ────────────────────────
 # MMIO@/MMIO! 32-bit.  Effects: %mmio %tmrarm %tmrcan %irq.

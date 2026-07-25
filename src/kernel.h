@@ -23,6 +23,10 @@
  * Slam budget (WP2): each event arms nock_budget_set(slam_budget); runaway
  * eval longjmps NOCK_ABORT_BUDGET — no product commit, tarms kept, %timeout.
  *
+ * Queue (WP4): cap EVQ_CAP (default 256); drop-newest on overflow (T_OVF +
+ * UART "overflow" once until clear). Unknown effect tags: T_UFX + UART
+ * "unkfx" once/session. Crash: hard clears tarms (default); soft keeps them.
+ *
  * Phase 6 hot-swap: STAGE + HSWAP at cooperative safe points (empty evq).
  * Phase 7: trace ring + soft WDT + canary (see trace.h).
  * Phase 8: networking stubs (see net.h).
@@ -54,13 +58,22 @@ int      tarm_active(uint64_t id);  /* 1 if armed */
 uint64_t tarm_next(uint64_t id);    /* next abs deadline, 0 if inactive */
 void     tarm_force_due(uint64_t id); /* test helper: next = now-1 if armed */
 
-/* Phase 2 — event queue */
-void     evq_enq(noun event);
+/* Phase 2 — event queue (WP4: capped, drop-newest) */
+void     evq_enq(noun event);           /* drop-newest if full */
 int      evq_deq(noun *out);
 int      evq_peek(noun *out);
-void     evq_clear(void);
+void     evq_clear(void);               /* empty queue; keeps overflow totals */
 uint64_t evq_len(void);
 void     evq_enq_list(noun list);
+uint64_t evq_cap(void);                 /* EVQ_CAP */
+uint64_t evq_hwm(void);                 /* high-water depth this session */
+uint64_t evq_overflows(void);           /* drop-newest count */
+void     evq_metrics_reset(void);       /* zero overflows + hwm baseline */
+
+/* WP4 — crash recovery: 0 hard (clear tarms), 1 soft (keep tarms) */
+void     crash_soft_set(int soft);
+int      crash_soft_get(void);
+void     crash_recover_host(void);  /* clear queue/IRQ; tarms per policy */
 
 /* Phase 3 — MMIO (32-bit) */
 uint32_t mmio_read32(uint64_t addr);

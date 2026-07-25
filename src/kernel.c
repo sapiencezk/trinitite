@@ -22,6 +22,7 @@
 #define CORD_IRQ     7434857ULL              /* %irq      */
 #define CORD_SWAPPED 28259031267243891ULL    /* %swapped  */
 #define CORD_WDT     7627895ULL              /* %wdt = "wdt" */
+/* WP4 — host hygiene (not all are kernel→app ISA; overflow/unk are host-visible) */
 
 /* Kernel event ISA cords for timer fire (IEC host → kernel) */
 #define CORD_EI      26981ULL                /* %ei       */
@@ -205,31 +206,78 @@ uint64_t mmio_scratch_addr(void)
     return (uint64_t)(uintptr_t)&g_mmio_scratch;
 }
 
-/* ── Phase 2 — FIFO event queue ──────────────────────────────────────────── */
+/* ── Phase 2 — FIFO event queue (WP4 capped) ─────────────────────────────── */
+/*
+ * Capacity EVQ_CAP. Policy: drop-newest (refuse enqueue when full).
+ * Preserves earlier FIFO order; increments overflow counter + T_OVF.
+ * Length maintained O(1) so enq does not walk the list for the cap check.
+ */
+#ifndef EVQ_CAP
+#define EVQ_CAP  256u
+#endif
 
-static noun g_evq;
+static noun     g_evq;
+static noun     g_evq_tail;   /* last cell for O(1) append */
+static uint64_t g_evq_n;
+static uint64_t g_evq_hwm;
+static uint64_t g_evq_overflows;
+static int      g_ovf_uart;   /* UART "overflow" once until QCLR */
 
 void evq_clear(void)
 {
-    g_evq = NOUN_ZERO;
+    g_evq            = NOUN_ZERO;
+    g_evq_tail       = NOUN_ZERO;
+    g_evq_n          = 0;
+    g_ovf_uart       = 0;
+    /* keep hwm + overflow totals across clear for session metrics */
+}
+
+uint64_t evq_cap(void)
+{
+    return EVQ_CAP;
+}
+
+uint64_t evq_hwm(void)
+{
+    return g_evq_hwm;
+}
+
+uint64_t evq_overflows(void)
+{
+    return g_evq_overflows;
+}
+
+void evq_metrics_reset(void)
+{
+    g_evq_hwm       = g_evq_n;
+    g_evq_overflows = 0;
+    g_ovf_uart      = 0;
 }
 
 void evq_enq(noun event)
 {
+    if (g_evq_n >= EVQ_CAP) {
+        g_evq_overflows++;
+        trace_rec(T_OVF, (uint32_t)g_evq_overflows);
+        if (!g_ovf_uart) {
+            g_ovf_uart = 1;
+            uart_puts("overflow\r\n");
+        }
+        return;   /* drop-newest */
+    }
+
     noun cell = alloc_cell(event, NOUN_ZERO);
     if (!noun_is_cell(g_evq)) {
-        g_evq = cell;
-        return;
+        g_evq      = cell;
+        g_evq_tail = cell;
+    } else {
+        cell_t *t = (cell_t *)(uintptr_t)cell_ptr(g_evq_tail);
+        t->tail    = cell;
+        g_evq_tail = cell;
     }
-    noun cur = g_evq;
-    for (;;) {
-        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(cur);
-        if (!noun_is_cell(c->tail)) {
-            c->tail = cell;
-            return;
-        }
-        cur = c->tail;
-    }
+    g_evq_n++;
+    if (g_evq_n > g_evq_hwm)
+        g_evq_hwm = g_evq_n;
 }
 
 int evq_deq(noun *out)
@@ -239,6 +287,10 @@ int evq_deq(noun *out)
     cell_t *c = (cell_t *)(uintptr_t)cell_ptr(g_evq);
     *out = c->head;
     g_evq = c->tail;
+    if (g_evq_n > 0)
+        g_evq_n--;
+    if (!noun_is_cell(g_evq))
+        g_evq_tail = NOUN_ZERO;
     return 1;
 }
 
@@ -253,13 +305,7 @@ int evq_peek(noun *out)
 
 uint64_t evq_len(void)
 {
-    uint64_t n = 0;
-    noun cur = g_evq;
-    while (noun_is_cell(cur)) {
-        n++;
-        cur = ((cell_t *)(uintptr_t)cell_ptr(cur))->tail;
-    }
-    return n;
+    return g_evq_n;
 }
 
 void evq_enq_list(noun list)
@@ -457,7 +503,15 @@ static void dispatch_one(noun tag, noun data) {
         net_handle_ctx(data);
         return;
     }
-    /* unknown: silent ignore */
+    /* WP4: unknown tag — always trace; UART once per session */
+    {
+        static int unk_uart;
+        trace_rec(T_UFX, (uint32_t)t);
+        if (!unk_uart) {
+            unk_uart = 1;
+            uart_puts("unkfx\r\n");
+        }
+    }
 }
 
 void dispatch_effects(noun effects) {
@@ -562,6 +616,36 @@ static noun build_slam_formula(void) {
                alloc_cell(direct(0), direct(2))))));
 }
 
+/* ── Crash recovery policy (WP4) ─────────────────────────────────────────── */
+/*
+ * Hard crash (default): clear evq + IRQ ring + all tarms.
+ *   Why clear tarms? After nock_crash the gate may be mid-invariants; IEC
+ *   periods re-armed from app state on the next cold event is safer than
+ *   firing TICKs into a recovered shrine with stale arms.
+ * Soft crash (g_soft_crash): keep tarms; still clear queue + IRQ ring so
+ *   partial cause cascades do not resume. For demos that re-arm themselves.
+ */
+static int g_soft_crash;
+
+void crash_soft_set(int soft)
+{
+    g_soft_crash = soft ? 1 : 0;
+}
+
+int crash_soft_get(void)
+{
+    return g_soft_crash;
+}
+
+/* Shared host recovery (kernel_loop longjmp + CREC for tests). */
+void crash_recover_host(void)
+{
+    evq_clear();
+    irq_ring_clear();
+    if (!g_soft_crash)
+        tarm_clear();
+}
+
 /* ── Kernel event loops ──────────────────────────────────────────────────── */
 
 /* Default slam op budget (WP2). 0 = unlimited. Large enough for moderate
@@ -597,9 +681,7 @@ static void kernel_loop(noun kernel_init, int shrine)
         int jr = setjmp(nock_abort);
         if (jr == NOCK_ABORT_CRASH) {
             uart_puts("\r\nkernel crash\r\n");
-            evq_clear();
-            irq_ring_clear();
-            tarm_clear();
+            crash_recover_host();
             continue;
         }
         if (jr == NOCK_ABORT_BUDGET) {
