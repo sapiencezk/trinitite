@@ -100,6 +100,10 @@ C `hot_state` labels (via `%wild` on op9):
 **KERNEL / `nock_eval`:** C only.  
 **SKA `nock_op9_continue`:** Forth dictionary first, then C (arithmetic names may be shadowed in REPL).
 
+### Jet pack vs Hoon twin (Epic #5 WP2)
+
+Existing pure jets are **sufficient** for the shipped closed pure-Nock IEC lowerer (Hoon twin path): demo cascade ≈ 1.8e3 mini_nock entries/slam vs **1e6** default budget (~550× headroom). See `docs/hoon/JET-BUDGET.md`. No MMIO jets. Soft/mold acceleration not added; prefer soft-free Hoon/Nock.
+
 ---
 
 ## 7. Versioning
