@@ -35,7 +35,7 @@ Walk `[[tag data] rest]`. Known tags (cords, LSB-first ASCII):
 
 | Tag | Data | Behaviour |
 |-----|------|-----------|
-| `%out` / `%blit` | atom | Print bytes to UART |
+| `%out` / `%blit` | atom | Print bytes to UART (see §2.1 payload policy) |
 | `%timeout` | elapsed | Print `timeout`; used for **slam deadline and op-budget abort** |
 | `%mmio` | `[addr val]` | 32-bit store |
 | `%tmrarm` / `%tmrcan` | abs / — | Legacy **single** cooperative wall deadline (slam wall) |
@@ -48,6 +48,33 @@ Walk `[[tag data] rest]`. Known tags (cords, LSB-first ASCII):
 **Unknown tags:** not silent — `trace_rec(T_UFX)` + one-shot UART `unkfx` per session. Apps should not rely on unknown tags.
 
 **Not an app effect today:** queue overflow is host-side (`overflow` UART + `T_OVF` + `QOVF@`). No `%overflow` tag in the effect list (avoids effect→queue re-entry storms). Documented for possible later ISA bump.
+
+### 2.1 OUT / `%out` payload policy (EP8, 1499kernel)
+
+IEC `OUT` SIFB product places an **atom** in `%out` data. Host prints that atom as raw bytes (no decoding).
+
+| `di.Q` (after WITH/dwire) | `%out` data atom | Typical UART |
+|---------------------------|------------------|--------------|
+| missing / no Q | cord `OK` | `OK` |
+| `0` | cord `Q0` | `Q0` |
+| `1` | cord `Q1` | `Q1` |
+| other atom | that atom | host-dependent |
+
+**Law:** Python `out_payload_from_di` and pure `f_handle_out` dual-match.  
+**Field demo:** `apps/pipeline` dwire `src.Q→out.Q` → cascade expects UART **`Q1`**.  
+**Scripts:** `bash tests/field-demo.sh` or `bash tests/app-poke.sh pipeline`.
+
+### 2.2 As-built cascade measurements (EP8 offline dual)
+
+Cold `[%ei restart COLD]` chain (Python step + pure dual lockstep; inject TICK on `%tset`):
+
+| App | Steps | `%tset` | `%out` | Notes |
+|-----|------:|--------:|-------:|-------|
+| demo | 5 | 1 | 1×`OK` | linear cascade |
+| fanout | 6 | 1 | 2×`OK` | multi-sink OUT |
+| pipeline | 6 | 1 | 1×`Q1` | dwire+WITH; UART field demo |
+
+Multi-arm `%tset` → host enqueues `[%ei id %TICK 0]` while idle (**no second UART poke**). Queue cap **256** drop-newest; metrics `QLEN` `QHWM@` `QOVF@`. Slam budget default **1e6** ops/event.
 
 ---
 
@@ -129,11 +156,14 @@ If a future change adds `%budget` / `%overflow` as effects, bump:
 ```bash
 make -C trinitite test          # 523+ goldens
 bash trinitite/tests/kernel-boot.sh   # includes idle-timer path
-bash tests/demo-poke.sh         # from 1499kernel; pure-Nock shrine pill
+# from 1499kernel:
+bash tests/demo-poke.sh         # demo pill; UART OK
+bash tests/app-poke.sh fanout
+bash tests/field-demo.sh        # pipeline; UART Q1 (EP8)
 ```
 
 Key sources: `src/kernel.c`, `src/kernel.h`, `src/nock.c`, `src/uart.c`, `src/memory.h`.
 
 ---
 
-*Host epic complete. Next product work: IEC data-driven stepper in Nock (1499kernel), not more host C unless a new gap appears.*
+*Host industrial base + EP8 payload/field-demo contract. Prefer 1499kernel OUT product changes over host C unless print path is insufficient.*
