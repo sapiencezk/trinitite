@@ -38,6 +38,10 @@ all: $(TARGET).img
 %.o: %.s
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# M3 fake-media test words are compiled only into the explicit fake build.
+forth.o: $(SRCDIR)/forth.s
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c $< -o $@
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
