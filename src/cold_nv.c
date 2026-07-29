@@ -9,8 +9,8 @@
  * 8MB region is written to a host file (default "cold.img") so a subsequent
  * QEMU boot with -device loader,file=cold.img,addr=0x07100000 reloads it.
  *
- * Real SDHCI backend can replace cold_nv_flush later; cold_read/write API
- * stays the same (memcpy into COLD_BASE, then optional flush).
+ * This is selected only by COLD_MEDIA=semihost. COLD_MEDIA=rpi4-sd instead
+ * mirrors each ordered logical phase through the target-private EMMC2 path.
  */
 
 /* Angel semihosting (AArch64): HLT #0xF000, x0=op, x1=&params */

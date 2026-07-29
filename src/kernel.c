@@ -12,6 +12,7 @@
 #include "kernel.h"
 #include "runtime_identity.h"
 #include "i2_ingress.h"
+#include "runtime_stats.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
 #define CORD_OUT     7632239ULL              /* %out      */
@@ -147,7 +148,10 @@ typedef struct {
 static tarm_t g_tarms[TARM_MAX];
 static uint64_t atom_u64_early(noun a);
 static noun make_i2_timer_event(noun token, uint64_t fired_at);
-static void evq_enq_prebuilt(noun cell);
+static int evq_enq_timed(noun event, uint64_t admitted_tick,
+                         uint64_t timer_due_tick, uint64_t flags);
+static int evq_enq_prebuilt(noun cell, uint64_t admitted_tick,
+                            uint64_t timer_due_tick, uint64_t flags);
 
 static int tarm_find(uint64_t id)
 {
@@ -217,6 +221,7 @@ void tarm_set_i2(uint64_t id, uint64_t period, noun i2_token)
         g_tarms[i].i2_token = NOUN_ZERO;
         g_tarms[i].i2_event_cell = NOUN_ZERO;
     }
+    runtime_stats_count(RT_COUNT_TIMER_ARMS, 1);
 }
 
 static void tarm_can_i2(noun token)
@@ -228,6 +233,7 @@ static void tarm_can_i2(noun token)
         g_tarms[i].i2_token = NOUN_ZERO;
         g_tarms[i].i2_event_cell = NOUN_ZERO;
         g_tarms[i].active = 0;
+        runtime_stats_count(RT_COUNT_TIMER_CANCELS, 1);
     }
 }
 
@@ -242,6 +248,7 @@ void tarm_can(uint64_t id)
         }
         g_tarms[i].active = 0;
         g_tarms[i].i2_event_cell = NOUN_ZERO;
+        runtime_stats_count(RT_COUNT_TIMER_CANCELS, 1);
     }
 }
 
@@ -458,13 +465,35 @@ void tarm_poll(void)
             cell_t *outer = (cell_t *)(uintptr_t)cell_ptr(event);
             cell_t *body = (cell_t *)(uintptr_t)cell_ptr(outer->tail);
             body->tail = direct(now);
-            evq_enq_prebuilt(g_tarms[i].i2_event_cell);
+            uint64_t due = g_tarms[i].next;
+            (void)evq_enq_prebuilt(
+                g_tarms[i].i2_event_cell, now, due, 1);
+            runtime_stats_count(RT_COUNT_TIMER_FIRES, 1);
+            runtime_stats_max(
+                RT_COUNT_TIMER_LATENESS_MAX, now >= due ? now - due : 0);
+            {
+                uint64_t enqueued = runtime_counter_now();
+                runtime_stats_record(
+                    RT_PHASE_TIMER_DUE_TO_ENQUEUE,
+                    enqueued >= due ? enqueued - due : 0);
+            }
             cell_dec(g_tarms[i].i2_token);
             g_tarms[i].i2_token = NOUN_ZERO;
             g_tarms[i].i2_event_cell = NOUN_ZERO;
             g_tarms[i].active = 0;
         } else {
-            evq_enq(make_tick_event(g_tarms[i].id));
+            uint64_t due = g_tarms[i].next;
+            (void)evq_enq_timed(
+                make_tick_event(g_tarms[i].id), now, due, 1);
+            runtime_stats_count(RT_COUNT_TIMER_FIRES, 1);
+            runtime_stats_max(
+                RT_COUNT_TIMER_LATENESS_MAX, now >= due ? now - due : 0);
+            {
+                uint64_t enqueued = runtime_counter_now();
+                runtime_stats_record(
+                    RT_PHASE_TIMER_DUE_TO_ENQUEUE,
+                    enqueued >= due ? enqueued - due : 0);
+            }
             /* Legacy %tset is periodic and slips rather than catching up. */
             g_tarms[i].next = now + g_tarms[i].period;
         }
@@ -508,12 +537,46 @@ static uint64_t g_evq_hwm;
 static uint64_t g_evq_overflows;
 static int      g_ovf_uart;   /* UART "overflow" once until QCLR */
 
+typedef struct {
+    uint64_t admitted_tick;
+    uint64_t timer_due_tick;
+    uint64_t flags;
+} evq_timing_t;
+
+#define EVQ_TIMING_TIMER    1u
+#define EVQ_TIMING_RESTORED 2u
+
+static evq_timing_t g_evq_timing[EVQ_CAP];
+static evq_timing_t g_evq_timing_candidate[EVQ_CAP];
+static uint32_t g_evq_timing_head;
+
+static evq_timing_t evq_timing_at(uint64_t logical_index)
+{
+    return g_evq_timing[
+        (g_evq_timing_head + (uint32_t)logical_index) & (EVQ_CAP - 1u)];
+}
+
+static void evq_note_depth(void)
+{
+    if (g_evq_n > g_evq_hwm)
+        g_evq_hwm = g_evq_n;
+    runtime_stats_max(RT_COUNT_QUEUE_HWM, g_evq_n);
+}
+
+static void evq_note_overflow(void)
+{
+    g_evq_overflows++;
+    runtime_stats_count(RT_COUNT_QUEUE_OVERFLOWS, 1);
+    trace_rec(T_OVF, (uint32_t)g_evq_overflows);
+}
+
 void evq_clear(void)
 {
     g_evq            = NOUN_ZERO;
     g_evq_tail       = NOUN_ZERO;
     g_evq_n          = 0;
     g_ovf_uart       = 0;
+    g_evq_timing_head = 0;
     /* keep hwm + overflow totals across clear for session metrics */
 }
 
@@ -539,16 +602,16 @@ void evq_metrics_reset(void)
     g_ovf_uart      = 0;
 }
 
-void evq_enq(noun event)
+static int evq_enq_timed(noun event, uint64_t admitted_tick,
+                         uint64_t timer_due_tick, uint64_t flags)
 {
     if (g_evq_n >= EVQ_CAP) {
-        g_evq_overflows++;
-        trace_rec(T_OVF, (uint32_t)g_evq_overflows);
+        evq_note_overflow();
         if (!g_ovf_uart) {
             g_ovf_uart = 1;
             uart_puts("overflow\r\n");
         }
-        return;   /* drop-newest */
+        return 0;   /* drop-newest */
     }
 
     /* Queue lives in PERSIST so scratch reset cannot free pending events */
@@ -566,18 +629,28 @@ void evq_enq(noun event)
         t->tail    = cell;
         g_evq_tail = cell;
     }
+    uint32_t timing_slot =
+        (g_evq_timing_head + (uint32_t)g_evq_n) & (EVQ_CAP - 1u);
+    g_evq_timing[timing_slot].admitted_tick = admitted_tick;
+    g_evq_timing[timing_slot].timer_due_tick = timer_due_tick;
+    g_evq_timing[timing_slot].flags = flags;
     g_evq_n++;
-    if (g_evq_n > g_evq_hwm)
-        g_evq_hwm = g_evq_n;
+    evq_note_depth();
+    return 1;
+}
+
+void evq_enq(noun event)
+{
+    (void)evq_enq_timed(event, runtime_counter_now(), 0, 0);
 }
 
 /* Transaction-reserved queue node: append without copying or allocation. */
-static void evq_enq_prebuilt(noun cell)
+static int evq_enq_prebuilt(noun cell, uint64_t admitted_tick,
+                            uint64_t timer_due_tick, uint64_t flags)
 {
     if (g_evq_n >= EVQ_CAP) {
-        g_evq_overflows++;
-        trace_rec(T_OVF, (uint32_t)g_evq_overflows);
-        return;
+        evq_note_overflow();
+        return 0;
     }
     if (!noun_is_cell(g_evq)) {
         g_evq = cell;
@@ -586,23 +659,36 @@ static void evq_enq_prebuilt(noun cell)
         ((cell_t *)(uintptr_t)cell_ptr(g_evq_tail))->tail = cell;
         g_evq_tail = cell;
     }
+    uint32_t timing_slot =
+        (g_evq_timing_head + (uint32_t)g_evq_n) & (EVQ_CAP - 1u);
+    g_evq_timing[timing_slot].admitted_tick = admitted_tick;
+    g_evq_timing[timing_slot].timer_due_tick = timer_due_tick;
+    g_evq_timing[timing_slot].flags = flags;
     g_evq_n++;
-    if (g_evq_n > g_evq_hwm)
-        g_evq_hwm = g_evq_n;
+    evq_note_depth();
+    return 1;
 }
 
-int evq_deq(noun *out)
+static int evq_deq_timed(noun *out, evq_timing_t *timing)
 {
     if (!noun_is_cell(g_evq))
         return 0;
     cell_t *c = (cell_t *)(uintptr_t)cell_ptr(g_evq);
     *out = c->head;
+    if (timing)
+        *timing = g_evq_timing[g_evq_timing_head];
+    g_evq_timing_head = (g_evq_timing_head + 1u) & (EVQ_CAP - 1u);
     g_evq = c->tail;
     if (g_evq_n > 0)
         g_evq_n--;
     if (!noun_is_cell(g_evq))
         g_evq_tail = NOUN_ZERO;
     return 1;
+}
+
+int evq_deq(noun *out)
+{
+    return evq_deq_timed(out, 0);
 }
 
 int evq_peek(noun *out)
@@ -628,6 +714,50 @@ void evq_enq_list(noun list)
     }
 }
 
+uint64_t kernel_queue_pressure_selftest(uint64_t percent)
+{
+    uint64_t failures = 0;
+    if (percent != 0 && percent != 50 && percent != 90)
+        return 1;
+    if (g_evq_n != 0)
+        return 2;
+
+    uint64_t target = (EVQ_CAP * percent) / 100;
+    runtime_stats_set(RT_COUNT_PRESSURE_PERCENT, percent);
+    runtime_stats_set(RT_COUNT_PRESSURE_DEPTH, target);
+    evq_metrics_reset();
+    for (uint64_t i = 0; i < target; i++)
+        evq_enq(direct(i + 1));
+    if (g_evq_n != target || g_evq_hwm != target
+        || g_evq_overflows != 0)
+        failures |= 1ULL << 0;
+    for (uint64_t i = 0; i < target; i++) {
+        noun event = NOUN_ZERO;
+        if (!evq_deq(&event) || event != direct(i + 1))
+            failures |= 1ULL << 1;
+    }
+    if (g_evq_n != 0)
+        failures |= 1ULL << 2;
+
+    /* Each case also proves the full/drop-newest rejection edge. */
+    evq_metrics_reset();
+    for (uint64_t i = 0; i < EVQ_CAP; i++)
+        evq_enq(direct(i + 1));
+    evq_enq(direct(EVQ_CAP + 1));
+    runtime_stats_count(RT_COUNT_EXPECTED_PRESSURE_REJECTS, 1);
+    if (g_evq_n != EVQ_CAP || g_evq_overflows != 1)
+        failures |= 1ULL << 3;
+    for (uint64_t i = 0; i < EVQ_CAP; i++) {
+        noun event = NOUN_ZERO;
+        if (!evq_deq(&event) || event != direct(i + 1))
+            failures |= 1ULL << 4;
+    }
+    if (g_evq_n != 0)
+        failures |= 1ULL << 5;
+    evq_clear();
+    return failures;
+}
+
 /*
  * Persist semispace compaction (ArenaHost-shaped).
  *
@@ -640,7 +770,8 @@ void evq_enq_list(noun list)
  * Caller must retain scratch until after the corresponding activation pass
  * (the effect nouns remain in scratch until UART activation completes).
  */
-static int candidate_enqueue(noun event, int copy_event, noun *head,
+static int candidate_enqueue(noun event, int copy_event,
+                             evq_timing_t timing, noun *head,
                              noun *tail, uint64_t *count)
 {
     noun retained = event, node;
@@ -653,6 +784,9 @@ static int candidate_enqueue(noun event, int copy_event, noun *head,
         ((cell_t *)(uintptr_t)cell_ptr(*tail))->tail = node;
         *tail = node;
     }
+    if (*count >= EVQ_CAP)
+        return 0;
+    g_evq_timing_candidate[*count] = timing;
     (*count)++;
     return 1;
 }
@@ -686,6 +820,8 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
     uint64_t candidate_n = 0;
     noun candidate_completions[I2_MAX_PENDING_SERVICES];
     int candidate_completion_n = 0;
+    uint64_t candidate_timer_arms = 0;
+    uint64_t candidate_timer_cancels = 0;
     if (!noun_copy_checked(new_gate, &candidate_gate))
         goto alloc_fail;
 
@@ -695,8 +831,10 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
         uint64_t n = 0;
         while (noun_is_cell(q) && n < QCAP) {
             cell_t *c = (cell_t *)(uintptr_t)cell_ptr(q);
+            evq_timing_t timing = evq_timing_at(n);
             if (!candidate_enqueue(
-                    c->head, 1, &candidate_q, &candidate_tail, &candidate_n))
+                    c->head, 1, timing,
+                    &candidate_q, &candidate_tail, &candidate_n))
                 goto alloc_fail;
             q = c->tail;
             n++;
@@ -704,8 +842,10 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
     }
     while (noun_is_cell(new_causes)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(new_causes);
+        evq_timing_t timing = {0};
         if (!candidate_enqueue(
-                c->head, 1, &candidate_q, &candidate_tail, &candidate_n))
+                c->head, 1, timing,
+                &candidate_q, &candidate_tail, &candidate_n))
             goto alloc_fail;
         new_causes = c->tail;
     }
@@ -748,6 +888,7 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
                     candidate_tarms[slot].i2_token,
                     &candidate_tarms[slot].i2_event_cell))
                 goto alloc_fail;
+            candidate_timer_arms++;
         } else if (tag_is_i2_timer_cancel(tag, t)) {
             int slot = -1;
             for (int i = 0; i < TARM_MAX; i++)
@@ -759,13 +900,15 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
             candidate_tarms[slot].active = 0;
             candidate_tarms[slot].i2_token = NOUN_ZERO;
             candidate_tarms[slot].i2_event_cell = NOUN_ZERO;
+            candidate_timer_cancels++;
         } else if (tag_is_i2_service_request(tag, t)) {
             cell_t *c = (cell_t *)(uintptr_t)cell_ptr(data);
             noun completion;
             if (candidate_completion_n >= I2_MAX_PENDING_SERVICES
                 || !make_i2_service_event_checked(c->head, &completion)
                 || !candidate_enqueue(
-                    completion, 0, &candidate_q, &candidate_tail, &candidate_n))
+                    completion, 0, (evq_timing_t){0},
+                    &candidate_q, &candidate_tail, &candidate_n))
                 goto alloc_fail;
             candidate_completions[candidate_completion_n++] = completion;
         }
@@ -779,11 +922,19 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
         goto alloc_fail;
 
     /* The one publication point: no candidate allocation follows. */
+    uint64_t publication_tick = runtime_counter_now();
+    for (uint64_t i = 0; i < candidate_n; i++) {
+        if (g_evq_timing_candidate[i].admitted_tick == 0)
+            g_evq_timing_candidate[i].admitted_tick = publication_tick;
+    }
     g_kernel = candidate_gate;
     g_slam_formula = candidate_slam;
     g_evq = candidate_q;
     g_evq_tail = candidate_tail;
     g_evq_n = candidate_n;
+    g_evq_timing_head = 0;
+    for (uint64_t i = 0; i < candidate_n; i++)
+        g_evq_timing[i] = g_evq_timing_candidate[i];
     if (g_evq_n > g_evq_hwm)
         g_evq_hwm = g_evq_n;
     for (int i = 0; i < TARM_MAX; i++)
@@ -792,6 +943,9 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
         g_activation_completions[i] = candidate_completions[i];
     g_activation_completion_n = candidate_completion_n;
     heap_persist_commit_tx();
+    runtime_stats_count(RT_COUNT_TIMER_ARMS, candidate_timer_arms);
+    runtime_stats_count(RT_COUNT_TIMER_CANCELS, candidate_timer_cancels);
+    runtime_stats_note_memory();
     *slam_out = candidate_slam;
     return 1;
 
@@ -1074,6 +1228,8 @@ static void dispatch_i2_activate(noun effects)
         uint64_t t = noun_is_direct(tag) ? direct_val(tag) : 0;
         if (tag_is_i2_service_request(tag, t)) {
             int ok = i2_service_uart_print_bounded(data);
+            runtime_stats_count(
+                ok ? RT_COUNT_SERVICE_SUCCESS : RT_COUNT_SERVICE_FAILURE, 1);
             if (completion_i < g_activation_completion_n)
                 i2_service_completion_status(
                     g_activation_completions[completion_i], ok ? 0 : 6);
@@ -1140,7 +1296,8 @@ uint64_t kernel_tx_stuck_selftest(void)
     noun reserved_q = NOUN_ZERO, reserved_tail = NOUN_ZERO;
     uint64_t reserved_n = 0;
     if (!candidate_enqueue(
-            completion0, 0, &reserved_q, &reserved_tail, &reserved_n)
+            completion0, 0, (evq_timing_t){0},
+            &reserved_q, &reserved_tail, &reserved_n)
         || reserved_n != 1 || !noun_is_cell(reserved_q)
         || ((cell_t *)(uintptr_t)cell_ptr(reserved_q))->head != completion0) {
         noun_tx_abort();
@@ -1585,7 +1742,7 @@ static void reject_event_scratch(void)
     heap_scratch_reset();
 }
 
-static void kernel_loop(noun kernel_init, int shrine)
+static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
 {
     g_kernel       = kernel_init;
     g_shrine_mode  = shrine ? 1 : 0;
@@ -1597,6 +1754,7 @@ static void kernel_loop(noun kernel_init, int shrine)
     nock_wall_check_set(deadline_expired);
     uart_puts(g_shrine_mode ? "\r\ntrinitite shrine\r\n"
                              : "\r\ntrinitite arvo\r\n");
+    volatile uint64_t completed = 0;
 
     for (;;) {
         int jr = setjmp(nock_abort);
@@ -1611,6 +1769,8 @@ static void kernel_loop(noun kernel_init, int shrine)
                  * allocator state only; old gate/FIFO/registries are still
                  * live and must not be treated as a structural Nock crash. */
                 g_i2_preparing = 0;
+                runtime_stats_count(RT_COUNT_PROMOTE_COPY_FAULTS, 1);
+                runtime_stats_count(RT_COUNT_ABORTS, 1);
                 heap_set_mode(HEAP_MODE_PERSIST);
                 heap_scratch_reset();
                 continue;
@@ -1626,6 +1786,10 @@ static void kernel_loop(noun kernel_init, int shrine)
              */
             uart_puts("\r\nbudget\r\n");
             trace_rec(T_BUD, (uint32_t)nock_ops_used());
+            runtime_stats_count(
+                nock_budget_abort_reason() == 2
+                    ? RT_COUNT_DEADLINE_FAULTS : RT_COUNT_BUDGET_FAULTS, 1);
+            runtime_stats_count(RT_COUNT_ABORTS, 1);
             emit_timeout(nock_ops_used());
             deadline_set(0);
             reject_event_scratch();
@@ -1636,10 +1800,13 @@ static void kernel_loop(noun kernel_init, int shrine)
         swap_apply_if_ready();
 
         /* Phase 7: software WDT + canary at loop head */
-        if (wdt_check())
+        if (wdt_check()) {
+            runtime_stats_count(RT_COUNT_WDT_FAILURES, 1);
             emit_wdt();
+        }
         wdt_kick();
         if (!canary_ok()) {
+            runtime_stats_count(RT_COUNT_CANARY_FAILURES, 1);
             trace_rec(T_CAN, 0);
             uart_puts("canary\r\n");
         }
@@ -1652,7 +1819,13 @@ static void kernel_loop(noun kernel_init, int shrine)
 
         noun event;
         int event_from_i2_rx = 0;
-        if (!evq_deq(&event)) {
+        int event_from_queue = 0;
+        evq_timing_t event_timing = {0};
+        uint64_t event_admit_tick = 0;
+        if (evq_deq_timed(&event, &event_timing)) {
+            event_from_queue = 1;
+            event_admit_tick = event_timing.admitted_tick;
+        } else {
             /*
              * Idle path (WP1): do not block forever in uart_recv_noun.
              * While the queue is empty and no UART frame has started,
@@ -1669,26 +1842,47 @@ static void kernel_loop(noun kernel_init, int shrine)
                         heap_set_mode(HEAP_MODE_SCRATCH);
                         if (i2_rx_take(&event)) {
                             event_from_i2_rx = 1;
+                            event_admit_tick = runtime_counter_now();
                             break;
                         }
                     }
                 } else if (uart_rx_ready()) {
                     event = uart_recv_noun();
+                    event_admit_tick = runtime_counter_now();
                     break;
                 }
                 tarm_poll();
-                if (evq_deq(&event))
+                if (evq_deq_timed(&event, &event_timing)) {
+                    event_from_queue = 1;
+                    event_admit_tick = event_timing.admitted_tick;
                     break;
-                if (wdt_check())
+                }
+                if (wdt_check()) {
+                    runtime_stats_count(RT_COUNT_WDT_FAILURES, 1);
                     emit_wdt();
+                }
                 wdt_kick();
                 if (!canary_ok()) {
+                    runtime_stats_count(RT_COUNT_CANARY_FAILURES, 1);
                     trace_rec(T_CAN, 0);
                     uart_puts("canary\r\n");
                 }
             }
         }
 
+        uint64_t slam_start = runtime_counter_now();
+        if (event_admit_tick == 0)
+            event_admit_tick = slam_start;
+        runtime_stats_count(RT_COUNT_EVENTS_ADMITTED, 1);
+        if (event_from_queue
+            && !(event_timing.flags & EVQ_TIMING_RESTORED)) {
+            uint64_t residence = slam_start >= event_admit_tick
+                ? slam_start - event_admit_tick : 0;
+            runtime_stats_record(RT_PHASE_QUEUE_RESIDENCE, residence);
+            if (event_timing.flags & EVQ_TIMING_TIMER)
+                runtime_stats_record(
+                    RT_PHASE_TIMER_ENQUEUE_TO_SLAM, residence);
+        }
         uint64_t t0 = 0;
         if (trace_enabled()) {
             __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t0));
@@ -1702,7 +1896,13 @@ static void kernel_loop(noun kernel_init, int shrine)
 
         nock_budget_set(g_slam_budget);
         noun subject = alloc_cell(g_kernel, event);
+        slam_start = runtime_counter_now();
         noun result  = nock(subject, slam);
+        uint64_t slam_end = runtime_counter_now();
+        runtime_stats_record(
+            RT_PHASE_NOCK_SLAM,
+            slam_end >= slam_start ? slam_end - slam_start : 0);
+        runtime_stats_note_memory();
 
         if (trace_enabled()) {
             uint64_t t1;
@@ -1711,6 +1911,8 @@ static void kernel_loop(noun kernel_init, int shrine)
         }
 
         if (deadline_expired()) {
+            runtime_stats_count(RT_COUNT_DEADLINE_FAULTS, 1);
+            runtime_stats_count(RT_COUNT_ABORTS, 1);
             emit_timeout(0);
             deadline_set(0);
             reject_event_scratch();
@@ -1718,6 +1920,7 @@ static void kernel_loop(noun kernel_init, int shrine)
         }
 
         if (!noun_is_cell(result)) {
+            runtime_stats_count(RT_COUNT_ABORTS, 1);
             uart_puts("bad result\r\n");
             reject_event_scratch();
             continue;
@@ -1734,7 +1937,9 @@ static void kernel_loop(noun kernel_init, int shrine)
         if (g_shrine_mode && noun_is_direct(r->head)) {
             uint64_t rh = direct_val(r->head);
             if (rh == CORD_COMMIT) {
+                uint64_t promote_start = runtime_counter_now();
                 if (!noun_is_cell(r->tail)) {
+                    runtime_stats_count(RT_COUNT_ABORTS, 1);
                     uart_puts("bad result\r\n");
                     reject_event_scratch();
                     continue;
@@ -1742,12 +1947,15 @@ static void kernel_loop(noun kernel_init, int shrine)
                 cell_t *prod = (cell_t *)(uintptr_t)cell_ptr(r->tail);
                 noun effects = prod->head;
                 if (!noun_is_cell(prod->tail)) {
+                    runtime_stats_count(RT_COUNT_ABORTS, 1);
                     uart_puts("bad result\r\n");
                     reject_event_scratch();
                     continue;
                 }
                 cell_t *gc = (cell_t *)(uintptr_t)cell_ptr(prod->tail);
                 if (!i2_preflight_effects(effects, gc->tail)) {
+                    runtime_stats_count(RT_COUNT_PREFLIGHT_REJECTS, 1);
+                    runtime_stats_count(RT_COUNT_ABORTS, 1);
                     static int pf_uart;
                     if (!pf_uart) {
                         pf_uart = 1;
@@ -1765,6 +1973,8 @@ static void kernel_loop(noun kernel_init, int shrine)
                 if (!persist_compact(
                         gc->head, gc->tail, effects, &slam)) {
                     g_i2_preparing = 0;
+                    runtime_stats_count(RT_COUNT_PROMOTE_COPY_FAULTS, 1);
+                    runtime_stats_count(RT_COUNT_ABORTS, 1);
                     uart_puts("promote\r\n");
                     reject_event_scratch();
                     continue;
@@ -1772,19 +1982,42 @@ static void kernel_loop(noun kernel_init, int shrine)
                 g_i2_preparing = 0;
                 if (noun_tx_active())
                     noun_tx_commit();
+                {
+                    uint64_t promoted = runtime_counter_now();
+                    runtime_stats_record(
+                        RT_PHASE_VALIDATE_RESERVE_PROMOTE,
+                        promoted >= promote_start
+                            ? promoted - promote_start : 0);
+                }
+                uint64_t activate_start = runtime_counter_now();
                 dispatch_i2_activate(effects);
+                uint64_t activated = runtime_counter_now();
+                runtime_stats_record(
+                    RT_PHASE_ACTIVATE,
+                    activated >= activate_start
+                        ? activated - activate_start : 0);
+                runtime_stats_record(
+                    RT_PHASE_ADMIT_TO_ACTIVATE,
+                    activated >= event_admit_tick
+                        ? activated - event_admit_tick : 0);
+                runtime_stats_count(RT_COUNT_COMMITS, 1);
+                completed++;
                 heap_set_mode(HEAP_MODE_PERSIST);
                 heap_scratch_reset();
+                runtime_stats_note_memory();
                 /* Optional durable checkpoint (cold RAM store; SD later) */
                 if (g_ckpt_every) {
                     g_ckpt_commits++;
                     if (g_ckpt_commits % g_ckpt_every == 0)
                         checkpoint_save();
                 }
+                if (max_commits && completed >= max_commits)
+                    return;
                 continue;
             }
             if (rh == CORD_ABORT) {
                 /* keep g_kernel; drop effects (Host ABI abort path) */
+                runtime_stats_count(RT_COUNT_ABORTS, 1);
                 reject_event_scratch();
                 continue;
             }
@@ -1794,6 +2027,7 @@ static void kernel_loop(noun kernel_init, int shrine)
          * Shrine product grammar. The compatibility path is selected only by
          * a legacy pill lacking the I2 magic/identity anchor. */
         if (runtime_identity_live()) {
+            runtime_stats_count(RT_COUNT_ABORTS, 1);
             uart_puts("bad result\r\n");
             reject_event_scratch();
             continue;
@@ -1803,6 +2037,7 @@ static void kernel_loop(noun kernel_init, int shrine)
 
         if (g_shrine_mode) {
             if (!noun_is_cell(r->tail)) {
+                runtime_stats_count(RT_COUNT_ABORTS, 1);
                 uart_puts("bad result\r\n");
                 reject_event_scratch();
                 continue;
@@ -1810,6 +2045,8 @@ static void kernel_loop(noun kernel_init, int shrine)
             cell_t *r2 = (cell_t *)(uintptr_t)cell_ptr(r->tail);
             if (!persist_compact(
                     r2->head, r2->tail, NOUN_ZERO, &slam)) {
+                runtime_stats_count(RT_COUNT_PROMOTE_COPY_FAULTS, 1);
+                runtime_stats_count(RT_COUNT_ABORTS, 1);
                 uart_puts("promote\r\n");
                 reject_event_scratch();
                 continue;
@@ -1819,19 +2056,36 @@ static void kernel_loop(noun kernel_init, int shrine)
         }
 
         dispatch_effects(effects);
+        runtime_stats_count(RT_COUNT_COMMITS, 1);
+        completed++;
         heap_set_mode(HEAP_MODE_PERSIST);
         heap_scratch_reset();
+        runtime_stats_note_memory();
+        if (max_commits && completed >= max_commits)
+            return;
     }
 }
 
 void arvo_loop(noun kernel_init)
 {
-    kernel_loop(kernel_init, 0);
+    kernel_loop(kernel_init, 0, 0);
 }
 
 void shrine_loop(noun kernel_init)
 {
-    kernel_loop(kernel_init, 1);
+    kernel_loop(kernel_init, 1, 0);
+}
+
+int kernel_run_bounded(uint64_t max_commits)
+{
+    if (max_commits == 0 || !g_shrine_mode || !noun_is_cell(g_kernel)
+        || !runtime_identity_live())
+        return -1;
+    uint64_t start = runtime_counter_now();
+    kernel_loop(g_kernel, 1, max_commits);
+    uint64_t end = runtime_counter_now();
+    runtime_stats_finish_run(end >= start ? end - start : 0);
+    return 0;
 }
 
 /* ── Durable checkpoint (live roots → cold store) ───────────────────────── */
@@ -2175,6 +2429,9 @@ int checkpoint_install(noun ckpt)
             ((cell_t *)(uintptr_t)cell_ptr(candidate_tail))->tail = node;
             candidate_tail = node;
         }
+        g_evq_timing_candidate[candidate_n].admitted_tick = now;
+        g_evq_timing_candidate[candidate_n].timer_due_tick = 0;
+        g_evq_timing_candidate[candidate_n].flags = EVQ_TIMING_RESTORED;
         candidate_n++;
         q = old->tail;
     }
@@ -2214,6 +2471,9 @@ int checkpoint_install(noun ckpt)
     g_evq = candidate_q;
     g_evq_tail = candidate_tail;
     g_evq_n = candidate_n;
+    g_evq_timing_head = 0;
+    for (uint64_t i = 0; i < candidate_n; i++)
+        g_evq_timing[i] = g_evq_timing_candidate[i];
     if (g_evq_n > g_evq_hwm)
         g_evq_hwm = g_evq_n;
     for (int i = 0; i < TARM_MAX; i++)
@@ -2235,24 +2495,53 @@ alloc_fail:
 
 int checkpoint_save(void)
 {
-    if (!runtime_identity_live() || !noun_is_cell(g_kernel))
+    uint64_t capture_start = runtime_counter_now();
+    if (!runtime_identity_live() || !noun_is_cell(g_kernel)) {
+        runtime_stats_count(RT_COUNT_CHECKPOINT_FAILURES, 1);
         return -1;
+    }
     heap_scratch_reset();
-    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH)) {
+        runtime_stats_count(RT_COUNT_CHECKPOINT_FAILURES, 1);
         return -1;
+    }
     noun ck;
     if (!checkpoint_capture_checked(&ck)) {
         noun_tx_abort();
         heap_set_mode(HEAP_MODE_PERSIST);
         heap_scratch_reset();
+        uint64_t capture_end = runtime_counter_now();
+        runtime_stats_record(
+            RT_PHASE_CHECKPOINT_CAPTURE,
+            capture_end >= capture_start
+                ? capture_end - capture_start : 0);
+        runtime_stats_count(RT_COUNT_CHECKPOINT_FAILURES, 1);
         return -1;
     }
+    uint64_t capture_end = runtime_counter_now();
+    runtime_stats_record(
+        RT_PHASE_CHECKPOINT_CAPTURE,
+        capture_end >= capture_start ? capture_end - capture_start : 0);
     int result = cold_snap_save(ck);
     noun_tx_abort(); /* save image owns bytes; temporary noun owns no live root */
     heap_set_mode(HEAP_MODE_PERSIST);
     heap_scratch_reset();
-    if (result == 0 && cold_nv_enabled())
+    if (result == 0 && cold_nv_enabled()) {
+        uint64_t flush_start = runtime_counter_now();
         result = cold_nv_flush();
+        uint64_t flush_end = runtime_counter_now();
+        runtime_stats_record(
+            RT_PHASE_CHECKPOINT_MEDIA_FLUSH,
+            flush_end >= flush_start ? flush_end - flush_start : 0);
+    }
+    if (result == 0) {
+        runtime_stats_count(RT_COUNT_CHECKPOINTS, 1);
+        runtime_stats_set(
+            RT_COUNT_CHECKPOINT_GENERATION, cold_selected_generation());
+        runtime_stats_set(RT_COUNT_COLD_DATA_HEAD, cold_data_head());
+    } else {
+        runtime_stats_count(RT_COUNT_CHECKPOINT_FAILURES, 1);
+    }
     return result;
 }
 
@@ -2273,6 +2562,10 @@ int checkpoint_load(void)
     int result = checkpoint_install(ck);
     heap_set_mode(HEAP_MODE_PERSIST);
     heap_scratch_reset();
+    if (result == 0) {
+        runtime_stats_count(RT_COUNT_RESTARTS, 1);
+        runtime_stats_note_memory();
+    }
     return result;
 }
 

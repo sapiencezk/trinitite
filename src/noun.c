@@ -337,6 +337,14 @@ static uint8_t *atom_data_ptr;
 static uint8_t *atom_tx_data_mark;
 static uint32_t atom_tx_slots[ATOM_INDEX_SLOTS];
 static uint32_t atom_tx_slot_count;
+static uint64_t atom_index_occupancy;
+static uint64_t atom_probe_hwm;
+
+static void atom_note_probes(uint64_t probes)
+{
+    if (probes > atom_probe_hwm)
+        atom_probe_hwm = probes;
+}
 
 static void atom_store_init(void) {
     /* QEMU zeroes RAM at startup, so the index is already zeroed.
@@ -347,6 +355,8 @@ static void atom_store_init(void) {
         idx[i].ptr    = 0;
     }
     atom_data_ptr = (uint8_t *)ATOM_DATA_BASE;
+    atom_index_occupancy = 0;
+    atom_probe_hwm = 0;
 }
 
 atom_t *atom_store_get(uint64_t hash62) {
@@ -354,9 +364,16 @@ atom_t *atom_store_get(uint64_t hash62) {
     uint32_t slot = (uint32_t)(hash62 & ATOM_INDEX_MASK);
     for (uint32_t i = 0; i < ATOM_INDEX_SLOTS; i++) {
         uint32_t s = (slot + i) & ATOM_INDEX_MASK;
-        if (idx[s].ptr == 0)    return 0;  /* not found (empty slot) */
-        if (idx[s].hash62 == hash62) return idx[s].ptr;
+        if (idx[s].ptr == 0) {
+            atom_note_probes((uint64_t)i + 1);
+            return 0;  /* not found (empty slot) */
+        }
+        if (idx[s].hash62 == hash62) {
+            atom_note_probes((uint64_t)i + 1);
+            return idx[s].ptr;
+        }
     }
+    atom_note_probes(ATOM_INDEX_SLOTS);
     return 0;  /* table full or not found */
 }
 
@@ -465,6 +482,7 @@ int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
         uint32_t s = (start + i) & ATOM_INDEX_MASK;
         if (idx[s].ptr == 0) {
             empty = s;
+            atom_note_probes((uint64_t)i + 1);
             break;
         }
     }
@@ -489,11 +507,13 @@ int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
 
     idx[empty].hash62 = hash62;
     idx[empty].ptr = a;
+    atom_index_occupancy++;
     if (noun_tx_live) {
         if (atom_tx_slot_count >= ATOM_INDEX_SLOTS) {
             idx[empty].hash62 = 0;
             idx[empty].ptr = 0;
             atom_data_ptr = (uint8_t *)a;
+            atom_index_occupancy--;
             return 0;
         }
         atom_tx_slots[atom_tx_slot_count++] = empty;
@@ -559,6 +579,8 @@ void noun_tx_abort(void)
         uint32_t slot = atom_tx_slots[i];
         idx[slot].hash62 = 0;
         idx[slot].ptr = 0;
+        if (atom_index_occupancy)
+            atom_index_occupancy--;
     }
     atom_data_ptr = atom_tx_data_mark;
     if (noun_tx_mode == HEAP_MODE_SCRATCH)
@@ -591,6 +613,26 @@ uint64_t heap_cells_used(int mode)
 uint64_t atom_store_bytes_used(void)
 {
     return (uint64_t)(atom_data_ptr - (uint8_t *)(uintptr_t)ATOM_DATA_BASE);
+}
+
+uint64_t atom_store_capacity_bytes(void)
+{
+    return ATOM_DATA_SIZE;
+}
+
+uint64_t atom_store_index_occupancy(void)
+{
+    return atom_index_occupancy;
+}
+
+uint64_t atom_store_index_capacity(void)
+{
+    return ATOM_INDEX_SLOTS;
+}
+
+uint64_t atom_store_probe_hwm(void)
+{
+    return atom_probe_hwm;
 }
 
 /* ── cord_from_bytes ─────────────────────────────────────────────────────────

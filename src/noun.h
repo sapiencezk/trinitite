@@ -101,6 +101,10 @@ void  noun_tx_abort(void);
 int   noun_tx_active(void);
 uint64_t heap_cells_used(int mode);
 uint64_t atom_store_bytes_used(void);
+uint64_t atom_store_capacity_bytes(void);
+uint64_t atom_store_index_occupancy(void);
+uint64_t atom_store_index_capacity(void);
+uint64_t atom_store_probe_hwm(void);
 
 noun  alloc_cell(noun head, noun tail);
 int   alloc_cell_checked(noun head, noun tail, noun *out);

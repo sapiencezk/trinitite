@@ -6,6 +6,8 @@
 #include "jam.h"
 #include "blake3.h"
 #include "bounded_cue.h"
+#include "cold_media.h"
+#include "runtime_stats.h"
 
 #define COLD_MAGIC       0x32444C4F433249ULL /* "I2COLD2\0" LE */
 #define COLD_VERSION     2u
@@ -61,6 +63,7 @@ static uint8_t jam_scratch[JAM_SCRATCH_MAX];
 static uint8_t append_scratch[JAM_SCRATCH_MAX];
 static cold_result_t g_last_result = COLD_RESULT_EMPTY;
 static uint64_t g_selected_generation;
+static uint64_t g_selected_data_head;
 static struct {
     cold_write_phase_t phase;
     int64_t after;
@@ -83,24 +86,53 @@ static void cold_write_raw(uint64_t off, const void *src, uint64_t n)
         d[i] = s[i];
 }
 
+static uint64_t media_deadline(void)
+{
+    uint64_t now = runtime_counter_now();
+    uint64_t freq = runtime_counter_freq();
+    uint64_t allowance =
+        freq <= UINT64_MAX / 5 ? freq * 5 : UINT64_MAX;
+    return allowance <= UINT64_MAX - now ? now + allowance : UINT64_MAX;
+}
+
+static cold_media_phase_t media_phase(cold_write_phase_t phase)
+{
+    switch (phase) {
+    case COLD_WRITE_OBJECT_HEADER:
+        return COLD_MEDIA_PHASE_OBJECT_HEADER;
+    case COLD_WRITE_PAYLOAD:
+        return COLD_MEDIA_PHASE_PAYLOAD;
+    case COLD_WRITE_OBJECT_COMMIT:
+        return COLD_MEDIA_PHASE_OBJECT_COMMIT;
+    case COLD_WRITE_SUPERBLOCK:
+        return COLD_MEDIA_PHASE_SUPERBLOCK;
+    default:
+        return COLD_MEDIA_PHASE_NONE;
+    }
+}
+
 static int cold_write_phase(cold_write_phase_t phase, uint64_t off,
                             const void *src, uint64_t n)
 {
-    if (g_fault.phase != phase || g_fault.after < 0 || g_fault.fired) {
-        cold_write_raw(off, src, n);
-        return 1;
+    uint64_t writable = n;
+    int completed = 1;
+    if (g_fault.phase == phase && g_fault.after >= 0 && !g_fault.fired) {
+        writable = (uint64_t)g_fault.after;
+        if (writable > n)
+            writable = n;
+        g_fault.after -= (int64_t)writable;
+        if (writable != n || g_fault.after == 0) {
+            g_fault.fired = 1;
+            completed = 0;
+        }
     }
-    uint64_t writable = (uint64_t)g_fault.after;
-    if (writable > n)
-        writable = n;
     if (writable)
         cold_write_raw(off, src, writable);
-    g_fault.after -= (int64_t)writable;
-    if (writable != n || g_fault.after == 0) {
-        g_fault.fired = 1;
+    if (writable && cold_media_active()
+        && cold_media_write(media_phase(phase), off, src, writable,
+                            media_deadline()) != COLD_MEDIA_OK)
         return 0;
-    }
-    return 1;
+    return completed;
 }
 
 static int bytes_eq(const uint8_t *a, const uint8_t *b, size_t n)
@@ -281,6 +313,7 @@ static cold_result_t select_super(cold_super_t *out, int *slot_out)
             && !bytes_eq((const uint8_t *)&a,
                          (const uint8_t *)&b, sizeof a)) {
             g_selected_generation = 0;
+            g_selected_data_head = 0;
             g_last_result = COLD_RESULT_CORRUPT;
             return COLD_RESULT_CORRUPT;
         }
@@ -296,11 +329,13 @@ static cold_result_t select_super(cold_super_t *out, int *slot_out)
         if (slot_out)
             *slot_out = slot;
         g_selected_generation = selected.generation;
+        g_selected_data_head = selected.data_head;
         g_last_result = COLD_RESULT_VALID;
         return COLD_RESULT_VALID;
     }
     if (media_blank()) {
         g_selected_generation = 0;
+        g_selected_data_head = 0;
         g_last_result = COLD_RESULT_EMPTY;
         return COLD_RESULT_EMPTY;
     }
@@ -337,16 +372,44 @@ int cold_format(void)
     s.commit = COLD_COMMIT;
     super_checksum(&s);
     cold_write_raw(COLD_SLOT0, &s, sizeof s);
+    if (cold_media_active()
+        && (cold_media_write(COLD_MEDIA_PHASE_FORMAT, 0,
+                             (const void *)(uintptr_t)COLD_BASE,
+                             COLD_DATA0, media_deadline()) != COLD_MEDIA_OK
+            || cold_media_barrier(COLD_MEDIA_PHASE_SUPERBLOCK_BARRIER,
+                                  media_deadline()) != COLD_MEDIA_OK)) {
+        g_selected_generation = 0;
+        g_selected_data_head = 0;
+        g_last_result = COLD_RESULT_WRITE_FAULT;
+        return -1;
+    }
     g_selected_generation = 1;
+    g_selected_data_head = COLD_DATA0;
     g_last_result = COLD_RESULT_VALID;
     return 0;
 }
 
 int cold_init(void)
 {
+    cold_media_status_t media = cold_media_load_window(media_deadline());
+    if (media != COLD_MEDIA_OK && media != COLD_MEDIA_DISABLED) {
+        g_selected_generation = 0;
+        g_selected_data_head = 0;
+        if (media == COLD_MEDIA_ABSENT || media == COLD_MEDIA_REMOVED)
+            g_last_result = COLD_RESULT_ABSENT;
+        else if (media == COLD_MEDIA_LAYOUT
+                 || media == COLD_MEDIA_UNDERSIZED
+                 || media == COLD_MEDIA_UNSUPPORTED)
+            g_last_result = COLD_RESULT_UNSUPPORTED;
+        else
+            g_last_result = COLD_RESULT_CORRUPT;
+        return g_last_result;
+    }
     cold_result_t result = select_super(0, 0);
     if (result == COLD_RESULT_EMPTY) {
-        cold_format(); /* documented all-zero initialization only */
+        if (cold_format() != 0)
+            return g_last_result;
+        /* documented all-zero initialization only */
         g_last_result = COLD_RESULT_EMPTY;
         return COLD_RESULT_EMPTY;
     }
@@ -440,6 +503,12 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
         g_last_result = COLD_RESULT_WRITE_FAULT;
         return -1;
     }
+    if (cold_media_active()
+        && cold_media_barrier(COLD_MEDIA_PHASE_DATA_BARRIER,
+                              media_deadline()) != COLD_MEDIA_OK) {
+        g_last_result = COLD_RESULT_WRITE_FAULT;
+        return -1;
+    }
     cold_super_t next = old;
     next.generation = generation;
     next.data_head = new_head;
@@ -458,7 +527,14 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
         g_last_result = COLD_RESULT_WRITE_FAULT;
         return -1;
     }
+    if (cold_media_active()
+        && cold_media_barrier(COLD_MEDIA_PHASE_SUPERBLOCK_BARRIER,
+                              media_deadline()) != COLD_MEDIA_OK) {
+        g_last_result = COLD_RESULT_WRITE_FAULT;
+        return -1;
+    }
     g_selected_generation = generation;
+    g_selected_data_head = new_head;
     g_last_result = COLD_RESULT_VALID;
     if (off_out)
         *off_out = off;
@@ -575,11 +651,27 @@ int cold_snap_save(noun root)
 {
     const uint8_t *bytes;
     uint64_t len;
+    uint64_t jam_start = runtime_counter_now();
     if (jam_bytes(root, &bytes, &len) != 0) {
         g_last_result = COLD_RESULT_LENGTH;
         return -1;
     }
-    return append_obj(KIND_SNAP, bytes, len, 0);
+    uint64_t jam_end = runtime_counter_now();
+    runtime_stats_record(RT_PHASE_CHECKPOINT_JAM,
+                         jam_end >= jam_start ? jam_end - jam_start : 0);
+    runtime_stats_set(RT_COUNT_CHECKPOINT_BYTES, len);
+    uint64_t append_start = runtime_counter_now();
+    int result = append_obj(KIND_SNAP, bytes, len, 0);
+    uint64_t append_end = runtime_counter_now();
+    runtime_stats_record(
+        RT_PHASE_CHECKPOINT_COLD_APPEND,
+        append_end >= append_start ? append_end - append_start : 0);
+    if (result == 0) {
+        runtime_stats_set(
+            RT_COUNT_CHECKPOINT_GENERATION, g_selected_generation);
+        runtime_stats_set(RT_COUNT_COLD_DATA_HEAD, g_selected_data_head);
+    }
+    return result;
 }
 
 int cold_snap_decode(noun *out)
@@ -620,6 +712,11 @@ cold_result_t cold_last_result(void)
 uint64_t cold_selected_generation(void)
 {
     return g_selected_generation;
+}
+
+uint64_t cold_data_head(void)
+{
+    return g_selected_data_head;
 }
 
 void cold_fault_set(cold_write_phase_t phase, int64_t after_bytes)

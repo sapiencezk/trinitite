@@ -15,7 +15,23 @@ CFLAGS  = -Wall -O2 -ffreestanding -nostdlib -nostartfiles \
           -I$(SRCDIR)
 LDFLAGS = -T $(SRCDIR)/linker.ld -nostdlib -no-pie
 
-OBJS    = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o i2_ingress.o kernel.o core.o cold.o cold_nv.o trace.o net.o ska.o forth.o pill_embed.o main.o
+COLD_MEDIA ?= ram
+
+ifeq ($(COLD_MEDIA),ram)
+MEDIA_OBJS = cold_media.o cold_nv_none.o
+else ifeq ($(COLD_MEDIA),semihost)
+MEDIA_OBJS = cold_media.o cold_nv.o
+else ifeq ($(COLD_MEDIA),fake)
+CFLAGS += -DCOLD_MEDIA_FAKE=1
+MEDIA_OBJS = cold_media.o cold_media_fake.o cold_nv_none.o
+else ifeq ($(COLD_MEDIA),rpi4-sd)
+CFLAGS += -DCOLD_MEDIA_RPI4_SD=1
+MEDIA_OBJS = cold_media.o cold_media_rpi4_sd.o cold_nv_none.o
+else
+$(error unsupported COLD_MEDIA='$(COLD_MEDIA)' (ram, semihost, fake, rpi4-sd))
+endif
+
+OBJS    = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_ingress.o kernel.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
 
 all: $(TARGET).img
 
@@ -24,6 +40,9 @@ all: $(TARGET).img
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# The backend macro changes cold_media.c without changing its source mtime.
+cold_media.o: FORCE
 
 $(TARGET).elf: $(OBJS)
 	$(LD) $(LDFLAGS) -o $@ $^
@@ -83,9 +102,19 @@ deploy: $(TARGET).img
 	cp $(TARGET).img $(TFTP_ROOT)/
 	@echo "Deployed. Reset the Pi."
 
-test:
+test: all
 	./tests/run_tests.sh
+
+test-media-fake:
+	$(MAKE) clean
+	$(MAKE) COLD_MEDIA=fake test
+
+test-media-rpi4-build:
+	$(MAKE) clean
+	$(MAKE) COLD_MEDIA=rpi4-sd all
 
 clean:
 	rm -f *.o *.elf *.img
-.PHONY: all run run-pill run-kernel debug deploy test clean
+FORCE:
+.PHONY: all run run-pill run-kernel debug deploy test test-media-fake \
+	test-media-rpi4-build clean FORCE

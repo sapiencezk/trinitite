@@ -1310,6 +1310,24 @@ T "m2: stuck TX bounded reserved completion" "0000000000000000" \
 T "m2: cold fail-closed and torn writes" "0000000000000000" \
     "COLDM2 ."
 
+T "m3: bounded resettable 64-bit stats" "0000000000000000" \
+    "RSTM3 ."
+
+T "m3: target-private fake block contract" "0000000000000000" \
+    "MEDM3 ."
+
+T "m3: queue pressure FIFO/reject 0 percent" "0000000000000000" \
+    "RSTON RSTCLR 0 QPM3 ."
+
+T "m3: queue pressure FIFO/reject 50 percent" "0000000000000000" \
+    "RSTCLR 50 QPM3 ."
+
+T "m3: queue pressure FIFO/reject 90 percent" "0000000000000000" \
+    "RSTCLR 90 QPM3 ."
+
+T "m3: bounded novel atom characterization" "0000000000000000" \
+    "RSTCLR 10 NOVM3 ."
+
 T "boot: policy default pill" "0000000000000000" \
     "0 BOOTPOL!  BOOTPOL@ ."
 

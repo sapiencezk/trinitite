@@ -53,6 +53,9 @@ void uart_send_noun(noun n);
 void dispatch_effects(noun effects);
 void arvo_loop(noun kernel);
 void shrine_loop(noun kernel);
+/* M3 lab runner: execute exactly max_commits through the existing admitted
+ * I2 scheduler, then return to Forth.  Requires kernel_prepare_pill(). */
+int kernel_run_bounded(uint64_t max_commits);
 
 /* Phase 1 — deadline */
 void     deadline_set(uint64_t abs);
@@ -86,6 +89,7 @@ uint64_t evq_cap(void);                 /* EVQ_CAP */
 uint64_t evq_hwm(void);                 /* high-water depth this session */
 uint64_t evq_overflows(void);           /* drop-newest count */
 void     evq_metrics_reset(void);       /* zero overflows + hwm baseline */
+uint64_t kernel_queue_pressure_selftest(uint64_t percent);
 
 /* WP4 — crash recovery: 0 hard (clear tarms), 1 soft (keep tarms) */
 void     crash_soft_set(int soft);

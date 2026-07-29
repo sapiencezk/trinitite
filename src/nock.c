@@ -23,12 +23,14 @@ void nock_crash(const char *msg) {
 
 static uint64_t g_budget_max;          /* 0 = unlimited */
 static uint64_t g_ops_used;
+static uint64_t g_budget_abort_reason;
 static int (*g_wall_check)(void);
 
 void nock_budget_set(uint64_t max_ops)
 {
     g_budget_max = max_ops;
     g_ops_used   = 0;
+    g_budget_abort_reason = 0;
 }
 
 uint64_t nock_budget_get(void)
@@ -41,6 +43,11 @@ uint64_t nock_ops_used(void)
     return g_ops_used;
 }
 
+uint64_t nock_budget_abort_reason(void)
+{
+    return g_budget_abort_reason;
+}
+
 void nock_wall_check_set(int (*fn)(void))
 {
     g_wall_check = fn;
@@ -49,12 +56,16 @@ void nock_wall_check_set(int (*fn)(void))
 void nock_budget_tick(void)
 {
     /* Allow exactly max_ops entries: abort when the next would exceed. */
-    if (g_budget_max != 0 && g_ops_used >= g_budget_max)
+    if (g_budget_max != 0 && g_ops_used >= g_budget_max) {
+        g_budget_abort_reason = 1;
         longjmp(nock_abort, NOCK_ABORT_BUDGET);
+    }
     g_ops_used++;
     /* Cooperative wall deadline: poll every 256 ops when armed */
-    if (g_wall_check && (g_ops_used & 0xFFu) == 0 && g_wall_check())
+    if (g_wall_check && (g_ops_used & 0xFFu) == 0 && g_wall_check()) {
+        g_budget_abort_reason = 2;
         longjmp(nock_abort, NOCK_ABORT_BUDGET);
+    }
 }
 
 /* ── Noun printer (%slog, %xray) ─────────────────────────────────────────── */

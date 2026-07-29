@@ -40,6 +40,7 @@ cold_result_t cold_probe(void);
 cold_result_t cold_last_result(void);
 const char *cold_result_name(cold_result_t result);
 uint64_t cold_selected_generation(void);
+uint64_t cold_data_head(void);
 
 uint64_t cold_store(noun n);
 noun cold_load(uint64_t hash62);

@@ -4,6 +4,7 @@
 #include "blake3.h"
 #include "bounded_cue.h"
 #include "memory.h"
+#include "runtime_stats.h"
 #include "uart.h"
 
 #define I2_FRAME_HEADER_SIZE 56u
@@ -27,6 +28,7 @@ static struct {
     uint32_t have;
     uint32_t magic_have;
     uint64_t payload_len;
+    uint64_t frame_complete_tick;
     uint64_t frame_deadline;
     uint64_t byte_deadline;
     uint64_t rejects[I2_RX_REASON_COUNT];
@@ -96,6 +98,7 @@ static void reset_scan(void)
     g_rx.have = 0;
     g_rx.magic_have = 0;
     g_rx.payload_len = 0;
+    g_rx.frame_complete_tick = 0;
     g_rx.frame_deadline = 0;
     g_rx.byte_deadline = 0;
 }
@@ -106,6 +109,7 @@ static void reject(i2_rx_reason_t reason)
         if (g_rx.rejects[reason] != UINT64_MAX)
             g_rx.rejects[reason]++;
         g_rx.last_reason = reason;
+        runtime_stats_note_ingress_reject((unsigned)reason);
     }
     reset_scan();
 }
@@ -187,6 +191,7 @@ void i2_rx_feed_byte(uint8_t byte, uint64_t now)
     if (g_rx.state == RX_PAYLOAD) {
         ((uint8_t *)(uintptr_t)UART_RXBUF_BASE)[g_rx.have++] = byte;
         if (g_rx.have == g_rx.payload_len) {
+            g_rx.frame_complete_tick = now;
             uint8_t digest[32];
             blake3_hash((const uint8_t *)(uintptr_t)UART_RXBUF_BASE,
                         (size_t)g_rx.payload_len, digest);
@@ -234,6 +239,13 @@ int i2_rx_take(noun *out)
     if (status != CUE_BOUNDED_OK) {
         reject(I2_RX_REASON_CUE);
         return 0;
+    }
+    {
+        uint64_t admitted = runtime_counter_now();
+        uint64_t complete = g_rx.frame_complete_tick;
+        runtime_stats_record(
+            RT_PHASE_INGRESS_COMPLETE_TO_ADMIT,
+            admitted >= complete ? admitted - complete : 0);
     }
     reset_scan();
     return 1;

@@ -2812,6 +2812,60 @@ defcode "CKM2", 4, ckpt_m2_test, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// ── I2 Milestone 3 bounded measurement surface ───────────────────────────
+// RSTON/RSTOFF toggle the allocation-free fixed stats block.
+// RSTCLR resets one run, preserving the enable state.
+// M3RUN executes exactly n admitted I2 commits after M2PREP, then returns.
+// M3STAT emits the single versioned post-run UART summary.
+
+defcode "RSTON", 5, runtime_stats_on, 0
+    mov     x0, #1
+    bl      runtime_stats_enable
+    NEXT
+
+defcode "RSTOFF", 6, runtime_stats_off, 0
+    mov     x0, #0
+    bl      runtime_stats_enable
+    NEXT
+
+defcode "RSTCLR", 6, runtime_stats_clear, 0
+    bl      runtime_stats_reset
+    NEXT
+
+defcode "M3STAT", 6, runtime_stats_output, 0
+    bl      runtime_stats_emit
+    NEXT
+
+defcode "RSTM3", 5, runtime_stats_test, 0
+    bl      runtime_stats_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "MEDM3", 5, cold_media_test, 0
+    bl      cold_media_fake_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "QPM3", 4, queue_pressure_test, 0
+    ldr     x0, [DSP]
+    bl      kernel_queue_pressure_selftest
+    str     x0, [DSP]
+    NEXT
+
+defcode "NOVM3", 5, novel_atom_test, 0
+    ldr     x0, [DSP]
+    bl      runtime_stats_characterize_novel
+    sxtw    x0, w0
+    str     x0, [DSP]
+    NEXT
+
+defcode "M3RUN", 5, runtime_stats_run, 0
+    ldr     x0, [DSP]
+    bl      kernel_run_bounded
+    sxtw    x0, w0
+    str     x0, [DSP]
+    NEXT
+
 defcode "KGATE!", 6, kgate_store, 0
     ldr     x0, [DSP], #8
     bl      shrine_gate_set
@@ -3158,7 +3212,12 @@ defcode "BOOTPOL@", 8, bootpol_fetch, 0
     str     x0, [DSP, #-8]!
     NEXT
 
-// NVFLUSH ( -- st )  arm + flush COLD_BASE → build/cold.img (needs -semihosting)
+// NVON ( -- )         arm semihost checkpoint flushing without an eager flush
+// NVFLUSH ( -- st )   arm + flush COLD_BASE → build/cold.img (needs semihosting)
+defcode "NVON", 4, nvon_word, 0
+    bl      cold_nv_arm
+    NEXT
+
 defcode "NVFLUSH", 7, nvflush_word, 0
     bl      cold_nv_arm
     bl      cold_nv_flush
