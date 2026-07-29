@@ -2714,6 +2714,46 @@ defcode "SNAP@", 5, cold_snap_fetch, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// ── Durable host checkpoint (I2 live roots → cold store) ──────────────────
+// CKPT!  ( -- st )     capture gate+queue+tarms → cold snap; 0=ok else -1
+// CKLOAD ( -- st )     cold snap → install live roots; 0=ok else -1
+// CKAUTO! ( n -- )     auto-save every n successful I2 commits (0=off)
+// CKAUTO@ ( -- n )
+// KGATE! ( noun -- )   set live shrine gate (persist copy; no loop)
+// KGATE@ ( -- noun )   get live gate
+
+defcode "CKPT!", 5, ckpt_save_word, 0
+    bl      checkpoint_save
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "CKLOAD", 6, ckpt_load_word, 0
+    bl      checkpoint_load
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "CKAUTO!", 7, ckpt_auto_store, 0
+    ldr     x0, [DSP], #8
+    bl      checkpoint_auto_every
+    NEXT
+
+defcode "CKAUTO@", 7, ckpt_auto_fetch, 0
+    bl      checkpoint_auto_get
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "KGATE!", 6, kgate_store, 0
+    ldr     x0, [DSP], #8
+    bl      shrine_gate_set
+    NEXT
+
+defcode "KGATE@", 6, kgate_fetch, 0
+    bl      shrine_gate_get
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // ── Phase 6 — cooperative kernel hot-swap ─────────────────────────────────
 
 // KVER@ ( -- u )  live kernel version

@@ -1287,6 +1287,16 @@ T "t5: log order" "0000000000000014" \
 T "t5: snap roundtrip" "0000000000000064" \
     "CFMT  100 >NOUN SNAP!  SNAP@ NOUN> ."
 
+# Durable I2 checkpoint: live gate+queue+tarms → cold snap → install
+T "ckpt: save empty fails" "FFFFFFFFFFFFFFFF" \
+    "CFMT  CKPT! ."
+
+T "ckpt: gate roundtrip" "0000000000000007" \
+    "CFMT  7 >NOUN 9 >NOUN CONS  KGATE!  CKPT! DROP  0 >NOUN KGATE!  CKLOAD DROP  KGATE@ CAR NOUN> ."
+
+T "ckpt: tarm survive load" "FFFFFFFFFFFFFFFF" \
+    "CFMT  1 >NOUN 2 >NOUN CONS KGATE!  3 1000 CONS  1952805748 >NOUN SWAP CONS  0 >NOUN CONS DO-FX  CKPT! DROP  TACLR  3 TACT? 0 =  DROP  CKLOAD DROP  3 TACT? ."
+
 # ── Phase 6 industrial — live update / hot-swap ───────────────────────────
 # STAGE HSWAP HSTAT HCAN KVER@ PVER@ SAPPLY  %swapped effect
 # Cooperative: apply when event queue empty. REPL applies immediately.

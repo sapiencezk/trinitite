@@ -21,7 +21,8 @@
  *   offline/HostRunner); dispatch is best-effort on known tags.
  *
  * Heap/atom ceilings (noun.c): bump past HEAP_TOP or atom-data/index full →
- *   nock_crash (never silent overrun into atom index).
+ *   nock_crash (never silent overrun into atom index). Persist semispace
+ *   compact on promote; durable CKPT!/CKLOAD jam live roots to cold store.
  *
  * Multi-arm timers fire [%ei id %TICK 0] into the event queue (slip on overrun),
  * or [%i2-timer token fired-at] when armed via i2-timer-set.
@@ -107,3 +108,20 @@ int      swap_apply_if_ready(void);   /* 1 if applied this call */
 void     swap_cancel(void);
 uint32_t swap_live_version(void);
 int      swap_status(void);           /* 0 idle, 1 staged, 2 pending */
+
+/*
+ * Durable checkpoint of live host+resource roots (RAM cold store for now;
+ * SD backend later via cold_*). Noun shape:
+ *   [%i2-ckpt ver shrine gate queue tarms]
+ * tarms ::= * [id period remain-ticks token]
+ */
+void     shrine_gate_set(noun gate);   /* install live gate (persist copy) */
+noun     shrine_gate_get(void);
+int      shrine_mode_get(void);
+
+noun     checkpoint_capture(void);     /* build ckpt noun (persist heap) */
+int      checkpoint_install(noun ckpt);/* 0 ok, -1 bad shape */
+int      checkpoint_save(void);        /* capture → cold_snap_save; 0 ok */
+int      checkpoint_load(void);        /* cold_snap_load → install; 0 ok */
+void     checkpoint_auto_every(uint64_t n); /* 0=off; save every n commits */
+uint64_t checkpoint_auto_get(void);

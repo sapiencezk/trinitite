@@ -8,6 +8,7 @@
 #include "ska.h"
 #include "trace.h"
 #include "net.h"
+#include "cold.h"
 #include "kernel.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
@@ -56,10 +57,16 @@
 #define H62_I2_SERVICE_REQUEST  0x35d925d61fab343bULL  /* "i2-service-request" */
 #define H62_I2_SERVICE_CANCEL   0x36d39945d04ddb18ULL  /* "i2-service-cancel" */
 #define H62_I2_SERVICE          0x30cfa0e9c7ed95b9ULL  /* "i2-service" host→app */
+#define CORD_I2_CKPT            32774703826154089ULL   /* %i2-ckpt durable snap  */
+#define CKPT_VER                1ULL
 
 /* Host ABI D0 ceilings (subset of tools/i2 HostAbiLimits) */
 #define I2_MAX_TIMERS              TARM_MAX
 #define I2_MAX_PENDING_SERVICES    4
+
+/* Auto-checkpoint: save live roots to cold store every N successful commits */
+static uint64_t g_ckpt_every;
+static uint64_t g_ckpt_commits;
 
 #define TARM_MAX     16
 
@@ -1217,6 +1224,12 @@ static void kernel_loop(noun kernel_init, int shrine)
                 dispatch_effects(effects); /* arms timers / service completions */
                 heap_set_mode(HEAP_MODE_PERSIST);
                 heap_scratch_reset();
+                /* Optional durable checkpoint (cold RAM store; SD later) */
+                if (g_ckpt_every) {
+                    g_ckpt_commits++;
+                    if (g_ckpt_commits % g_ckpt_every == 0)
+                        checkpoint_save();
+                }
                 continue;
             }
             if (rh == CORD_ABORT) {
@@ -1257,4 +1270,176 @@ void arvo_loop(noun kernel_init)
 void shrine_loop(noun kernel_init)
 {
     kernel_loop(kernel_init, 1);
+}
+
+/* ── Durable checkpoint (live roots → cold store) ───────────────────────── */
+
+void shrine_gate_set(noun gate)
+{
+    heap_set_mode(HEAP_MODE_PERSIST);
+    g_kernel = noun_persist(gate);
+    g_shrine_mode = 1;
+}
+
+noun shrine_gate_get(void)
+{
+    return g_kernel;
+}
+
+int shrine_mode_get(void)
+{
+    return g_shrine_mode;
+}
+
+void checkpoint_auto_every(uint64_t n)
+{
+    g_ckpt_every   = n;
+    g_ckpt_commits = 0;
+}
+
+uint64_t checkpoint_auto_get(void)
+{
+    return g_ckpt_every;
+}
+
+/*
+ * Capture: [%i2-ckpt ver shrine gate queue tarms]
+ * tarms entry: [id [period [remain-ticks token]]]
+ * remain-ticks relative so restore is phase-preserving without absolute CNTVCT.
+ */
+noun checkpoint_capture(void)
+{
+    int old = heap_get_mode();
+    heap_set_mode(HEAP_MODE_PERSIST);
+
+    uint64_t now = cntvct();
+    noun tarms = NOUN_ZERO;
+    for (int i = TARM_MAX - 1; i >= 0; i--) {
+        if (!g_tarms[i].active)
+            continue;
+        uint64_t remain = 1;
+        if (g_tarms[i].next > now)
+            remain = g_tarms[i].next - now;
+        noun tok = g_tarms[i].i2_token;
+        if (noun_is_cell(tok))
+            tok = noun_copy(tok);
+        noun ent = alloc_cell(direct(g_tarms[i].id),
+                   alloc_cell(direct(g_tarms[i].period),
+                   alloc_cell(direct(remain), tok)));
+        tarms = alloc_cell(ent, tarms);
+    }
+
+    noun queue = noun_copy(g_evq);
+    noun gate  = noun_copy(g_kernel);
+    noun ckpt  = alloc_cell(direct(CORD_I2_CKPT),
+                 alloc_cell(direct(CKPT_VER),
+                 alloc_cell(direct(g_shrine_mode ? 1ULL : 0ULL),
+                 alloc_cell(gate,
+                 alloc_cell(queue, tarms)))));
+
+    heap_set_mode(old);
+    return ckpt;
+}
+
+int checkpoint_install(noun ckpt)
+{
+    if (!noun_is_cell(ckpt))
+        return -1;
+    cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(ckpt);
+    if (!noun_is_direct(c0->head) || direct_val(c0->head) != CORD_I2_CKPT)
+        return -1;
+    if (!noun_is_cell(c0->tail))
+        return -1;
+    cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
+    if (!noun_is_direct(c1->head) || direct_val(c1->head) != CKPT_VER)
+        return -1;
+    if (!noun_is_cell(c1->tail))
+        return -1;
+    cell_t *c2 = (cell_t *)(uintptr_t)cell_ptr(c1->tail);
+    uint64_t shrine = atom_u64_early(c2->head);
+    if (!noun_is_cell(c2->tail))
+        return -1;
+    cell_t *c3 = (cell_t *)(uintptr_t)cell_ptr(c2->tail);
+    noun gate = c3->head;
+    if (!noun_is_cell(c3->tail))
+        return -1;
+    cell_t *c4 = (cell_t *)(uintptr_t)cell_ptr(c3->tail);
+    noun queue = c4->head;
+    noun tarms = c4->tail;
+
+    /* Fresh persist half; install roots (old half readable during copy) */
+    tarm_clear();
+    evq_clear();
+    heap_persist_flip();
+    heap_set_mode(HEAP_MODE_PERSIST);
+
+    g_kernel      = noun_copy(gate);
+    g_shrine_mode = shrine ? 1 : 0;
+
+    {
+        noun q = queue;
+        uint64_t n = 0;
+        while (noun_is_cell(q) && n < EVQ_CAP) {
+            cell_t *c = (cell_t *)(uintptr_t)cell_ptr(q);
+            evq_enq(c->head);
+            q = c->tail;
+            n++;
+        }
+    }
+
+    uint64_t now = cntvct();
+    noun tl = tarms;
+    while (noun_is_cell(tl)) {
+        cell_t *le = (cell_t *)(uintptr_t)cell_ptr(tl);
+        noun ent = le->head;
+        tl = le->tail;
+        if (!noun_is_cell(ent))
+            continue;
+        cell_t *e0 = (cell_t *)(uintptr_t)cell_ptr(ent);
+        uint64_t id = atom_u64_early(e0->head);
+        if (!noun_is_cell(e0->tail))
+            continue;
+        cell_t *e1 = (cell_t *)(uintptr_t)cell_ptr(e0->tail);
+        uint64_t period = atom_u64_early(e1->head);
+        if (!noun_is_cell(e1->tail))
+            continue;
+        cell_t *e2 = (cell_t *)(uintptr_t)cell_ptr(e1->tail);
+        uint64_t remain = atom_u64_early(e2->head);
+        noun tok = e2->tail;
+        if (period == 0 || id == 0)
+            continue;
+        int i = tarm_free_slot();
+        if (i < 0)
+            break;
+        if (remain == 0)
+            remain = 1;
+        g_tarms[i].active   = 1;
+        g_tarms[i].id       = id;
+        g_tarms[i].period   = period;
+        g_tarms[i].next     = now + remain;
+        if (noun_is_cell(tok))
+            g_tarms[i].i2_token = noun_copy(tok);
+        else
+            g_tarms[i].i2_token = NOUN_ZERO;
+    }
+
+    return 0;
+}
+
+int checkpoint_save(void)
+{
+    if (!noun_is_cell(g_kernel))
+        return -1;
+    noun ck = checkpoint_capture();
+    if (cold_snap_save(ck) != 0)
+        return -1;
+    return 0;
+}
+
+int checkpoint_load(void)
+{
+    noun ck = cold_snap_load();
+    if (!noun_is_cell(ck))
+        return -1;
+    return checkpoint_install(ck);
 }

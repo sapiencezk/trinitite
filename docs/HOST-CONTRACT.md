@@ -142,6 +142,24 @@ Hard clear of tarms: after a structural crash, re-arm periods from Nock state on
 
 Per event: slam product in **scratch**. On successful promote, **semispace flip + root copy**: allocate into the other persist half, deep-copy live roots (gate, queue, timer tokens, causes) while the previous half stays readable (shared battery cells), then abandon the old half. Slam formula is rebuilt after compact. Scratch is then reset. Bounds long-lived memory to one gate + queue + tokens.
 
+### 5.2 Durable checkpoint (power-cycle path)
+
+Live roots can be **jammed into the cold store** (RAM region today; SD later):
+
+```text
+checkpoint ::= [%i2-ckpt ver=1 shrine gate queue tarms]
+tarms      ::= * [id period remain-ticks token]
+```
+
+| Word / API | Role |
+|------------|------|
+| `CKPT!` / `checkpoint_save` | Capture live gate + queue + tarms → `cold_snap_save` |
+| `CKLOAD` / `checkpoint_load` | Load snap → install roots (semispace flip + re-arm timers with relative remain) |
+| `CKAUTO!` *n* | Auto-save every *n* successful I2 commits (`0` = off) |
+| `KGATE!` / `KGATE@` | Set/get live gate without entering `KERNEL` loop |
+
+**Law:** checkpoint is a **host transaction boundary** image (same roots as persist compact), not a trace of every Nock intermediate. Restore does not re-run history; it reinstalls the last committed resource + host work. Backend is `COLD_BASE` (8MB RAM); swap `cold_read`/`cold_write` for SD when ready.
+
 ---
 
 ## 6. Jets (pure; no MMIO)
