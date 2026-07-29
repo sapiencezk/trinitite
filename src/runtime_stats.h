@@ -6,8 +6,9 @@
  * I2 Hybrid v1 Milestone 3 measurement block.
  *
  * The block is fixed-size, allocation-free, single-owner (scheduler core 0),
- * and resettable between runs.  Histograms use log2(CNTVCT ticks) buckets:
- * bucket 0 is 0..1 tick, bucket n is 2^(n-1)+1..2^n ticks.
+ * and resettable between runs. Histograms use floor-log2(CNTVCT ticks):
+ * bucket 0 is 0..1, bucket n is 2^n..2^(n+1)-1 for n=1..62, and bucket 63
+ * is 2^63..UINT64_MAX.
  */
 #define RUNTIME_STATS_SCHEMA 1u
 #define RUNTIME_STATS_HIST_BUCKETS 64u
