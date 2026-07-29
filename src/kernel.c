@@ -60,6 +60,8 @@
 #define H62_I2_SERVICE_REQUEST  0x35d925d61fab343bULL  /* "i2-service-request" */
 #define H62_I2_SERVICE_CANCEL   0x36d39945d04ddb18ULL  /* "i2-service-cancel" */
 #define CORD_I2_TIMER           0x72656d69742d3269ULL  /* "i2-timer" host→app */
+#define CORD_I2_RX_ORIGIN_V1    0x3178723269ULL        /* "i2rx1" ABI 1.1 */
+#define CORD_I2_INTERNAL_ORIGIN_V1 0x316e693269ULL      /* "i2in1" ABI 1.1 */
 #define H62_I2_SERVICE          0x30cfa0e9c7ed95b9ULL  /* "i2-service" host→app */
 #define CORD_I2_CKPT            32774703826154089ULL   /* %i2-ckpt durable snap  */
 
@@ -694,6 +696,18 @@ static int evq_peek_timed(noun *out, evq_timing_t *timing)
     return 1;
 }
 
+/* Evaluator/deadline/product faults are terminal for the admitted event.
+ * Consume a peeked I2 head so one deterministic poison event cannot livelock
+ * every later FIFO item. Reservation/preflight/promotion failures do not call
+ * this helper and therefore retain the head for retry. */
+static void evq_consume_terminal(int event_from_queue)
+{
+    if (event_from_queue) {
+        noun consumed;
+        (void)evq_deq_timed(&consumed, 0);
+    }
+}
+
 int evq_deq(noun *out)
 {
     return evq_deq_timed(out, 0);
@@ -789,6 +803,14 @@ uint64_t kernel_queue_retry_selftest(void)
         || !evq_deq_timed(&event, &timing) || event != direct(0x52)
         || g_evq_n != 0)
         failures |= 1ULL << 2;
+    evq_enq(direct(0x61));
+    evq_enq(direct(0x62));
+    if (!evq_peek_timed(&event, &timing) || event != direct(0x61))
+        failures |= 1ULL << 3;
+    evq_consume_terminal(1);
+    if (!evq_peek_timed(&event, &timing) || event != direct(0x62)
+        || g_evq_n != 1)
+        failures |= 1ULL << 4;
     evq_clear();
     return failures;
 }
@@ -1772,6 +1794,21 @@ void crash_recover_host(void)
 #define I2_SLAM_BUDGET_MAX  2000000ULL
 
 static uint64_t g_slam_budget = SLAM_BUDGET_DEFAULT;
+static int g_slam_event_from_queue;
+/* During snap-first boot the identity-admitted PILL gate has been decoded but
+ * is not yet published as g_kernel. It is still the authoritative limit
+ * anchor against which an ABI 1.1 checkpoint must compare. */
+static noun g_checkpoint_limit_anchor;
+
+static int runtime_origin_v1(void)
+{
+    const runtime_identity_t *identity = runtime_identity_get();
+    return identity
+        && identity->runtime_abi[0] == 1
+        && identity->runtime_abi[1] == 1
+        && identity->formula_abi[0] == 1
+        && identity->formula_abi[1] == 1;
+}
 
 void slam_budget_set(uint64_t max_ops)
 {
@@ -1808,6 +1845,7 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
     for (;;) {
         int jr = setjmp(nock_abort);
         if (jr == NOCK_ABORT_CRASH) {
+            g_slam_event_from_queue = 0;
             uart_puts("\r\nkernel crash\r\n");
             heap_noalloc_end();
             heap_persist_abort_tx();
@@ -1841,6 +1879,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             runtime_stats_count(RT_COUNT_ABORTS, 1);
             emit_timeout(nock_ops_used());
             deadline_set(0);
+            evq_consume_terminal(g_slam_event_from_queue);
+            g_slam_event_from_queue = 0;
             reject_event_scratch();
             continue;
         }
@@ -1947,10 +1987,24 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             heap_scratch_reset();
         heap_set_mode(HEAP_MODE_SCRATCH);
 
+        if (runtime_origin_v1()) {
+            noun carried;
+            uint64_t origin = event_from_i2_rx
+                ? CORD_I2_RX_ORIGIN_V1 : CORD_I2_INTERNAL_ORIGIN_V1;
+            if (!alloc_cell_checked(direct(origin), event, &carried)) {
+                runtime_stats_count(RT_COUNT_ABORTS, 1);
+                reject_event_scratch();
+                continue;
+            }
+            event = carried;
+        }
+
         nock_budget_set(g_slam_budget);
         noun subject = alloc_cell(g_kernel, event);
         slam_start = runtime_counter_now();
+        g_slam_event_from_queue = event_from_queue;
         noun result  = nock(subject, slam);
+        g_slam_event_from_queue = 0;
         uint64_t slam_end = runtime_counter_now();
         runtime_stats_record(
             RT_PHASE_NOCK_SLAM,
@@ -1968,6 +2022,7 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             runtime_stats_count(RT_COUNT_ABORTS, 1);
             emit_timeout(0);
             deadline_set(0);
+            evq_consume_terminal(event_from_queue);
             reject_event_scratch();
             continue;
         }
@@ -1975,6 +2030,7 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
         if (!noun_is_cell(result)) {
             runtime_stats_count(RT_COUNT_ABORTS, 1);
             uart_puts("bad result\r\n");
+            evq_consume_terminal(event_from_queue);
             reject_event_scratch();
             continue;
         }
@@ -1994,6 +2050,7 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 if (!noun_is_cell(r->tail)) {
                     runtime_stats_count(RT_COUNT_ABORTS, 1);
                     uart_puts("bad result\r\n");
+                    evq_consume_terminal(event_from_queue);
                     reject_event_scratch();
                     continue;
                 }
@@ -2002,6 +2059,7 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 if (!noun_is_cell(prod->tail)) {
                     runtime_stats_count(RT_COUNT_ABORTS, 1);
                     uart_puts("bad result\r\n");
+                    evq_consume_terminal(event_from_queue);
                     reject_event_scratch();
                     continue;
                 }
@@ -2072,10 +2130,7 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             }
             if (rh == CORD_ABORT) {
                 /* keep g_kernel; drop effects (Host ABI abort path) */
-                if (event_from_queue) {
-                    noun consumed;
-                    (void)evq_deq_timed(&consumed, 0);
-                }
+                evq_consume_terminal(event_from_queue);
                 runtime_stats_count(RT_COUNT_ABORTS, 1);
                 reject_event_scratch();
                 continue;
@@ -2088,6 +2143,7 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
         if (runtime_identity_live()) {
             runtime_stats_count(RT_COUNT_ABORTS, 1);
             uart_puts("bad result\r\n");
+            evq_consume_terminal(event_from_queue);
             reject_event_scratch();
             continue;
         }
@@ -2468,11 +2524,12 @@ static int checkpoint_identity_matches(noun ckpt, int *identity_represented)
  * Its state header carries the admitted execution limits; field 5 is
  * max_nock_ops_per_event. Keep legacy I1 on SLAM_BUDGET_DEFAULT and cap every
  * I2 request at the target's audited maximum before it reaches Nock. */
-static int i2_gate_slam_budget(noun gate, uint64_t *budget)
+static int i2_gate_execution_limits(
+    noun gate, noun *execution_out, uint64_t *budget)
 {
     noun battery, sample, axis, state, tag, rest, header, field;
     noun execution;
-    if (!budget
+    if (!execution_out || !budget
         || !noun_take(gate, &battery, &sample)
         || !noun_take(sample, &axis, &state)
         || !noun_is_direct(axis) || direct_val(axis) != 0
@@ -2487,17 +2544,84 @@ static int i2_gate_slam_budget(noun gate, uint64_t *budget)
             return 0;
     }
     execution = rest;
+    uint64_t values[10];
     rest = execution;
-    for (int i = 0; i < 4; i++) {
-        if (!noun_take(rest, &field, &rest)) {
+    for (int i = 0; i < 9; i++) {
+        if (!noun_take(rest, &field, &rest)
+            || !positive_direct(field, &values[i])) {
             return 0;
         }
     }
-    if (!noun_take(rest, &field, &rest)
-        || !positive_direct(field, budget)
-        || *budget > I2_SLAM_BUDGET_MAX)
+    if (!positive_direct(rest, &values[9])
+        || values[4] > I2_SLAM_BUDGET_MAX)
         return 0;
+    *execution_out = execution;
+    *budget = values[4];
     return 1;
+}
+
+static int i2_gate_slam_budget(noun gate, uint64_t *budget)
+{
+    noun execution;
+    return i2_gate_execution_limits(gate, &execution, budget);
+}
+
+static int i2_limit_test_gate(int mode, noun *gate)
+{
+    noun execution = direct(10), header, rest, state, sample;
+    if (mode == 3
+        && !alloc_cell_checked(direct(10), direct(11), &execution))
+        return 0;
+    for (int i = 8; i >= 0; i--) {
+        uint64_t value = (uint64_t)i + 1;
+        if (mode == 1 && i == 7)
+            value = 0;
+        if (mode == 2 && i == 4)
+            value = I2_SLAM_BUDGET_MAX + 1;
+        if (mode == 5 && i == 4)
+            value = 6;
+        if (!alloc_cell_checked(direct(value), execution, &rest))
+            return 0;
+        execution = rest;
+        if (mode == 4 && i == 4) {
+            execution = rest;
+            break;
+        }
+    }
+    header = execution;
+    for (int i = 5; i >= 0; i--) {
+        if (!alloc_cell_checked(direct((uint64_t)i + 1), header, &rest))
+            return 0;
+        header = rest;
+    }
+    return alloc_cell_checked(header, NOUN_ZERO, &rest)
+        && alloc_cell_checked(direct(0x65746174732d3269ULL), rest, &state)
+        && alloc_cell_checked(direct(0), state, &sample)
+        && alloc_cell_checked(direct(0), sample, gate);
+}
+
+uint64_t kernel_i2_limit_shape_selftest(void)
+{
+    uint64_t failures = 0, budget = 0;
+    noun gate, baseline_execution, changed_execution;
+    if (!i2_limit_test_gate(0, &gate)
+        || !i2_gate_slam_budget(gate, &budget) || budget != 5)
+        failures |= 1ULL << 0;
+    for (int mode = 1; mode <= 4; mode++) {
+        budget = 0;
+        if (!i2_limit_test_gate(mode, &gate)
+            || i2_gate_slam_budget(gate, &budget))
+            failures |= 1ULL << mode;
+    }
+    if (!i2_limit_test_gate(0, &gate)
+        || !i2_gate_execution_limits(
+            gate, &baseline_execution, &budget)
+        || !i2_limit_test_gate(5, &gate)
+        || !i2_gate_execution_limits(
+            gate, &changed_execution, &budget)
+        || noun_eq(baseline_execution, changed_execution))
+        failures |= 1ULL << 5;
+    return failures;
 }
 
 static int make_timer_event_checked(noun token, noun *out)
@@ -2579,9 +2703,22 @@ int checkpoint_install(noun ckpt)
             noun_tx_abort();
         return -1;
     }
-    uint64_t candidate_budget;
-    if (!i2_gate_slam_budget(view.gate, &candidate_budget)) {
+    uint64_t candidate_budget, live_budget;
+    noun candidate_limits, live_limits;
+    if (!i2_gate_execution_limits(
+            view.gate, &candidate_limits, &candidate_budget)) {
         g_checkpoint_last_result = COLD_RESULT_SHAPE;
+        if (noun_tx_active())
+            noun_tx_abort();
+        return -1;
+    }
+    noun limit_anchor = noun_is_cell(g_checkpoint_limit_anchor)
+        ? g_checkpoint_limit_anchor : g_kernel;
+    if (runtime_origin_v1()
+        && (!i2_gate_execution_limits(
+                limit_anchor, &live_limits, &live_budget)
+            || !noun_eq(candidate_limits, live_limits))) {
+        g_checkpoint_last_result = COLD_RESULT_IDENTITY;
         if (noun_tx_active())
             noun_tx_abort();
         return -1;
@@ -3114,7 +3251,10 @@ int kernel_boot(noun pill_gate)
                      g_boot_policy == BOOT_SNAP_ELSE_PILL);
 
     if (want_snap) {
-        if (checkpoint_load() == 0) {
+        g_checkpoint_limit_anchor = pill_gate;
+        int load_result = checkpoint_load();
+        g_checkpoint_limit_anchor = NOUN_ZERO;
+        if (load_result == 0) {
             uart_puts("boot: snap\r\n");
             uart_puts("boot: identity ");
             const runtime_identity_t *identity = runtime_identity_get();

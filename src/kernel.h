@@ -93,6 +93,7 @@ uint64_t evq_overflows(void);           /* drop-newest count */
 void     evq_metrics_reset(void);       /* zero overflows + hwm baseline */
 uint64_t kernel_queue_pressure_selftest(uint64_t percent);
 uint64_t kernel_queue_retry_selftest(void);
+uint64_t kernel_i2_limit_shape_selftest(void);
 
 /* WP4 — crash recovery: 0 hard (clear tarms), 1 soft (keep tarms) */
 void     crash_soft_set(int soft);

@@ -2866,6 +2866,12 @@ defcode "QRETRY", 6, queue_retry_test, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// I2LIMT ( -- failures ) validates the complete ten-field execution-limit noun.
+defcode "I2LIMT", 6, i2_limit_shape_test, 0
+    bl      kernel_i2_limit_shape_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "NOVM3", 5, novel_atom_test, 0
     ldr     x0, [DSP]
     bl      runtime_stats_characterize_novel

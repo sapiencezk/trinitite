@@ -96,13 +96,18 @@ int runtime_identity_supported(const runtime_identity_t *id)
     if (!id || id->pill_container_version != 2 || id->generation == 0)
         return 0;
     const uint16_t *pairs[] = {
-        id->package_schema, id->runtime_abi, id->host_abi,
-        id->program_schema, id->algorithm_abi, id->formula_abi,
-        id->deployment_schema
+        id->package_schema, id->host_abi, id->program_schema,
+        id->algorithm_abi, id->deployment_schema
     };
     for (size_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++)
         if (pairs[i][0] != 1 || pairs[i][1] != 0)
             return 0;
+    int legacy = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 0
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 0;
+    int origin_v1 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 1
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 1;
+    if (!legacy && !origin_v1)
+        return 0;
     if (id->kernel_kver[0] != 2 || id->kernel_kver[1] != 0)
         return 0;
     return bytes_nonzero(id->package_hash, 32)
