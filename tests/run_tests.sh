@@ -1452,6 +1452,11 @@ T "i2: i2ts fire %ei bare-token" "0000000000006965" \
 T "i2: i2ts fire full-token i2-timer" "72656D69742D3269" \
     "TACLR QCLR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
 
+# A restored full-token arm must rebuild its preallocated fire node; this
+# catches a CKLOAD path that otherwise dereferences a stale/no event cell.
+T "i2: ckload full-token fire" "72656D69742D3269" \
+    "CFMT  7 >NOUN 9 >NOUN CONS KGATE!  TACLR QCLR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  CKPT! DROP  TACLR QCLR  CKLOAD DROP  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
+
 # payload atom 0 prints nothing (no UART pollution of hex capture)
 T "i2: i2sr service no crash" "000000000000002A" \
     "TACLR  1000 0 CONS 1 SWAP CONS 1 SWAP CONS  7 SWAP CONS  1920152169 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  42 ."

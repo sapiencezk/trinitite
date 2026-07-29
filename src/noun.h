@@ -87,6 +87,10 @@ void  heap_persist_flip(void);     /* switch to other semispace (empty); for com
 void  heap_persist_begin_tx(void);
 void  heap_persist_commit_tx(void);
 void  heap_persist_abort_tx(void);
+/* Activation guard: I2 publish enables this around the final effect pass.
+ * Any accidental heap allocation is a deterministic host-integrity failure. */
+void  heap_noalloc_begin(void);
+void  heap_noalloc_end(void);
 
 noun  alloc_cell(noun head, noun tail);
 void  cell_inc(noun n);   /* increment refcount */

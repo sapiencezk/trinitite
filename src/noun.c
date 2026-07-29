@@ -20,6 +20,8 @@ static int      persist_sel;   /* 0 or 1 — active semispace */
 static uint8_t *persist_tx_saved_ptr;
 static int      persist_tx_saved_sel;
 static int      persist_tx_active;
+static int      heap_noalloc;
+static uint64_t heap_noalloc_faults;
 
 void noun_heap_init(void);   /* forward — also inits atom store */
 
@@ -83,6 +85,10 @@ void heap_persist_abort_tx(void)
 }
 
 static void *heap_alloc(size_t bytes) {
+    if (heap_noalloc) {
+        heap_noalloc_faults++;
+        nock_crash("post-promote allocation");
+    }
     bytes = (bytes + 7) & ~(size_t)7;
     if (bytes == 0)
         bytes = 8;
@@ -102,6 +108,16 @@ static void *heap_alloc(size_t bytes) {
         persist_ptr = p + bytes;
     }
     return p;
+}
+
+void heap_noalloc_begin(void)
+{
+    heap_noalloc = 1;
+}
+
+void heap_noalloc_end(void)
+{
+    heap_noalloc = 0;
 }
 
 /* ── Cells ──────────────────────────────────────────────────────────────────── */
@@ -236,6 +252,10 @@ atom_t *atom_store_get(uint64_t hash62) {
 }
 
 static atom_t *atom_store_alloc(uint64_t size_limbs) {
+    if (heap_noalloc) {
+        heap_noalloc_faults++;
+        nock_crash("post-promote allocation");
+    }
     size_t bytes = ((sizeof(atom_t) + size_limbs * sizeof(uint64_t)) + 7) & ~(size_t)7;
     if (bytes == 0)
         bytes = 8;
@@ -398,6 +418,8 @@ void noun_heap_init(void) {
     persist_sel = 0;
     persist_ptr = persist_base(0);
     persist_tx_active = 0;
+    heap_noalloc = 0;
+    heap_noalloc_faults = 0;
     scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
     heap_mode   = HEAP_MODE_PERSIST;  /* pill load / cold boot into persist */
     atom_store_init();

@@ -69,12 +69,13 @@ FIFO, timer roots and effects unchanged; UART `preflight` once/session, no
 effects. The queue's ordinary drop-newest policy is never applied to a
 committed I2 cause list.
 
-The device builds candidate gate/FIFO/timer-token roots in the inactive
-semispace and publishes them once only after those copies complete. Candidate
-copy exhaustion rolls the semispace selector/pointer back to the old roots.
-The remaining limitation is service-driver activation that allocates outside
-this candidate set; the current UART instant-completion path is capacity
-reserved, but a generic asynchronous driver transaction is not claimed here.
+The device builds candidate gate/FIFO/timer-token roots and UART instant
+completion FIFO events in the inactive semispace and publishes them once only after
+those copies complete. Candidate copy exhaustion rolls the semispace
+selector/pointer back to the old roots. Promotion installs the prepared timer
+roots and completions; post-publish activation is executed under a
+no-allocation guard and only emits UART bytes. Generic asynchronous driver
+transactions are not claimed here.
 
 **Unknown tags:** not silent — `trace_rec(T_UFX)` + one-shot UART `unkfx` per session. Apps should not rely on unknown tags.
 

@@ -132,10 +132,13 @@ typedef struct {
     uint64_t period;
     uint64_t next;
     noun     i2_token;   /* NOUN_ZERO = I1 TICK path; else I2 reinjection */
+    noun     i2_event_cell; /* prebuilt queue node for one-shot I2 fire */
 } tarm_t;
 
 static tarm_t g_tarms[TARM_MAX];
 static uint64_t atom_u64_early(noun a);
+static noun make_i2_timer_event(noun token, uint64_t fired_at);
+static void evq_enq_prebuilt(noun cell);
 
 static int tarm_find(uint64_t id)
 {
@@ -196,8 +199,14 @@ void tarm_set_i2(uint64_t id, uint64_t period, noun i2_token)
     /* Retain full I2 cell tokens in PERSIST heap for reinjection after scratch reset */
     if (i2_token != NOUN_ZERO && noun_is_cell(i2_token)) {
         g_tarms[i].i2_token = noun_persist(i2_token);
+        int old = heap_get_mode();
+        heap_set_mode(HEAP_MODE_PERSIST);
+        g_tarms[i].i2_event_cell = alloc_cell(
+            make_i2_timer_event(g_tarms[i].i2_token, 0), NOUN_ZERO);
+        heap_set_mode(old);
     } else {
         g_tarms[i].i2_token = NOUN_ZERO;
+        g_tarms[i].i2_event_cell = NOUN_ZERO;
     }
 }
 
@@ -208,6 +217,7 @@ static void tarm_can_i2(noun token)
         if (g_tarms[i].i2_token != NOUN_ZERO)
             cell_dec(g_tarms[i].i2_token);
         g_tarms[i].i2_token = NOUN_ZERO;
+        g_tarms[i].i2_event_cell = NOUN_ZERO;
         g_tarms[i].active = 0;
     }
 }
@@ -219,8 +229,10 @@ void tarm_can(uint64_t id)
         if (g_tarms[i].i2_token != NOUN_ZERO) {
             cell_dec(g_tarms[i].i2_token);
             g_tarms[i].i2_token = NOUN_ZERO;
+            g_tarms[i].i2_event_cell = NOUN_ZERO;
         }
         g_tarms[i].active = 0;
+        g_tarms[i].i2_event_cell = NOUN_ZERO;
     }
 }
 
@@ -231,6 +243,7 @@ void tarm_clear(void)
             cell_dec(g_tarms[i].i2_token);
             g_tarms[i].i2_token = NOUN_ZERO;
         }
+        g_tarms[i].i2_event_cell = NOUN_ZERO;
         g_tarms[i].active = 0;
     }
 }
@@ -414,9 +427,16 @@ void tarm_poll(void)
             /* I2 timer requests are one-shot.  The next E_CYCLE request has
              * a new full sequence token; retaining this arm aliases tokens
              * and exhausts the bounded registry after repeated periods. */
-            evq_enq(make_i2_timer_event(g_tarms[i].i2_token, now));
+            /* The queue node and event noun were reserved when the timer was
+             * armed.  Update only the diagnostic fired-at atom, then append. */
+            noun event = ((cell_t *)(uintptr_t)cell_ptr(g_tarms[i].i2_event_cell))->head;
+            cell_t *outer = (cell_t *)(uintptr_t)cell_ptr(event);
+            cell_t *body = (cell_t *)(uintptr_t)cell_ptr(outer->tail);
+            body->tail = direct(now);
+            evq_enq_prebuilt(g_tarms[i].i2_event_cell);
             cell_dec(g_tarms[i].i2_token);
             g_tarms[i].i2_token = NOUN_ZERO;
+            g_tarms[i].i2_event_cell = NOUN_ZERO;
             g_tarms[i].active = 0;
         } else {
             evq_enq(make_tick_event(g_tarms[i].id));
@@ -526,6 +546,26 @@ void evq_enq(noun event)
         g_evq_hwm = g_evq_n;
 }
 
+/* Transaction-reserved queue node: append without copying or allocation. */
+static void evq_enq_prebuilt(noun cell)
+{
+    if (g_evq_n >= EVQ_CAP) {
+        g_evq_overflows++;
+        trace_rec(T_OVF, (uint32_t)g_evq_overflows);
+        return;
+    }
+    if (!noun_is_cell(g_evq)) {
+        g_evq = cell;
+        g_evq_tail = cell;
+    } else {
+        ((cell_t *)(uintptr_t)cell_ptr(g_evq_tail))->tail = cell;
+        g_evq_tail = cell;
+    }
+    g_evq_n++;
+    if (g_evq_n > g_evq_hwm)
+        g_evq_hwm = g_evq_n;
+}
+
 int evq_deq(noun *out)
 {
     if (!noun_is_cell(g_evq))
@@ -572,28 +612,22 @@ void evq_enq_list(noun list)
  * Flip to the empty half, deep-copy live roots there (may still read old half
  * for shared battery cells), abandon the old half until the next flip.
  *
- * Caller must rebuild slam formula afterward (it lived on the old half).
- * Do NOT scratch_reset until after dispatch_effects (effects still in scratch).
+ * Caller must retain scratch until after the corresponding activation pass
+ * (the effect nouns remain in scratch until UART activation completes).
  */
-static noun persist_compact(noun new_gate, noun new_causes)
+static noun persist_compact(noun new_gate, noun new_causes, noun effects)
 {
     enum { QCAP = 256 };
 
     /* Capture queue chain head before we rebuild (still in old half) */
     noun old_q = g_evq;
-    noun old_tok[TARM_MAX];
-    int  tok_on[TARM_MAX];
-    noun new_tok[TARM_MAX];
+    tarm_t candidate_tarms[TARM_MAX];
     for (int i = 0; i < TARM_MAX; i++) {
-        if (g_tarms[i].active && g_tarms[i].i2_token != NOUN_ZERO
-            && noun_is_cell(g_tarms[i].i2_token)) {
-            old_tok[i] = g_tarms[i].i2_token;
-            tok_on[i]  = 1;
-        } else {
-            old_tok[i] = NOUN_ZERO;
-            tok_on[i]  = 0;
-        }
-        new_tok[i] = NOUN_ZERO;
+        candidate_tarms[i] = g_tarms[i];
+        candidate_tarms[i].i2_token =
+            (g_tarms[i].active && noun_is_cell(g_tarms[i].i2_token))
+                ? NOUN_ONE : NOUN_ZERO; /* copy below in candidate space */
+        candidate_tarms[i].i2_event_cell = NOUN_ZERO;
     }
 
     /* Write into the other semispace; old half remains readable */
@@ -632,8 +666,54 @@ static noun persist_compact(noun new_gate, noun new_causes)
     }
 
     for (int i = 0; i < TARM_MAX; i++) {
-        if (tok_on[i])
-            new_tok[i] = noun_copy(old_tok[i]);
+        if (candidate_tarms[i].i2_token != NOUN_ZERO)
+            candidate_tarms[i].i2_token = noun_copy(g_tarms[i].i2_token);
+        if (candidate_tarms[i].i2_token != NOUN_ZERO)
+            candidate_tarms[i].i2_event_cell = alloc_cell(
+                make_i2_timer_event(candidate_tarms[i].i2_token, 0), NOUN_ZERO);
+    }
+
+    /* Materialize every timer token and instant service completion before the
+     * publication point.  Activation below only copies this candidate array
+     * and writes UART bytes; it does not allocate or enqueue. */
+    noun fxcur = effects;
+    while (noun_is_cell(fxcur)) {
+        cell_t *list = (cell_t *)(uintptr_t)cell_ptr(fxcur);
+        cell_t *fx = (cell_t *)(uintptr_t)cell_ptr(list->head);
+        noun tag = fx->head;
+        noun data = fx->tail;
+        uint64_t t = noun_is_direct(tag) ? direct_val(tag) : 0;
+        if (tag_is_i2_timer_set(tag, t)) {
+            cell_t *c = (cell_t *)(uintptr_t)cell_ptr(data);
+            noun token = c->head;
+            int slot = -1;
+            for (int i = 0; i < TARM_MAX; i++)
+                if (!candidate_tarms[i].active) { slot = i; break; }
+            if (slot < 0)
+                nock_crash("preflight/timer candidate divergence");
+            candidate_tarms[slot].active = 1;
+            candidate_tarms[slot].id = i2_token_owner(token);
+            candidate_tarms[slot].period = ns_to_cntvct_ticks(atom_u64_early(c->tail));
+            candidate_tarms[slot].next = cntvct() + candidate_tarms[slot].period;
+            candidate_tarms[slot].i2_token = noun_copy(token);
+            candidate_tarms[slot].i2_event_cell = alloc_cell(
+                make_i2_timer_event(candidate_tarms[slot].i2_token, 0), NOUN_ZERO);
+        } else if (tag_is_i2_timer_cancel(tag, t)) {
+            int slot = -1;
+            for (int i = 0; i < TARM_MAX; i++)
+                if (candidate_tarms[i].active
+                    && candidate_tarms[i].i2_token != NOUN_ZERO
+                    && noun_eq(candidate_tarms[i].i2_token, data)) { slot = i; break; }
+            if (slot < 0)
+                nock_crash("preflight/timer cancel divergence");
+            candidate_tarms[slot].active = 0;
+            candidate_tarms[slot].i2_token = NOUN_ZERO;
+            candidate_tarms[slot].i2_event_cell = NOUN_ZERO;
+        } else if (tag_is_i2_service_request(tag, t)) {
+            cell_t *c = (cell_t *)(uintptr_t)cell_ptr(data);
+            CANDIDATE_ENQ(make_i2_service_event(c->head));
+        }
+        fxcur = list->tail;
     }
 
     /* The fixed slam formula is a persistent root too.  Materialize it before
@@ -648,7 +728,7 @@ static noun persist_compact(noun new_gate, noun new_causes)
     if (g_evq_n > g_evq_hwm)
         g_evq_hwm = g_evq_n;
     for (int i = 0; i < TARM_MAX; i++)
-        g_tarms[i].i2_token = new_tok[i];
+        g_tarms[i] = candidate_tarms[i];
     heap_persist_commit_tx();
 #undef CANDIDATE_ENQ
     return candidate_slam;
@@ -776,14 +856,14 @@ static uint64_t atom_u64(noun a)
     return 0;
 }
 
-/* I2 service-request payload → UART print + reinject [%i2-service …] (instant) */
-static void i2_service_uart_tx(noun data)
+/* I2 service-request payload → UART bytes.  Completion admission is handled
+ * separately by the transaction candidate builder. */
+static void i2_service_uart_print(noun data)
 {
     /* service-request ::= [token [cap [op [deadline payload]]]] */
     if (!noun_is_cell(data))
         return;
     cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(data);
-    noun token = c0->head;
     if (!noun_is_cell(c0->tail))
         return;
     cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
@@ -800,14 +880,42 @@ static void i2_service_uart_tx(noun data)
         if (noun_is_cell(pv->tail)) {
             cell_t *sv = (cell_t *)(uintptr_t)cell_ptr(pv->tail);
             atom_print_uart(sv->tail);
-            evq_enq(make_i2_service_event(token));
             return;
         }
     }
     if (noun_is_atom(payload))
         atom_print_uart(payload);
+}
+
+/* Legacy direct dispatcher: print then allocate/enqueue an instant completion.
+ * I2 commit activation uses dispatch_i2_activate() below instead. */
+static void i2_service_uart_tx(noun data)
+{
+    noun token = noun_is_cell(data)
+        ? ((cell_t *)(uintptr_t)cell_ptr(data))->head : NOUN_ZERO;
+    i2_service_uart_print(data);
     /* Instant completion (HostRunner instant_services): success status 0 */
     evq_enq(make_i2_service_event(token));
+}
+
+static void dispatch_i2_activate(noun effects)
+{
+    /* This is intentionally guarded in production and QEMU: a future effect
+     * implementation cannot silently reintroduce a post-publish allocation. */
+    heap_noalloc_begin();
+    while (noun_is_cell(effects)) {
+        cell_t *list = (cell_t *)(uintptr_t)cell_ptr(effects);
+        cell_t *fx = (cell_t *)(uintptr_t)cell_ptr(list->head);
+        noun tag = fx->head;
+        noun data = fx->tail;
+        uint64_t t = noun_is_direct(tag) ? direct_val(tag) : 0;
+        if (tag_is_i2_service_request(tag, t))
+            i2_service_uart_print(data);
+        /* Timer set/cancel and service completion insertion were fully
+         * materialized in persist_compact(); cancellation has no driver work. */
+        effects = list->tail;
+    }
+    heap_noalloc_end();
 }
 
 /*
@@ -1199,6 +1307,7 @@ static void kernel_loop(noun kernel_init, int shrine)
         int jr = setjmp(nock_abort);
         if (jr == NOCK_ABORT_CRASH) {
             uart_puts("\r\nkernel crash\r\n");
+            heap_noalloc_end();
             heap_persist_abort_tx();
             if (g_i2_preparing) {
                 /* Candidate allocation failed before publication.  Roll back
@@ -1349,9 +1458,9 @@ static void kernel_loop(noun kernel_init, int shrine)
                  * Effects stay in SCRATCH until dispatch finishes.
                  */
                 g_i2_preparing = 1;
-                slam = persist_compact(gc->head, gc->tail);
+                slam = persist_compact(gc->head, gc->tail, effects);
                 g_i2_preparing = 0;
-                dispatch_effects(effects); /* arms timers / service completions */
+                dispatch_i2_activate(effects);
                 heap_set_mode(HEAP_MODE_PERSIST);
                 heap_scratch_reset();
                 /* Optional durable checkpoint (cold RAM store; SD later) */
@@ -1380,7 +1489,7 @@ static void kernel_loop(noun kernel_init, int shrine)
                 continue;
             }
             cell_t *r2 = (cell_t *)(uintptr_t)cell_ptr(r->tail);
-            slam = persist_compact(r2->head, r2->tail);
+            slam = persist_compact(r2->head, r2->tail, NOUN_ZERO);
         } else {
             g_kernel = noun_persist(r->tail);
         }
@@ -1550,6 +1659,11 @@ int checkpoint_install(noun ckpt)
             g_tarms[i].i2_token = noun_copy(tok);
         else
             g_tarms[i].i2_token = NOUN_ZERO;
+        if (g_tarms[i].i2_token != NOUN_ZERO)
+            g_tarms[i].i2_event_cell = alloc_cell(
+                make_i2_timer_event(g_tarms[i].i2_token, 0), NOUN_ZERO);
+        else
+            g_tarms[i].i2_event_cell = NOUN_ZERO;
     }
 
     return 0;
