@@ -2,6 +2,7 @@
 #include "blake3.h"
 #include "cold.h"
 #include "cold_media.h"
+#include "cold_media_fake_test.h"
 #include "memory.h"
 #include "noun.h"
 
@@ -433,28 +434,32 @@ uint64_t cold_media_fake_selftest(void)
         }
     }
 
-    /* Preflight media faults must not mutate a physical byte. */
+    /* Boot/load and save preflights must not mutate a physical byte. */
     static const cold_media_fake_fault_t preflight[] = {
         COLD_MEDIA_FAKE_ABSENT,
         COLD_MEDIA_FAKE_READ_ONLY,
         COLD_MEDIA_FAKE_UNDERSIZED
     };
     for (unsigned i = 0; i < sizeof preflight / sizeof preflight[0]; i++) {
-        uint8_t before[32], after[32], ignored;
+        uint8_t before[32], after[32];
         if (!prepare_old_generation()) {
             failures |= 1ULL << 21;
             continue;
         }
         blake3_hash((const uint8_t *)g_fake, sizeof g_fake, before);
         cold_media_fake_fault_set(preflight[i], 1);
-        reload_window_from_media();
-        cold_media_status_t status = cold_media_read(
-            COLD_MEDIA_PHASE_LAYOUT, 0, &ignored, 1, 0);
-        if (preflight[i] == COLD_MEDIA_FAKE_READ_ONLY
-            && status == COLD_MEDIA_OK)
-            (void)cold_snap_save(direct(43));
+        cold_media_status_t status = cold_media_load_window(0);
+        int expected_status =
+            (preflight[i] == COLD_MEDIA_FAKE_ABSENT
+             && status == COLD_MEDIA_ABSENT)
+            || (preflight[i] == COLD_MEDIA_FAKE_UNDERSIZED
+                && status == COLD_MEDIA_UNDERSIZED)
+            || (preflight[i] == COLD_MEDIA_FAKE_READ_ONLY
+                && status == COLD_MEDIA_OK
+                && cold_snap_save(direct(43)) != 0);
         blake3_hash((const uint8_t *)g_fake, sizeof g_fake, after);
-        if (digest_equal(before, after) == 0 || !sentinels_ok())
+        if (!expected_status || digest_equal(before, after) == 0
+            || !sentinels_ok())
             failures |= 1ULL << 22;
     }
     return failures;

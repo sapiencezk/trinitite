@@ -2841,6 +2841,7 @@ defcode "RSTM3", 5, runtime_stats_test, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+#if defined(COLD_MEDIA_FAKE)
 defcode "MEDB3", 5, cold_media_smoke, 0
     bl      cold_media_fake_smoketest
     str     x0, [DSP, #-8]!
@@ -2850,6 +2851,7 @@ defcode "MEDM3", 5, cold_media_test, 0
     bl      cold_media_fake_selftest
     str     x0, [DSP, #-8]!
     NEXT
+#endif
 
 defcode "QPM3", 4, queue_pressure_test, 0
     ldr     x0, [DSP]

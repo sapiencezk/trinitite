@@ -1313,9 +1313,6 @@ T "m2: cold fail-closed and torn writes" "0000000000000000" \
 T "m3: bounded resettable 64-bit stats" "0000000000000000" \
     "RSTM3 ."
 
-T "m3: target-private fake block contract" "0000000000000000" \
-    "MEDB3 ."
-
 T "m3: queue pressure FIFO/reject 0 percent" "0000000000000000" \
     "RSTON RSTCLR 0 QPM3 ."
 

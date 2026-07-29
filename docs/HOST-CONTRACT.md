@@ -250,9 +250,10 @@ selection, and fail-closed format policy are unchanged.
 
 The fake-media full gate runs real `cold_snap_save`, remount, production
 selection, and decode under every declared injected fault at every physical
-transfer boundary. The ordinary 544-test suite retains only the bounded
-adapter smoke; the exhaustive matrix is a dedicated target. Fake evidence is
-not physical-controller or power-cut evidence.
+transfer boundary. The fake-only build exports its bounded smoke and
+exhaustive matrix test words only to the dedicated media target; they are not
+part of the production header or normal Forth vocabulary. Fake evidence is not
+physical-controller or power-cut evidence.
 
 No Pi 4/card run or destructive power-cut campaign is part of the repository
 tests. Therefore `target-timing`, `media-controller`, and

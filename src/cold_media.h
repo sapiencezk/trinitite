@@ -71,27 +71,3 @@ cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
 int cold_media_active(void);
 const cold_media_diag_t *cold_media_last_diag(void);
 void cold_media_reset_session(void);
-
-typedef enum {
-    COLD_MEDIA_FAKE_NONE = 0,
-    COLD_MEDIA_FAKE_ABSENT,
-    COLD_MEDIA_FAKE_READ_ONLY,
-    COLD_MEDIA_FAKE_UNDERSIZED,
-    COLD_MEDIA_FAKE_TIMEOUT,
-    COLD_MEDIA_FAKE_COMMAND_CRC,
-    COLD_MEDIA_FAKE_DATA_CRC,
-    COLD_MEDIA_FAKE_READ_FAILURE,
-    COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE,
-    COLD_MEDIA_FAKE_BARRIER_FAILURE,
-    COLD_MEDIA_FAKE_REMOVAL,
-    COLD_MEDIA_FAKE_BIT_FLIP,
-    COLD_MEDIA_FAKE_RESET
-} cold_media_fake_fault_t;
-
-void cold_media_fake_fault_set(cold_media_fake_fault_t fault,
-                               uint64_t transfer_boundary);
-void cold_media_fake_fault_clear(void);
-
-/* Returns zero for non-fake builds and on a passing fake build. */
-uint64_t cold_media_fake_smoketest(void);
-uint64_t cold_media_fake_selftest(void);

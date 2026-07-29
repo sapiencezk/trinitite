@@ -11,14 +11,15 @@ if [[ -z "$TIMEOUT_BIN" ]]; then
     exit 1
 fi
 
-RAW=$({ printf '%s\n' "MEDM3 ."; sleep 45; printf '\001x'; } | \
+RAW=$({ printf '%s\n' "MEDB3 ." "MEDM3 ."; sleep 45; printf '\001x'; } | \
     "$TIMEOUT_BIN" 60 qemu-system-aarch64 -machine raspi4b -m 2G \
         -kernel kernel8.img -display none -nographic || true)
 
-if printf '%s\n' "$RAW" |
-        tr -d '\r' |
-        grep -Eq '^0000000000000000[[:space:]]+ok'; then
-    echo "fake-media transfer-boundary matrix passed"
+RESULTS=$(printf '%s\n' "$RAW" |
+    tr -d '\r' |
+    grep -Ec '^0000000000000000[[:space:]]+ok' || true)
+if [[ "$RESULTS" -eq 2 ]]; then
+    echo "fake-media smoke and transfer-boundary matrix passed"
     exit 0
 fi
 

@@ -409,15 +409,3 @@ void cold_media_reset_session(void)
     g_reset_required = 0;
     diag_set(COLD_MEDIA_PHASE_NONE, COLD_MEDIA_DISABLED, 0, 0, 0, 0);
 }
-
-#if !defined(COLD_MEDIA_FAKE)
-uint64_t cold_media_fake_smoketest(void)
-{
-    return 0;
-}
-
-uint64_t cold_media_fake_selftest(void)
-{
-    return 0;
-}
-#endif
