@@ -42,8 +42,8 @@ Walk `[[tag data] rest]`. Known tags (cords, LSB-first ASCII):
 | `%tset` / `%tcan` | `[id period]` / `id` | Multi-arm **IEC periods** (CNTVCT ticks; period 0 cancels) |
 | `i2-timer-set` / `i2ts` | `[token delay-ns]` | I2 timer arm; cell token → fire `[%i2-timer token fired-at]`; bare atom owner → TICK path; ns→CNTVCT |
 | `i2-timer-cancel` / `i2tc` | `token` | Cancel arm for token owner |
-| `i2-service-request` / `i2sr` | service-req | UART TX of STRING payload (or bare atom) |
-| `i2-service-cancel` / `i2sc` | token | D0 nop (one-shot UART) |
+| `i2-service-request` / `i2sr` | service-req | UART TX of STRING payload; then reinject `[%i2-service token [0 0] 0]` (instant complete) |
+| `i2-service-cancel` / `i2sc` | token | D0 nop |
 
 Long I2 names (`i2-timer-set`, …) are **indirect atoms** (BLAKE3-62 identity). Dispatch matches them by precomputed hash62 (not only `cord_to_cstr`), so recognition does not depend on atom-store residency after long slam sessions.
 | `%irq` | noun | Enqueue as event |
@@ -56,10 +56,10 @@ Long I2 names (`i2-timer-set`, …) are **indirect atoms** (BLAKE3-62 identity).
 | Shape | Product | Host action |
 |-------|---------|-------------|
 | I1 | `[effects [gate causes]]` | promote gate, enqueue causes, `DO-FX` effects |
-| I2 hybrid | `[%commit [effects [gate causes]]]` | same after unwrap |
+| I2 hybrid | `[%commit [effects [gate causes]]]` | preflight effects → persist gate/causes → dispatch |
 | I2 hybrid | `[%abort fault]` | **no** promote, **no** effects |
 
-Device does **not** yet run Host ABI preflight (capacity/delay checks); offline `HostRunner` does. Known tags dispatch; unknown → `unkfx` once/session.
+**I2 preflight** (before promote): proper effect list; known I2 tags only; timer delay &gt; 0; timer count ≤ 16; service shape + UART cap; deadline &gt; 0; max 4 service reqs in one list. Fail → keep gate, UART `preflight` once/session, no effects.
 
 **Unknown tags:** not silent — `trace_rec(T_UFX)` + one-shot UART `unkfx` per session. Apps should not rely on unknown tags.
 
@@ -135,13 +135,12 @@ Hard clear of tarms: after a structural crash, re-arm periods from Nock state on
 
 | Region | Range | On exhaust |
 |--------|-------|------------|
-| Cell heap (bump) | `HEAP_BASE` .. `HEAP_TOP` (≤ `ATOM_INDEX_BASE`) | `nock_crash("heap exhausted")` — **never** overruns into atom index |
+| **Persist** cells | `HEAP_BASE` .. `HEAP_PERSIST_TOP` (48MB) | `nock_crash("heap exhausted")` |
+| **Scratch** cells | `HEAP_SCRATCH_BASE` .. `HEAP_TOP` (16MB) | `nock_crash("scratch exhausted")` |
 | Atom data | `ATOM_DATA_BASE` .. `ATOM_DATA_TOP` | `nock_crash("atom store exhausted")` |
 | Atom index | 64k open-address slots | `nock_crash("atom index full")` |
 
-Heap is bump-only (refcounts free logical cells, not bump space). Long sessions that allocate unbounded products will eventually crash cleanly rather than corrupt the atom index (which previously manifested as I2 long-cord `unkfx` after `cord_to_cstr` store misses).
-
-**Operational note:** a free-running E_CYCLE (re-arm every DT) keeps slamming; with DT=1ms a multi-second QEMU session can exhaust the 64MB heap after the useful cascade. Prefer longer DT for demos, or stop the cycle from the app, once Q1/effects are observed.
+Per event: slam product in **scratch** (reset after promote/dispatch). Gate, queue, and timer tokens live in **persist** (`noun_persist` / queue copy). Scratch reclaim stops Nock garbage from stomping the atom index. Persist still grows with each promoted gate copy (no free-list yet); free-running E_CYCLE will eventually OOM persist — use longer DT or app STOP for long demos.
 
 ---
 

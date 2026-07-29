@@ -74,9 +74,22 @@ typedef struct cell {
 
 void  noun_heap_init(void);
 
+/* Heap mode: PERSIST = long-lived (gate/queue); SCRATCH = per-event Nock. */
+#define HEAP_MODE_PERSIST  0
+#define HEAP_MODE_SCRATCH  1
+void  heap_set_mode(int mode);     /* PERSIST or SCRATCH */
+int   heap_get_mode(void);
+void  heap_scratch_reset(void);    /* bump scratch ptr to HEAP_SCRATCH_BASE */
+void  heap_persist_reset(void);    /* bump persist ptr to HEAP_BASE (after root snapshot) */
+
 noun  alloc_cell(noun head, noun tail);
 void  cell_inc(noun n);   /* increment refcount */
 void  cell_dec(noun n);   /* decrement; frees cell (and recursively children) when 0 */
+
+/* Deep-copy cells into the *current* heap mode (atoms shared via store). */
+noun  noun_copy(noun n);
+/* Copy into PERSIST region (saves/restores mode). */
+noun  noun_persist(noun n);
 
 /* Nock equality: structural, O(1) for atoms via word compare */
 int   noun_eq(noun a, noun b);

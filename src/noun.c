@@ -7,25 +7,57 @@
 #include "nock.h"
 
 /*
- * Noun heap allocator — bump allocator within HEAP_BASE..HEAP_TOP.
- * Used exclusively for cells (atoms live in the atom store).
- * Hard ceiling: never advance past HEAP_TOP (abuts ATOM_INDEX_BASE).
+ * Split cell heap (see memory.h):
+ *   persist_ptr  — long-lived gate, queue cells, retained tokens
+ *   scratch_ptr  — per-slam Nock product; reset each event
+ * Atoms live in the atom store (not bump-reclaimed).
  */
 
-static uint8_t *heap_ptr;
+static uint8_t *persist_ptr;
+static uint8_t *scratch_ptr;
+static int      heap_mode;   /* HEAP_MODE_PERSIST | HEAP_MODE_SCRATCH */
 
 void noun_heap_init(void);   /* forward — also inits atom store */
+
+void heap_set_mode(int mode)
+{
+    heap_mode = (mode == HEAP_MODE_SCRATCH) ? HEAP_MODE_SCRATCH : HEAP_MODE_PERSIST;
+}
+
+int heap_get_mode(void)
+{
+    return heap_mode;
+}
+
+void heap_scratch_reset(void)
+{
+    scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
+}
+
+void heap_persist_reset(void)
+{
+    persist_ptr = (uint8_t *)(uintptr_t)HEAP_BASE;
+}
 
 static void *heap_alloc(size_t bytes) {
     bytes = (bytes + 7) & ~(size_t)7;
     if (bytes == 0)
         bytes = 8;
-    uint8_t *p = heap_ptr;
-    uint8_t *top = (uint8_t *)(uintptr_t)HEAP_TOP;
-    /* Refuse if p already past top or remaining space < bytes */
-    if (p > top || (size_t)(top - p) < bytes)
-        nock_crash("heap exhausted");
-    heap_ptr = p + bytes;
+    uint8_t *p;
+    uint8_t *top;
+    if (heap_mode == HEAP_MODE_SCRATCH) {
+        p   = scratch_ptr;
+        top = (uint8_t *)(uintptr_t)HEAP_TOP;
+        if (p > top || (size_t)(top - p) < bytes)
+            nock_crash("scratch exhausted");
+        scratch_ptr = p + bytes;
+    } else {
+        p   = persist_ptr;
+        top = (uint8_t *)(uintptr_t)HEAP_PERSIST_TOP;
+        if (p > top || (size_t)(top - p) < bytes)
+            nock_crash("heap exhausted");
+        persist_ptr = p + bytes;
+    }
     return p;
 }
 
@@ -55,6 +87,67 @@ void cell_dec(noun n) {
         cell_dec(c->head);
         cell_dec(c->tail);
     }
+}
+
+/* ── Deep copy (cells → current heap mode; atoms shared) ─────────────────── */
+/*
+ * Open-addressed map old cell_ptr → new noun. Linear scan was O(n²) and made
+ * persist_reclaim of a ~7k-cell I2 gate too slow for QEMU smoke.
+ */
+#define COPY_MAP_MAX  65536u
+static uint32_t g_copy_key[COPY_MAP_MAX];
+static noun     g_copy_val[COPY_MAP_MAX];
+static uint8_t  g_copy_used[COPY_MAP_MAX];
+
+static noun noun_copy_rec(noun n)
+{
+    if (!noun_is_cell(n))
+        return n;   /* direct / indirect atoms — store-stable */
+    uint32_t op = cell_ptr(n);
+    uint32_t h  = op * 2654435761u;
+    /* Lookup existing mapping first */
+    for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
+        uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
+        if (!g_copy_used[i])
+            break;
+        if (g_copy_key[i] == op)
+            return g_copy_val[i];
+    }
+    /* Miss: copy children, then insert (children may fill map) */
+    cell_t *c = (cell_t *)(uintptr_t)op;
+    noun nh  = noun_copy_rec(c->head);
+    noun nt  = noun_copy_rec(c->tail);
+    noun neu = alloc_cell(nh, nt);
+    for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
+        uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
+        if (!g_copy_used[i]) {
+            g_copy_key[i]  = op;
+            g_copy_val[i]  = neu;
+            g_copy_used[i] = 1;
+            return neu;
+        }
+        if (g_copy_key[i] == op)
+            return g_copy_val[i];
+    }
+    nock_crash("copy map full");
+    return NOUN_ZERO;
+}
+
+noun noun_copy(noun n)
+{
+    /* 64KB clear is cheap vs O(n²) linear map; keeps stamps correct */
+    for (uint32_t i = 0; i < COPY_MAP_MAX; i++)
+        g_copy_used[i] = 0;
+    return noun_copy_rec(n);
+}
+
+noun noun_persist(noun n)
+{
+    int old = heap_mode;
+    heap_mode = HEAP_MODE_PERSIST;
+    noun p = noun_copy(n);
+    heap_mode = old;
+    return p;
 }
 
 /* ── Atom store ──────────────────────────────────────────────────────────────
@@ -259,7 +352,9 @@ size_t cord_to_cstr(noun n, char *buf, size_t bufsz)
 }
 
 void noun_heap_init(void) {
-    heap_ptr = (uint8_t *)HEAP_BASE;
+    persist_ptr = (uint8_t *)(uintptr_t)HEAP_BASE;
+    scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
+    heap_mode   = HEAP_MODE_PERSIST;  /* pill load / cold boot into persist */
     atom_store_init();
 }
 

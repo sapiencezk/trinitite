@@ -51,14 +51,20 @@
 #define ARENA_TOP           (ARENA_BASE + ARENA_SIZE)
 
 /*
- * Noun persistent heap: bump allocator for cells (refcounted).
- * Grows up toward the atom index. HEAP_TOP must be ≤ ATOM_INDEX_BASE —
- * a silent overrun used to stomp the atom-store hash table (I2 long-cord
- * unkfx). heap_alloc enforces the ceiling at runtime (nock_crash).
+ * Noun cell heap (split bump):
+ *   PERSIST  HEAP_BASE .. HEAP_PERSIST_TOP  — live gate, event queue, tokens
+ *   SCRATCH  HEAP_SCRATCH_BASE .. HEAP_TOP  — per-slam Nock product; reset
+ *                                            after each event (host ArenaHost)
+ * HEAP_TOP ≤ ATOM_INDEX_BASE (hard ceiling; silent overrun stomped atom index).
  */
 #define HEAP_BASE           0x02490000
-#define HEAP_SIZE           0x04000000  /* 64MB */
+#define HEAP_SIZE           0x04000000  /* 64MB total */
 #define HEAP_TOP            (HEAP_BASE + HEAP_SIZE)
+/* Scratch = one slam product (reset each event). Persist = live gate/queue/tokens. */
+#define HEAP_PERSIST_SIZE   0x03000000  /* 48MB long-lived (grows; old gates abandoned) */
+#define HEAP_PERSIST_TOP    (HEAP_BASE + HEAP_PERSIST_SIZE)
+#define HEAP_SCRATCH_BASE   HEAP_PERSIST_TOP
+#define HEAP_SCRATCH_SIZE   (HEAP_TOP - HEAP_SCRATCH_BASE)  /* 16MB */
 
 /*
  * Atom store: content-addressed (type-10) atom cache.

@@ -55,6 +55,11 @@
 #define H62_I2_TIMER_CANCEL     0x00a0daca2d33f298ULL  /* "i2-timer-cancel" */
 #define H62_I2_SERVICE_REQUEST  0x35d925d61fab343bULL  /* "i2-service-request" */
 #define H62_I2_SERVICE_CANCEL   0x36d39945d04ddb18ULL  /* "i2-service-cancel" */
+#define H62_I2_SERVICE          0x30cfa0e9c7ed95b9ULL  /* "i2-service" host→app */
+
+/* Host ABI D0 ceilings (subset of tools/i2 HostAbiLimits) */
+#define I2_MAX_TIMERS              TARM_MAX
+#define I2_MAX_PENDING_SERVICES    4
 
 #define TARM_MAX     16
 
@@ -165,10 +170,9 @@ void tarm_set_i2(uint64_t id, uint64_t period, noun i2_token)
     g_tarms[i].id     = id;
     g_tarms[i].period = period;
     g_tarms[i].next   = cntvct() + period;
-    /* Only retain full I2 cell tokens for reinjection; bare owner atoms use TICK */
+    /* Retain full I2 cell tokens in PERSIST heap for reinjection after scratch reset */
     if (i2_token != NOUN_ZERO && noun_is_cell(i2_token)) {
-        cell_inc(i2_token);
-        g_tarms[i].i2_token = i2_token;
+        g_tarms[i].i2_token = noun_persist(i2_token);
     } else {
         g_tarms[i].i2_token = NOUN_ZERO;
     }
@@ -219,17 +223,38 @@ static uint64_t atom_u64_early(noun a)
 
 static noun make_tick_event(uint64_t id)
 {
-    /* [%ei id %TICK 0]  ≡  [ei [id [TICK 0]]] */
-    return alloc_cell(direct(CORD_EI),
-           alloc_cell(direct(id),
-           alloc_cell(direct(CORD_TICK), NOUN_ZERO)));
+    /* [%ei id %TICK 0]  ≡  [ei [id [TICK 0]]] — allocate in persist for queue */
+    int old = heap_get_mode();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    noun ev = alloc_cell(direct(CORD_EI),
+              alloc_cell(direct(id),
+              alloc_cell(direct(CORD_TICK), NOUN_ZERO)));
+    heap_set_mode(old);
+    return ev;
 }
 
 static noun make_i2_timer_event(noun token, uint64_t fired_at)
 {
-    /* [%i2-timer token fired-at] */
+    /* [%i2-timer token fired-at] — token already persist-retained on arm */
+    int old = heap_get_mode();
+    heap_set_mode(HEAP_MODE_PERSIST);
     noun tag = cord_from_bytes("i2-timer", 8);
-    return alloc_cell(tag, alloc_cell(token, direct(fired_at)));
+    noun ev  = alloc_cell(tag, alloc_cell(token, direct(fired_at)));
+    heap_set_mode(old);
+    return ev;
+}
+
+/* [%i2-service token [status-code detail] data]  (HostRunner instant complete) */
+static noun make_i2_service_event(noun token)
+{
+    int old = heap_get_mode();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    noun tag = cord_from_bytes("i2-service", 10);
+    noun tok = noun_is_cell(token) ? noun_copy(token) : token;
+    noun st  = alloc_cell(direct(0), direct(0));           /* status, detail */
+    noun ev  = alloc_cell(tag, alloc_cell(tok, alloc_cell(st, NOUN_ZERO)));
+    heap_set_mode(old);
+    return ev;
 }
 
 /* CNTVCT ticks for delay_ns (I2 §16.2 publish conversion). */
@@ -424,7 +449,13 @@ void evq_enq(noun event)
         return;   /* drop-newest */
     }
 
-    noun cell = alloc_cell(event, NOUN_ZERO);
+    /* Queue lives in PERSIST so scratch reset cannot free pending events */
+    int old = heap_get_mode();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    noun ev   = noun_copy(event);
+    noun cell = alloc_cell(ev, NOUN_ZERO);
+    heap_set_mode(old);
+
     if (!noun_is_cell(g_evq)) {
         g_evq      = cell;
         g_evq_tail = cell;
@@ -597,13 +628,14 @@ static uint64_t atom_u64(noun a)
     return 0;
 }
 
-/* I2 service-request payload → UART print (STRING typed value or bare atom) */
+/* I2 service-request payload → UART print + reinject [%i2-service …] (instant) */
 static void i2_service_uart_tx(noun data)
 {
     /* service-request ::= [token [cap [op [deadline payload]]]] */
     if (!noun_is_cell(data))
         return;
     cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(data);
+    noun token = c0->head;
     if (!noun_is_cell(c0->tail))
         return;
     cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
@@ -620,11 +652,92 @@ static void i2_service_uart_tx(noun data)
         if (noun_is_cell(pv->tail)) {
             cell_t *sv = (cell_t *)(uintptr_t)cell_ptr(pv->tail);
             atom_print_uart(sv->tail);
+            evq_enq(make_i2_service_event(token));
             return;
         }
     }
     if (noun_is_atom(payload))
         atom_print_uart(payload);
+    /* Instant completion (HostRunner instant_services): success status 0 */
+    evq_enq(make_i2_service_event(token));
+}
+
+/*
+ * I2 effect preflight before promote (Host ABI §12.5 subset).
+ * On failure: do not replace g_kernel, do not dispatch, do not enqueue causes.
+ */
+static int i2_preflight_effects(noun effects)
+{
+    int new_timers = 0;
+    int new_svcs   = 0;
+    int live_tarms = 0;
+    for (int i = 0; i < TARM_MAX; i++) {
+        if (g_tarms[i].active)
+            live_tarms++;
+    }
+
+    noun cur = effects;
+    while (noun_is_cell(cur)) {
+        cell_t *list = (cell_t *)(uintptr_t)cell_ptr(cur);
+        noun head = list->head;
+        cur = list->tail;
+        if (!noun_is_cell(head))
+            return 0;   /* malformed */
+        cell_t *fx = (cell_t *)(uintptr_t)cell_ptr(head);
+        noun tag = fx->head;
+        noun data = fx->tail;
+        if (!noun_is_atom(tag))
+            return 0;
+        uint64_t t = noun_is_direct(tag) ? direct_val(tag) : 0;
+
+        if (tag_is_i2_timer_set(tag, t)) {
+            if (!noun_is_cell(data))
+                return 0;
+            cell_t *c = (cell_t *)(uintptr_t)cell_ptr(data);
+            uint64_t delay = atom_u64(c->tail);
+            if (delay == 0)
+                return 0;
+            if (i2_token_owner(c->head) == 0)
+                return 0;
+            new_timers++;
+            if (live_tarms + new_timers > I2_MAX_TIMERS)
+                return 0;
+        } else if (tag_is_i2_timer_cancel(tag, t)) {
+            /* cancel of missing arm: allowed (no-op at commit) */
+            (void)data;
+        } else if (tag_is_i2_service_request(tag, t)) {
+            if (!noun_is_cell(data))
+                return 0;
+            cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(data);
+            if (!noun_is_cell(c0->tail))
+                return 0;
+            cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
+            uint64_t cap = atom_u64(c1->head);
+            if (cap != 1)   /* CAP_UART_OUTPUT */
+                return 0;
+            if (!noun_is_cell(c1->tail))
+                return 0;
+            cell_t *c2 = (cell_t *)(uintptr_t)cell_ptr(c1->tail);
+            if (!noun_is_cell(c2->tail))
+                return 0;
+            cell_t *c3 = (cell_t *)(uintptr_t)cell_ptr(c2->tail);
+            uint64_t deadline = atom_u64(c3->head);
+            if (deadline == 0)
+                return 0;
+            new_svcs++;
+            if (new_svcs > I2_MAX_PENDING_SERVICES)
+                return 0;
+        } else if (tag_is_i2_service_cancel(tag, t)) {
+            (void)data;
+        } else {
+            /* Unknown tag on I2 commit path → reject */
+            return 0;
+        }
+    }
+    /* improper list (non-null terminator) */
+    if (cur != NOUN_ZERO && !noun_is_cell(cur))
+        return 0;
+    return 1;
 }
 
 static void dispatch_one(noun tag, noun data) {
@@ -968,6 +1081,10 @@ static void kernel_loop(noun kernel_init, int shrine)
             trace_rec(T_EV0, 0);
         }
 
+        /* Per-event scratch: Nock product dies after promote/dispatch */
+        heap_scratch_reset();
+        heap_set_mode(HEAP_MODE_SCRATCH);
+
         nock_budget_set(g_slam_budget);
         noun subject = alloc_cell(g_kernel, event);
         noun result  = nock(subject, slam);
@@ -981,18 +1098,23 @@ static void kernel_loop(noun kernel_init, int shrine)
         if (deadline_expired()) {
             emit_timeout(0);
             deadline_set(0);
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
             continue;
         }
 
         if (!noun_is_cell(result)) {
             uart_puts("bad result\r\n");
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
             continue;
         }
         cell_t *r = (cell_t *)(uintptr_t)cell_ptr(result);
 
         /*
          * I2 hybrid product (shrine):
-         *   [%commit [effects [gate causes]]]  → promote + dispatch + enqueue
+         *   [%commit [effects [gate causes]]]  → preflight → persist gate/causes
+         *                                        → dispatch → scratch reset
          *   [%abort  fault]                    → no promote, no effects
          * I1 shrine product remains [effects [gate causes]].
          */
@@ -1001,22 +1123,41 @@ static void kernel_loop(noun kernel_init, int shrine)
             if (rh == CORD_COMMIT) {
                 if (!noun_is_cell(r->tail)) {
                     uart_puts("bad result\r\n");
+                    heap_set_mode(HEAP_MODE_PERSIST);
+                    heap_scratch_reset();
                     continue;
                 }
                 cell_t *prod = (cell_t *)(uintptr_t)cell_ptr(r->tail);
                 noun effects = prod->head;
                 if (!noun_is_cell(prod->tail)) {
                     uart_puts("bad result\r\n");
+                    heap_set_mode(HEAP_MODE_PERSIST);
+                    heap_scratch_reset();
                     continue;
                 }
                 cell_t *gc = (cell_t *)(uintptr_t)cell_ptr(prod->tail);
-                g_kernel = gc->head;
+                if (!i2_preflight_effects(effects)) {
+                    static int pf_uart;
+                    if (!pf_uart) {
+                        pf_uart = 1;
+                        uart_puts("preflight\r\n");
+                    }
+                    heap_set_mode(HEAP_MODE_PERSIST);
+                    heap_scratch_reset();
+                    continue;
+                }
+                /* Promote gate + causes into PERSIST; scratch product discarded */
+                g_kernel = noun_persist(gc->head);
                 evq_enq_list(gc->tail);
-                dispatch_effects(effects);
+                dispatch_effects(effects); /* may arm timers / enq service done */
+                heap_set_mode(HEAP_MODE_PERSIST);
+                heap_scratch_reset();
                 continue;
             }
             if (rh == CORD_ABORT) {
                 /* keep g_kernel; drop effects (Host ABI abort path) */
+                heap_set_mode(HEAP_MODE_PERSIST);
+                heap_scratch_reset();
                 continue;
             }
         }
@@ -1026,16 +1167,20 @@ static void kernel_loop(noun kernel_init, int shrine)
         if (g_shrine_mode) {
             if (!noun_is_cell(r->tail)) {
                 uart_puts("bad result\r\n");
+                heap_set_mode(HEAP_MODE_PERSIST);
+                heap_scratch_reset();
                 continue;
             }
             cell_t *r2 = (cell_t *)(uintptr_t)cell_ptr(r->tail);
-            g_kernel = r2->head;
+            g_kernel = noun_persist(r2->head);
             evq_enq_list(r2->tail);
         } else {
-            g_kernel = r->tail;
+            g_kernel = noun_persist(r->tail);
         }
 
         dispatch_effects(effects);
+        heap_set_mode(HEAP_MODE_PERSIST);
+        heap_scratch_reset();
     }
 }
 
