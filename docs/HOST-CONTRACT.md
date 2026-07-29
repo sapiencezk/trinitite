@@ -222,6 +222,11 @@ emits telemetry.
 The phase/counter schema, reset boundary, workload/tier rules, and claim
 classes are normative in `1499kernel/docs/I2-M3-PROFILE.md`. QEMU counter
 ticks are virtual timing and can earn only `qemu-functional`.
+Target boot-load timing is captured before the harness can enable/reset stats;
+one fixed pending value is consumed into the first reset record. Disabled
+RAM/semihost media has no physical boot-load sample. Instrumentation overhead
+uses equal-event `off/on/on/off` arms, and every bounded run must return exact
+success even when aggregation is off.
 
 Physical-media selection is compile-time only:
 
@@ -237,9 +242,17 @@ The target-private adapter maps the two logical M2 superblocks to distinct
 checks descriptor, presence, read-only state, capacity, translated range,
 deadline, and non-reentrancy. Physical append ordering adds barriers after the
 object commit and inactive superblock. A submitted uncertain write is not
-retried. The barrier proves only controller/card ready completion, not
+retried. Any controller/read or write fault latches reset-required until an
+explicit session reset, which also resets the target-private controller/card
+session. The barrier proves only controller/card ready completion, not
 power-cut durability. RuntimeIdentity, checkpoint v2, logical cold v2, boot
 selection, and fail-closed format policy are unchanged.
+
+The fake-media full gate runs real `cold_snap_save`, remount, production
+selection, and decode under every declared injected fault at every physical
+transfer boundary. The ordinary 544-test suite retains only the bounded
+adapter smoke; the exhaustive matrix is a dedicated target. Fake evidence is
+not physical-controller or power-cut evidence.
 
 No Pi 4/card run or destructive power-cut campaign is part of the repository
 tests. Therefore `target-timing`, `media-controller`, and
