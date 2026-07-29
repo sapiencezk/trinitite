@@ -63,7 +63,9 @@ uint64_t deadline_get(void);
 int      deadline_expired(void);
 void     emit_timeout(uint64_t elapsed);
 
-/* WP2 — per-slam Nock op budget (0 = unlimited; default 1e6 in kernel_loop) */
+/* WP2 — per-slam Nock op budget (0 = unlimited; legacy default 1e6).
+ * An identity-admitted I2 gate replaces it with its bounded execution request,
+ * capped by the target at 2e6. */
 void     slam_budget_set(uint64_t max_ops);
 uint64_t slam_budget_get(void);
 

@@ -1769,6 +1769,8 @@ void crash_recover_host(void)
 #define SLAM_BUDGET_DEFAULT  1000000ULL
 #endif
 
+#define I2_SLAM_BUDGET_MAX  2000000ULL
+
 static uint64_t g_slam_budget = SLAM_BUDGET_DEFAULT;
 
 void slam_budget_set(uint64_t max_ops)
@@ -2462,6 +2464,42 @@ static int checkpoint_identity_matches(noun ckpt, int *identity_represented)
     return runtime_identity_equal(&identity, live);
 }
 
+/* Extract the bound per-event Nock budget from an identity-admitted I2 gate.
+ * Its state header carries the admitted execution limits; field 5 is
+ * max_nock_ops_per_event. Keep legacy I1 on SLAM_BUDGET_DEFAULT and cap every
+ * I2 request at the target's audited maximum before it reaches Nock. */
+static int i2_gate_slam_budget(noun gate, uint64_t *budget)
+{
+    noun battery, sample, axis, state, tag, rest, header, field;
+    noun execution;
+    if (!budget
+        || !noun_take(gate, &battery, &sample)
+        || !noun_take(sample, &axis, &state)
+        || !noun_is_direct(axis) || direct_val(axis) != 0
+        || !noun_take(state, &tag, &rest)
+        || !i2_tag_is(tag, "i2-state", 8)
+        || !noun_take(rest, &header, &rest))
+        return 0;
+
+    rest = header;
+    for (int i = 0; i < 6; i++) {
+        if (!noun_take(rest, &field, &rest))
+            return 0;
+    }
+    execution = rest;
+    rest = execution;
+    for (int i = 0; i < 4; i++) {
+        if (!noun_take(rest, &field, &rest)) {
+            return 0;
+        }
+    }
+    if (!noun_take(rest, &field, &rest)
+        || !positive_direct(field, budget)
+        || *budget > I2_SLAM_BUDGET_MAX)
+        return 0;
+    return 1;
+}
+
 static int make_timer_event_checked(noun token, noun *out)
 {
     noun body, event, cell;
@@ -2541,6 +2579,13 @@ int checkpoint_install(noun ckpt)
             noun_tx_abort();
         return -1;
     }
+    uint64_t candidate_budget;
+    if (!i2_gate_slam_budget(view.gate, &candidate_budget)) {
+        g_checkpoint_last_result = COLD_RESULT_SHAPE;
+        if (noun_tx_active())
+            noun_tx_abort();
+        return -1;
+    }
 
     tarm_t candidate_tarms[TARM_MAX] = {0};
     noun candidate_gate, candidate_q = NOUN_ZERO, candidate_tail = NOUN_ZERO;
@@ -2604,6 +2649,7 @@ int checkpoint_install(noun ckpt)
     /* One publication after complete validation and candidate allocation. */
     g_kernel = candidate_gate;
     g_slam_formula = candidate_slam;
+    g_slam_budget = candidate_budget;
     g_shrine_mode = 1;
     g_evq = candidate_q;
     g_evq_tail = candidate_tail;
@@ -3030,6 +3076,10 @@ static int install_clean_pill(noun pill_gate)
         && !runtime_identity_validate_gate(
             pill_gate, runtime_identity_get(), 0))
         return -1;
+    uint64_t candidate_budget = SLAM_BUDGET_DEFAULT;
+    if (runtime_identity_live()
+        && !i2_gate_slam_budget(pill_gate, &candidate_budget))
+        return -1;
     heap_persist_begin_tx();
     heap_set_mode(HEAP_MODE_PERSIST);
     noun candidate_gate, candidate_slam;
@@ -3041,6 +3091,7 @@ static int install_clean_pill(noun pill_gate)
     tarm_t empty_tarms[TARM_MAX] = {0};
     g_kernel = candidate_gate;
     g_slam_formula = candidate_slam;
+    g_slam_budget = candidate_budget;
     g_shrine_mode = noun_pill_shape ? 1 : 0;
     g_evq = NOUN_ZERO;
     g_evq_tail = NOUN_ZERO;
