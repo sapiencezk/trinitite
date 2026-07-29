@@ -3078,10 +3078,29 @@ defcode "TDUE", 4, tdue, 0
     bl      tarm_force_due
     NEXT
 
+// BOOTPOL! ( n -- )  boot policy: 0=pill 1=snap|pill 2=snap-only
+defcode "BOOTPOL!", 8, bootpol_store, 0
+    ldr     x0, [DSP], #8
+    bl      boot_policy_set
+    NEXT
+
+// BOOTPOL@ ( -- n )
+defcode "BOOTPOL@", 8, bootpol_fetch, 0
+    bl      boot_policy_get
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// NVFLUSH ( -- st )  arm + flush COLD_BASE → build/cold.img (needs -semihosting)
+defcode "NVFLUSH", 7, nvflush_word, 0
+    bl      cold_nv_arm
+    bl      cold_nv_flush
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // KERNEL ( -- )
-//   Load PILL, decode kernel gate, dispatch to Arvo or Shrine loop
-//   based on the shape byte in the PILL header (stored in KSHAPE).
-//   Falls back to QUIT if no pill is present.
+//   Load PILL, apply BOOTPOL (pill / snap-else-pill / snap-only), enter loop.
+//   Falls back to QUIT if policy cannot boot.
 defcode "KERNEL", 6, kernel, 0
     bl      pill_load               // x0 = jammed atom; sets noun_pill_shape
     // propagate C global noun_pill_shape → KSHAPE variable
@@ -3091,14 +3110,12 @@ defcode "KERNEL", 6, kernel, 0
     str     x1, [x2]
     cbz     x0, .Lkernel_nopill
     bl      cue                     // x0 = kernel gate noun
-    ldr     x1, =word_kshape + 32
-    ldr     x1, [x1]
-    cbnz    x1, .Lkernel_shrine
-    bl      arvo_loop               // never returns
-.Lkernel_shrine:
-    bl      shrine_loop             // never returns
+    bl      kernel_boot             // never returns if boot ok; -1 → REPL
+    b       code_quit
 .Lkernel_nopill:
-    b       code_quit               // no pill: start REPL
+    mov     x0, #0                  // no pill gate
+    bl      kernel_boot             // may still boot from snap
+    b       code_quit
 
     .section .rodata
     .balign 8

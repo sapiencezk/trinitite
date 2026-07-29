@@ -1431,9 +1431,8 @@ int checkpoint_save(void)
     if (!noun_is_cell(g_kernel))
         return -1;
     noun ck = checkpoint_capture();
-    if (cold_snap_save(ck) != 0)
-        return -1;
-    return 0;
+    /* RAM cold window only — NVFLUSH separately (needs QEMU -semihosting) */
+    return cold_snap_save(ck);
 }
 
 int checkpoint_load(void)
@@ -1442,4 +1441,56 @@ int checkpoint_load(void)
     if (!noun_is_cell(ck))
         return -1;
     return checkpoint_install(ck);
+}
+
+/* ── Boot policy (pill vs durable snap) ─────────────────────────────────── */
+
+static int g_boot_policy = BOOT_PILL;
+
+void boot_policy_set(int policy)
+{
+    if (policy < BOOT_PILL || policy > BOOT_SNAP)
+        policy = BOOT_PILL;
+    g_boot_policy = policy;
+}
+
+int boot_policy_get(void)
+{
+    return g_boot_policy;
+}
+
+int kernel_boot(noun pill_gate)
+{
+    int want_snap = (g_boot_policy == BOOT_SNAP ||
+                     g_boot_policy == BOOT_SNAP_ELSE_PILL);
+
+    if (want_snap) {
+        if (checkpoint_load() == 0) {
+            uart_puts("boot: snap\r\n");
+            if (g_shrine_mode)
+                shrine_loop(g_kernel);
+            else
+                arvo_loop(g_kernel);
+            return -1; /* unreachable */
+        }
+        if (g_boot_policy == BOOT_SNAP) {
+            uart_puts("boot: no snap\r\n");
+            return -1;
+        }
+        uart_puts("boot: snap miss → pill\r\n");
+    }
+
+    if (!noun_is_cell(pill_gate)) {
+        uart_puts("boot: no pill\r\n");
+        return -1;
+    }
+
+    uart_puts("boot: pill\r\n");
+    g_kernel      = noun_persist(pill_gate);
+    g_shrine_mode = noun_pill_shape ? 1 : 0;
+    if (g_shrine_mode)
+        shrine_loop(g_kernel);
+    else
+        arvo_loop(g_kernel);
+    return -1;
 }

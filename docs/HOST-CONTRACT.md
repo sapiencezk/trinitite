@@ -158,7 +158,26 @@ tarms      ::= * [id period remain-ticks token]
 | `CKAUTO!` *n* | Auto-save every *n* successful I2 commits (`0` = off) |
 | `KGATE!` / `KGATE@` | Set/get live gate without entering `KERNEL` loop |
 
-**Law:** checkpoint is a **host transaction boundary** image (same roots as persist compact), not a trace of every Nock intermediate. Restore does not re-run history; it reinstalls the last committed resource + host work. Backend is `COLD_BASE` (8MB RAM); swap `cold_read`/`cold_write` for SD when ready.
+**Law:** checkpoint is a **host transaction boundary** image (same roots as persist compact), not a trace of every Nock intermediate. Restore does not re-run history; it reinstalls the last committed resource + host work.
+
+**Working storage:** `COLD_BASE` 8MB RAM window (always).  
+**NV path (QEMU):** after each snap, `cold_nv_flush()` writes the window to host file `cold.img` via ARM semihosting (`-semihosting`). Next boot reloads with:
+
+```text
+-device loader,file=cold.img,addr=0x07100000,force-raw=on
+```
+
+**Boot policy** (`BOOTPOL!` / `KERNEL`):
+
+| Policy | Value | Behaviour |
+|--------|------:|-----------|
+| pill only | 0 | Load pill gate (default) |
+| snap else pill | 1 | `CKLOAD` if snap present, else pill |
+| snap only | 2 | Require snap; else REPL |
+
+UART marks: `boot: snap`, `boot: pill`, `boot: snap miss → pill`, `boot: no snap`, `boot: no pill`.
+
+Real SDHCI can replace `cold_nv_flush` later without changing the checkpoint noun or boot policy.
 
 ---
 

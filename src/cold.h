@@ -3,14 +3,16 @@
 #include "noun.h"
 
 /*
- * Phase 5 — RAM-backed content-addressed cold store.
+ * Phase 5 — content-addressed cold store.
  *
  * Layout at COLD_BASE (see memory.h):
  *   superblock @ +0
  *   objects    @ +0x1000  append-only [hdr|payload|pad]
  *
- * Hash key exposed to Forth: 62-bit BLAKE3 prefix (same idea as indirect atoms).
- * Backend is memcpy into guest RAM; swap cold_read/write for SD later.
+ * Working storage is always the COLD_BASE RAM window (memcpy).
+ * Optional NV flush (semihosting → host file "cold.img") makes snaps
+ * survive QEMU reboot when the file is reloaded at COLD_BASE via loader.
+ * Real SDHCI can replace cold_nv_flush later without API change.
  */
 
 int      cold_init(void);                 /* validate or format */
@@ -28,5 +30,11 @@ uint64_t cold_log_len(void);
 noun     cold_log_at(uint64_t i);         /* 0 if OOB */
 
 /* Single snapshot root */
-int      cold_snap_save(noun root);       /* 0 ok */
+int      cold_snap_save(noun root);       /* 0 ok; flushes NV if available */
 noun     cold_snap_load(void);            /* 0 if none */
+
+/* NV flush of entire COLD_BASE window (0 ok, -1 unavailable/fail).
+ * Requires cold_nv_arm() first (CKPT!/NVFLUSH arms) so bare QEMU never HLTs. */
+void     cold_nv_arm(void);
+int      cold_nv_flush(void);
+int      cold_nv_enabled(void);

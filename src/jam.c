@@ -5,7 +5,8 @@
 
 /* ── Bitstream writer ─────────────────────────────────────────────────────── */
 
-#define JAM_MAX_LIMBS 128   /* 8192 bits max jam output */
+/* I2 hybrid gates jam ~10KB; headroom for live state + tarms (~1 Mbit). */
+#define JAM_MAX_LIMBS 16384   /* 1 Mbit max jam output */
 
 typedef struct {
     uint64_t buf[JAM_MAX_LIMBS];
@@ -78,14 +79,15 @@ static void do_mat(jambuf_t *jb, noun k) {
 
 /* ── jam cache: noun → bit position ──────────────────────────────────────── */
 
-#define JAM_CACHE_SZ 128
+/* Large hybrid gates need many backrefs (7k+ cells). */
+#define JAM_CACHE_SZ 65536u
 
 typedef struct { noun key; uint64_t pos; int used; } jcent_t;
 
 static jcent_t g_jcache[JAM_CACHE_SZ];
 
 static void jcache_init(void) {
-    for (int i = 0; i < JAM_CACHE_SZ; i++) g_jcache[i].used = 0;
+    for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) g_jcache[i].used = 0;
 }
 
 static uint32_t jcache_hash(noun n) {

@@ -125,3 +125,18 @@ int      checkpoint_save(void);        /* capture → cold_snap_save; 0 ok */
 int      checkpoint_load(void);        /* cold_snap_load → install; 0 ok */
 void     checkpoint_auto_every(uint64_t n); /* 0=off; save every n commits */
 uint64_t checkpoint_auto_get(void);
+
+/*
+ * Boot policy for KERNEL:
+ *   0 BOOT_PILL           — pill only (default; ignore snap)
+ *   1 BOOT_SNAP_ELSE_PILL — CKLOAD if snap present, else pill
+ *   2 BOOT_SNAP           — require snap (fail to REPL if none)
+ */
+#define BOOT_PILL            0
+#define BOOT_SNAP_ELSE_PILL  1
+#define BOOT_SNAP            2
+void     boot_policy_set(int policy);
+int      boot_policy_get(void);
+/* Apply policy and enter arvo/shrine loop. pill_gate may be 0.
+ * Never returns on success; returns -1 to fall back to REPL. */
+int      kernel_boot(noun pill_gate);

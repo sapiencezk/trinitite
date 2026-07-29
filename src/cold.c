@@ -309,6 +309,8 @@ int cold_snap_save(noun root)
     uint64_t len;
     if (jam_bytes(root, &bytes, &len) != 0)
         return -1;
+    /* RAM snap only — NVFLUSH (semihost) is explicit so bare QEMU tests
+     * do not execute HLT #0xF000 without -semihosting. */
     return append_obj(KIND_SNAP, bytes, len, 0);
 }
 

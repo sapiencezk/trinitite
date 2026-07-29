@@ -144,8 +144,11 @@
 #define CORE3_STACK_TOP     0x0700C000
 
 /*
- * Phase 5 — RAM-backed cold store (content-addressed jam blobs).
- * Between core stacks and PILL.  SD backend can replace cold_read/write later.
+ * Phase 5 — cold store (content-addressed jam blobs) at fixed PA.
+ * Working copy is always this RAM window. NV = semihost flush to host
+ * "cold.img", reloaded on next QEMU boot via:
+ *   -device loader,file=cold.img,addr=0x07100000,force-raw=on
+ * SDHCI can replace flush later without moving the window.
  */
 #define COLD_BASE           0x07100000
 #define COLD_SIZE           0x00800000  /* 8 MB */
