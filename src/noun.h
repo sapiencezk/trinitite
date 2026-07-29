@@ -80,7 +80,8 @@ void  noun_heap_init(void);
 void  heap_set_mode(int mode);     /* PERSIST or SCRATCH */
 int   heap_get_mode(void);
 void  heap_scratch_reset(void);    /* bump scratch ptr to HEAP_SCRATCH_BASE */
-void  heap_persist_reset(void);    /* bump persist ptr to HEAP_BASE (after root snapshot) */
+void  heap_persist_reset(void);    /* bump current persist semispace to its base */
+void  heap_persist_flip(void);     /* switch to other semispace (empty); for compact */
 
 noun  alloc_cell(noun head, noun tail);
 void  cell_inc(noun n);   /* increment refcount */

@@ -8,16 +8,27 @@
 
 /*
  * Split cell heap (see memory.h):
- *   persist_ptr  — long-lived gate, queue cells, retained tokens
- *   scratch_ptr  — per-slam Nock product; reset each event
+ *   persist semispace 0/1 — long-lived gate, queue, tokens (flip on compact)
+ *   scratch              — per-slam Nock product; reset each event
  * Atoms live in the atom store (not bump-reclaimed).
  */
 
 static uint8_t *persist_ptr;
 static uint8_t *scratch_ptr;
-static int      heap_mode;   /* HEAP_MODE_PERSIST | HEAP_MODE_SCRATCH */
+static int      heap_mode;     /* HEAP_MODE_PERSIST | HEAP_MODE_SCRATCH */
+static int      persist_sel;   /* 0 or 1 — active semispace */
 
 void noun_heap_init(void);   /* forward — also inits atom store */
+
+static uint8_t *persist_base(int sel)
+{
+    return (uint8_t *)(uintptr_t)(HEAP_BASE + (uint64_t)sel * HEAP_PERSIST_HALF);
+}
+
+static uint8_t *persist_limit(int sel)
+{
+    return persist_base(sel) + HEAP_PERSIST_HALF;
+}
 
 void heap_set_mode(int mode)
 {
@@ -36,7 +47,14 @@ void heap_scratch_reset(void)
 
 void heap_persist_reset(void)
 {
-    persist_ptr = (uint8_t *)(uintptr_t)HEAP_BASE;
+    persist_ptr = persist_base(persist_sel);
+}
+
+void heap_persist_flip(void)
+{
+    /* Allocate into the other half; leave the old half readable until next flip */
+    persist_sel ^= 1;
+    persist_ptr  = persist_base(persist_sel);
 }
 
 static void *heap_alloc(size_t bytes) {
@@ -53,7 +71,7 @@ static void *heap_alloc(size_t bytes) {
         scratch_ptr = p + bytes;
     } else {
         p   = persist_ptr;
-        top = (uint8_t *)(uintptr_t)HEAP_PERSIST_TOP;
+        top = persist_limit(persist_sel);
         if (p > top || (size_t)(top - p) < bytes)
             nock_crash("heap exhausted");
         persist_ptr = p + bytes;
@@ -352,7 +370,8 @@ size_t cord_to_cstr(noun n, char *buf, size_t bufsz)
 }
 
 void noun_heap_init(void) {
-    persist_ptr = (uint8_t *)(uintptr_t)HEAP_BASE;
+    persist_sel = 0;
+    persist_ptr = persist_base(0);
     scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
     heap_mode   = HEAP_MODE_PERSIST;  /* pill load / cold boot into persist */
     atom_store_init();

@@ -60,11 +60,15 @@
 #define HEAP_BASE           0x02490000
 #define HEAP_SIZE           0x04000000  /* 64MB total */
 #define HEAP_TOP            (HEAP_BASE + HEAP_SIZE)
-/* Scratch = one slam product (reset each event). Persist = live gate/queue/tokens. */
-#define HEAP_PERSIST_SIZE   0x03000000  /* 48MB long-lived (grows; old gates abandoned) */
+/*
+ * Persist is dual-space compacted each promote (from/to halves).
+ * Scratch holds one slam product; reset after event.
+ */
+#define HEAP_PERSIST_SIZE   0x02000000  /* 32MB total (2×16MB semispace) */
 #define HEAP_PERSIST_TOP    (HEAP_BASE + HEAP_PERSIST_SIZE)
+#define HEAP_PERSIST_HALF   (HEAP_PERSIST_SIZE / 2)
 #define HEAP_SCRATCH_BASE   HEAP_PERSIST_TOP
-#define HEAP_SCRATCH_SIZE   (HEAP_TOP - HEAP_SCRATCH_BASE)  /* 16MB */
+#define HEAP_SCRATCH_SIZE   (HEAP_TOP - HEAP_SCRATCH_BASE)  /* 32MB */
 
 /*
  * Atom store: content-addressed (type-10) atom cache.

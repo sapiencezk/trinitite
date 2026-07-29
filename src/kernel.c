@@ -506,6 +506,67 @@ void evq_enq_list(noun list)
     }
 }
 
+/*
+ * Persist semispace compaction (ArenaHost-shaped).
+ *
+ * Call while SCRATCH holds the slam product and the *current* persist half
+ * still holds the previous gate/queue/tokens (readable).
+ *
+ * Flip to the empty half, deep-copy live roots there (may still read old half
+ * for shared battery cells), abandon the old half until the next flip.
+ *
+ * Caller must rebuild slam formula afterward (it lived on the old half).
+ * Do NOT scratch_reset until after dispatch_effects (effects still in scratch).
+ */
+static void persist_compact(noun new_gate, noun new_causes)
+{
+    enum { QCAP = 256 };
+
+    /* Capture queue chain head before we rebuild (still in old half) */
+    noun old_q = g_evq;
+    noun old_tok[TARM_MAX];
+    int  tok_on[TARM_MAX];
+    for (int i = 0; i < TARM_MAX; i++) {
+        if (g_tarms[i].active && g_tarms[i].i2_token != NOUN_ZERO
+            && noun_is_cell(g_tarms[i].i2_token)) {
+            old_tok[i] = g_tarms[i].i2_token;
+            tok_on[i]  = 1;
+        } else {
+            old_tok[i] = NOUN_ZERO;
+            tok_on[i]  = 0;
+        }
+        g_tarms[i].i2_token = NOUN_ZERO;
+    }
+
+    g_evq      = NOUN_ZERO;
+    g_evq_tail = NOUN_ZERO;
+    g_evq_n    = 0;
+
+    /* Write into the other semispace; old half remains readable */
+    heap_persist_flip();
+    heap_set_mode(HEAP_MODE_PERSIST);
+
+    g_kernel = noun_copy(new_gate);   /* may pull cells from old half + scratch */
+
+    /* Prior queue events (old half) then new causes (scratch) */
+    {
+        noun q = old_q;
+        uint64_t n = 0;
+        while (noun_is_cell(q) && n < QCAP) {
+            cell_t *c = (cell_t *)(uintptr_t)cell_ptr(q);
+            evq_enq(c->head);
+            q = c->tail;
+            n++;
+        }
+    }
+    evq_enq_list(new_causes);
+
+    for (int i = 0; i < TARM_MAX; i++) {
+        if (tok_on[i])
+            g_tarms[i].i2_token = noun_copy(old_tok[i]);
+    }
+}
+
 /* ── Phase 3 — IRQ ring (SPSC; capacity SIZE-1) ───────────────────────────── */
 
 #define IRQ_RING_SIZE 64
@@ -1146,10 +1207,14 @@ static void kernel_loop(noun kernel_init, int shrine)
                     heap_scratch_reset();
                     continue;
                 }
-                /* Promote gate + causes into PERSIST; scratch product discarded */
-                g_kernel = noun_persist(gc->head);
-                evq_enq_list(gc->tail);
-                dispatch_effects(effects); /* may arm timers / enq service done */
+                /*
+                 * Compact PERSIST to live roots (gate + queue + tokens + causes).
+                 * Slam formula was on old persist — rebuild after compact.
+                 * Effects stay in SCRATCH until dispatch finishes.
+                 */
+                persist_compact(gc->head, gc->tail);
+                slam = build_slam_formula();
+                dispatch_effects(effects); /* arms timers / service completions */
                 heap_set_mode(HEAP_MODE_PERSIST);
                 heap_scratch_reset();
                 continue;
@@ -1172,8 +1237,8 @@ static void kernel_loop(noun kernel_init, int shrine)
                 continue;
             }
             cell_t *r2 = (cell_t *)(uintptr_t)cell_ptr(r->tail);
-            g_kernel = noun_persist(r2->head);
-            evq_enq_list(r2->tail);
+            persist_compact(r2->head, r2->tail);
+            slam = build_slam_formula();
         } else {
             g_kernel = noun_persist(r->tail);
         }

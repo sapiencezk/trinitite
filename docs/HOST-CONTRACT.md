@@ -135,12 +135,12 @@ Hard clear of tarms: after a structural crash, re-arm periods from Nock state on
 
 | Region | Range | On exhaust |
 |--------|-------|------------|
-| **Persist** cells | `HEAP_BASE` .. `HEAP_PERSIST_TOP` (48MB) | `nock_crash("heap exhausted")` |
-| **Scratch** cells | `HEAP_SCRATCH_BASE` .. `HEAP_TOP` (16MB) | `nock_crash("scratch exhausted")` |
+| **Persist** cells | 2×16MB semispace within `HEAP_BASE`..`HEAP_PERSIST_TOP` | `nock_crash("heap exhausted")` |
+| **Scratch** cells | `HEAP_SCRATCH_BASE` .. `HEAP_TOP` (32MB) | `nock_crash("scratch exhausted")` |
 | Atom data | `ATOM_DATA_BASE` .. `ATOM_DATA_TOP` | `nock_crash("atom store exhausted")` |
 | Atom index | 64k open-address slots | `nock_crash("atom index full")` |
 
-Per event: slam product in **scratch** (reset after promote/dispatch). Gate, queue, and timer tokens live in **persist** (`noun_persist` / queue copy). Scratch reclaim stops Nock garbage from stomping the atom index. Persist still grows with each promoted gate copy (no free-list yet); free-running E_CYCLE will eventually OOM persist — use longer DT or app STOP for long demos.
+Per event: slam product in **scratch**. On successful promote, **semispace flip + root copy**: allocate into the other persist half, deep-copy live roots (gate, queue, timer tokens, causes) while the previous half stays readable (shared battery cells), then abandon the old half. Slam formula is rebuilt after compact. Scratch is then reset. Bounds long-lived memory to one gate + queue + tokens.
 
 ---
 
