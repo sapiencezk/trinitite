@@ -40,10 +40,26 @@ Walk `[[tag data] rest]`. Known tags (cords, LSB-first ASCII):
 | `%mmio` | `[addr val]` | 32-bit store |
 | `%tmrarm` / `%tmrcan` | abs / — | Legacy **single** cooperative wall deadline (slam wall) |
 | `%tset` / `%tcan` | `[id period]` / `id` | Multi-arm **IEC periods** (CNTVCT ticks; period 0 cancels) |
+| `i2-timer-set` / `i2ts` | `[token delay-ns]` | I2 timer arm; cell token → fire `[%i2-timer token fired-at]`; bare atom owner → TICK path; ns→CNTVCT |
+| `i2-timer-cancel` / `i2tc` | `token` | Cancel arm for token owner |
+| `i2-service-request` / `i2sr` | service-req | UART TX of STRING payload (or bare atom) |
+| `i2-service-cancel` / `i2sc` | token | D0 nop (one-shot UART) |
+
+Long I2 names (`i2-timer-set`, …) are **indirect atoms** (BLAKE3-62 identity). Dispatch matches them by precomputed hash62 (not only `cord_to_cstr`), so recognition does not depend on atom-store residency after long slam sessions.
 | `%irq` | noun | Enqueue as event |
 | `%swapped` | version | Hot-swap applied |
 | `%wdt` | — | Soft WDT fired |
 | `%etx` / `%mtx` / `%ctx` | … | Net stubs (loopback optional) |
+
+### 2.0a Slam product shapes (shrine)
+
+| Shape | Product | Host action |
+|-------|---------|-------------|
+| I1 | `[effects [gate causes]]` | promote gate, enqueue causes, `DO-FX` effects |
+| I2 hybrid | `[%commit [effects [gate causes]]]` | same after unwrap |
+| I2 hybrid | `[%abort fault]` | **no** promote, **no** effects |
+
+Device does **not** yet run Host ABI preflight (capacity/delay checks); offline `HostRunner` does. Known tags dispatch; unknown → `unkfx` once/session.
 
 **Unknown tags:** not silent — `trace_rec(T_UFX)` + one-shot UART `unkfx` per session. Apps should not rely on unknown tags.
 
@@ -111,8 +127,21 @@ Multi-arm `%tset` → host enqueues `[%ei id %TICK 0]` while idle (**no second U
 | `nock_crash` (soft, `SOFT!`) | clear | **keep** | last good kept |
 | Budget / mid-eval wall | unchanged | **keep** | no product commit |
 | Post-hoc `%tmrarm` after slam | — | — | product discarded |
+| Heap / atom-store exhaustion | via `nock_crash` | per crash policy | last good kept |
 
 Hard clear of tarms: after a structural crash, re-arm periods from Nock state on the next cold event rather than firing TICKs into a half-broken gate.
+
+### 5.1 Noun heap / atom store ceilings
+
+| Region | Range | On exhaust |
+|--------|-------|------------|
+| Cell heap (bump) | `HEAP_BASE` .. `HEAP_TOP` (≤ `ATOM_INDEX_BASE`) | `nock_crash("heap exhausted")` — **never** overruns into atom index |
+| Atom data | `ATOM_DATA_BASE` .. `ATOM_DATA_TOP` | `nock_crash("atom store exhausted")` |
+| Atom index | 64k open-address slots | `nock_crash("atom index full")` |
+
+Heap is bump-only (refcounts free logical cells, not bump space). Long sessions that allocate unbounded products will eventually crash cleanly rather than corrupt the atom index (which previously manifested as I2 long-cord `unkfx` after `cord_to_cstr` store misses).
+
+**Operational note:** a free-running E_CYCLE (re-arm every DT) keeps slamming; with DT=1ms a multi-second QEMU session can exhaust the 64MB heap after the useful cascade. Prefer longer DT for demos, or stop the cycle from the app, once Q1/effects are observed.
 
 ---
 

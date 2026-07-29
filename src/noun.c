@@ -4,10 +4,12 @@
 #include "memory.h"
 #include "blake3.h"
 #include "uart.h"
+#include "nock.h"
 
 /*
  * Noun heap allocator — bump allocator within HEAP_BASE..HEAP_TOP.
- * Used exclusively for cells (atoms now live in the atom store).
+ * Used exclusively for cells (atoms live in the atom store).
+ * Hard ceiling: never advance past HEAP_TOP (abuts ATOM_INDEX_BASE).
  */
 
 static uint8_t *heap_ptr;
@@ -16,9 +18,14 @@ void noun_heap_init(void);   /* forward — also inits atom store */
 
 static void *heap_alloc(size_t bytes) {
     bytes = (bytes + 7) & ~(size_t)7;
+    if (bytes == 0)
+        bytes = 8;
     uint8_t *p = heap_ptr;
-    heap_ptr += bytes;
-    /* TODO: check heap_ptr < HEAP_TOP */
+    uint8_t *top = (uint8_t *)(uintptr_t)HEAP_TOP;
+    /* Refuse if p already past top or remaining space < bytes */
+    if (p > top || (size_t)(top - p) < bytes)
+        nock_crash("heap exhausted");
+    heap_ptr = p + bytes;
     return p;
 }
 
@@ -94,9 +101,13 @@ atom_t *atom_store_get(uint64_t hash62) {
 
 static atom_t *atom_store_alloc(uint64_t size_limbs) {
     size_t bytes = ((sizeof(atom_t) + size_limbs * sizeof(uint64_t)) + 7) & ~(size_t)7;
+    if (bytes == 0)
+        bytes = 8;
     uint8_t *p = atom_data_ptr;
-    atom_data_ptr += bytes;
-    /* TODO: check atom_data_ptr < ATOM_DATA_TOP */
+    uint8_t *top = (uint8_t *)(uintptr_t)ATOM_DATA_TOP;
+    if (p > top || (size_t)(top - p) < bytes)
+        nock_crash("atom store exhausted");
+    atom_data_ptr = p + bytes;
     return (atom_t *)p;
 }
 
@@ -112,7 +123,8 @@ static void atom_store_insert(uint64_t hash62, atom_t *ptr) {
         }
         if (idx[s].hash62 == hash62) return;  /* already present */
     }
-    /* Table full — silently drop (extremely unlikely in practice). */
+    /* Open-address table full — crash (silent drop left dangling indirects). */
+    nock_crash("atom index full");
 }
 
 /* ── make_atom ───────────────────────────────────────────────────────────────

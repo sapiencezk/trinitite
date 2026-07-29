@@ -12,8 +12,19 @@
  *   %swapped  28259031267243891  data = version atom
  *   %wdt      7627895            software watchdog fired
  *   %etx/%mtx/%ctx  net stubs (see net.h); loopback → evq RX events
+ *   I2 Host ABI: i2-timer-set / i2-timer-cancel / i2-service-request /
+ *     i2-service-cancel (hash62 + string + short aliases i2ts/i2tc/i2sr/i2sc)
  *
- * Multi-arm timers fire [%ei id %TICK 0] into the event queue (slip on overrun).
+ * I2 slam product (hybrid battery, shrine): [%commit [effects [gate causes]]]
+ *   or [%abort fault] (no promote). I1 product [effects [gate causes]] still
+ *   accepted. No device-side effect preflight yet (Host ABI preflight is
+ *   offline/HostRunner); dispatch is best-effort on known tags.
+ *
+ * Heap/atom ceilings (noun.c): bump past HEAP_TOP or atom-data/index full →
+ *   nock_crash (never silent overrun into atom index).
+ *
+ * Multi-arm timers fire [%ei id %TICK 0] into the event queue (slip on overrun),
+ * or [%i2-timer token fired-at] when armed via i2-timer-set.
  * Legacy %tmrarm/%tmrcan remain the single global cooperative deadline.
  *
  * Idle schedule (WP1): when the event queue is empty the loop polls UART RX
@@ -53,8 +64,10 @@ uint64_t slam_budget_get(void);
 
 /* Multi-arm periodic timers (%tset / %tcan) — IEC host contract */
 void     tarm_set(uint64_t id, uint64_t period);  /* period 0 = cancel */
+void     tarm_set_i2(uint64_t id, uint64_t period, noun i2_token);
+/* I2: period arm + token → fire [%i2-timer token fired-at] instead of TICK */
 void     tarm_can(uint64_t id);
-void     tarm_poll(void);           /* fire due arms → evq as [%ei id %TICK 0] */
+void     tarm_poll(void);           /* fire due arms → evq as [%ei id %TICK 0] or I2 */
 void     tarm_clear(void);          /* disarm all (tests / crash recovery) */
 int      tarm_active(uint64_t id);  /* 1 if armed */
 uint64_t tarm_next(uint64_t id);    /* next abs deadline, 0 if inactive */

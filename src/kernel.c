@@ -28,6 +28,34 @@
 #define CORD_EI      26981ULL                /* %ei       */
 #define CORD_TICK    1262700884ULL           /* %TICK     */
 
+/*
+ * I2 Host ABI effect tags (docs/I2.md §12.4) — compared via cord_to_cstr
+ * because several names exceed 63-bit direct atoms.
+ *   i2-timer-set / i2-timer-cancel / i2-service-request / i2-service-cancel
+ * Short direct aliases (Forth tests / compact emitters): i2ts i2tc i2sr i2sc
+ * Timer fire reinjection: [%i2-timer token fired-at] when token map live.
+ *
+ * I2 slam product (hybrid battery): [%commit [effects [gate causes]]]
+ *   or [%abort fault]. I1 shrine product remains [effects [gate causes]].
+ */
+#define CORD_COMMIT  127996156276579ULL      /* %commit   */
+#define CORD_ABORT   500136108641ULL         /* %abort    */
+#define CORD_I2TS    1936994921ULL           /* %i2ts  timer-set alias   */
+#define CORD_I2TC    1668559465ULL           /* %i2tc  timer-cancel      */
+#define CORD_I2SR    1920152169ULL           /* %i2sr  service-request   */
+#define CORD_I2SC    1668493929ULL           /* %i2sc  service-cancel    */
+
+/*
+ * Long I2 cords exceed 63-bit direct atoms → type-10 (BLAKE3-62 identity).
+ * Match by precomputed hash62 (same as make_atom) so dispatch does not depend
+ * on atom-store residency / cord_to_cstr. Values from blake3(cord_bytes)[0:8]
+ * little-endian, top 2 bits cleared (see tools/i2 + make_atom).
+ */
+#define H62_I2_TIMER_SET        0x1e999aebcdf5c5b9ULL  /* "i2-timer-set" */
+#define H62_I2_TIMER_CANCEL     0x00a0daca2d33f298ULL  /* "i2-timer-cancel" */
+#define H62_I2_SERVICE_REQUEST  0x35d925d61fab343bULL  /* "i2-service-request" */
+#define H62_I2_SERVICE_CANCEL   0x36d39945d04ddb18ULL  /* "i2-service-cancel" */
+
 #define TARM_MAX     16
 
 #define HSTAT_IDLE    0
@@ -89,6 +117,7 @@ typedef struct {
     uint64_t id;
     uint64_t period;
     uint64_t next;
+    noun     i2_token;   /* NOUN_ZERO = I1 TICK path; else I2 reinjection */
 } tarm_t;
 
 static tarm_t g_tarms[TARM_MAX];
@@ -113,6 +142,12 @@ static int tarm_free_slot(void)
 
 void tarm_set(uint64_t id, uint64_t period)
 {
+    tarm_set_i2(id, period, NOUN_ZERO);
+}
+
+/* I2: arm period and retain token for [%i2-timer token fired-at] reinjection */
+void tarm_set_i2(uint64_t id, uint64_t period, noun i2_token)
+{
     if (period == 0) {
         tarm_can(id);
         return;
@@ -122,24 +157,44 @@ void tarm_set(uint64_t id, uint64_t period)
         i = tarm_free_slot();
         if (i < 0)
             return;   /* full — silent drop (host capacity limit) */
+    } else if (g_tarms[i].i2_token != NOUN_ZERO) {
+        cell_dec(g_tarms[i].i2_token);
+        g_tarms[i].i2_token = NOUN_ZERO;
     }
     g_tarms[i].active = 1;
     g_tarms[i].id     = id;
     g_tarms[i].period = period;
     g_tarms[i].next   = cntvct() + period;
+    /* Only retain full I2 cell tokens for reinjection; bare owner atoms use TICK */
+    if (i2_token != NOUN_ZERO && noun_is_cell(i2_token)) {
+        cell_inc(i2_token);
+        g_tarms[i].i2_token = i2_token;
+    } else {
+        g_tarms[i].i2_token = NOUN_ZERO;
+    }
 }
 
 void tarm_can(uint64_t id)
 {
     int i = tarm_find(id);
-    if (i >= 0)
+    if (i >= 0) {
+        if (g_tarms[i].i2_token != NOUN_ZERO) {
+            cell_dec(g_tarms[i].i2_token);
+            g_tarms[i].i2_token = NOUN_ZERO;
+        }
         g_tarms[i].active = 0;
+    }
 }
 
 void tarm_clear(void)
 {
-    for (int i = 0; i < TARM_MAX; i++)
+    for (int i = 0; i < TARM_MAX; i++) {
+        if (g_tarms[i].i2_token != NOUN_ZERO) {
+            cell_dec(g_tarms[i].i2_token);
+            g_tarms[i].i2_token = NOUN_ZERO;
+        }
         g_tarms[i].active = 0;
+    }
 }
 
 int tarm_active(uint64_t id)
@@ -155,12 +210,112 @@ uint64_t tarm_next(uint64_t id)
     return g_tarms[i].next;
 }
 
+static uint64_t atom_u64_early(noun a)
+{
+    if (noun_is_direct(a))
+        return direct_val(a);
+    return 0;
+}
+
 static noun make_tick_event(uint64_t id)
 {
     /* [%ei id %TICK 0]  ≡  [ei [id [TICK 0]]] */
     return alloc_cell(direct(CORD_EI),
            alloc_cell(direct(id),
            alloc_cell(direct(CORD_TICK), NOUN_ZERO)));
+}
+
+static noun make_i2_timer_event(noun token, uint64_t fired_at)
+{
+    /* [%i2-timer token fired-at] */
+    noun tag = cord_from_bytes("i2-timer", 8);
+    return alloc_cell(tag, alloc_cell(token, direct(fired_at)));
+}
+
+/* CNTVCT ticks for delay_ns (I2 §16.2 publish conversion). */
+static uint64_t ns_to_cntvct_ticks(uint64_t delay_ns)
+{
+    uint64_t frq;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+    if (frq == 0)
+        frq = 54000000ULL; /* fallback Pi4-class */
+    /* ticks = delay_ns * frq / 1e9 ; avoid overflow */
+    if (delay_ns >= 1000000000ULL) {
+        uint64_t sec = delay_ns / 1000000000ULL;
+        uint64_t rem = delay_ns % 1000000000ULL;
+        uint64_t t = sec * frq + (rem * frq) / 1000000000ULL;
+        return t ? t : 1;
+    }
+    uint64_t t = (delay_ns * frq) / 1000000000ULL;
+    return t ? t : 1;
+}
+
+/* timer-token ::= [gen [inc [owner seq]]] → owner; bare atom → owner (test alias) */
+static uint64_t i2_token_owner(noun token)
+{
+    if (noun_is_atom(token))
+        return atom_u64_early(token);
+    if (!noun_is_cell(token))
+        return 0;
+    cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(token);
+    /* skip gen */
+    if (!noun_is_cell(c0->tail))
+        return 0;
+    cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
+    /* skip inc */
+    if (!noun_is_cell(c1->tail))
+        return 0;
+    cell_t *c2 = (cell_t *)(uintptr_t)cell_ptr(c1->tail);
+    return atom_u64_early(c2->head);
+}
+
+static int tag_is_name(noun tag, const char *name)
+{
+    char buf[48];
+    size_t n = cord_to_cstr(tag, buf, sizeof buf);
+    size_t m = 0;
+    while (name[m])
+        m++;
+    if (n != m)
+        return 0;
+    for (size_t i = 0; i < n; i++)
+        if (buf[i] != name[i])
+            return 0;
+    return 1;
+}
+
+/* Indirect long-cord match via BLAKE3-62 identity (no atom-store decode). */
+static int tag_is_h62(noun tag, uint64_t h62)
+{
+    return noun_is_indirect(tag) && (indirect_hash(tag) == h62);
+}
+
+static int tag_is_i2_timer_set(noun tag, uint64_t t)
+{
+    return t == CORD_I2TS
+        || tag_is_h62(tag, H62_I2_TIMER_SET)
+        || tag_is_name(tag, "i2-timer-set");
+}
+
+static int tag_is_i2_timer_cancel(noun tag, uint64_t t)
+{
+    return t == CORD_I2TC
+        || tag_is_h62(tag, H62_I2_TIMER_CANCEL)
+        || tag_is_name(tag, "i2-timer-cancel");
+}
+
+static int tag_is_i2_service_request(noun tag, uint64_t t)
+{
+    return t == CORD_I2SR
+        || tag_is_h62(tag, H62_I2_SERVICE_REQUEST)
+        || tag_is_name(tag, "i2-service-request");
+}
+
+static int tag_is_i2_service_cancel(noun tag, uint64_t t)
+{
+    return t == CORD_I2SC
+        || tag_is_h62(tag, H62_I2_SERVICE_CANCEL)
+        || tag_is_name(tag, "i2-service-cancel");
 }
 
 void tarm_force_due(uint64_t id)
@@ -180,7 +335,10 @@ void tarm_poll(void)
             continue;
         if (now < g_tarms[i].next)
             continue;
-        evq_enq(make_tick_event(g_tarms[i].id));
+        if (g_tarms[i].i2_token != NOUN_ZERO)
+            evq_enq(make_i2_timer_event(g_tarms[i].i2_token, now));
+        else
+            evq_enq(make_tick_event(g_tarms[i].id));
         /* slip: do not catch up missed periods */
         g_tarms[i].next = now + g_tarms[i].period;
     }
@@ -439,9 +597,69 @@ static uint64_t atom_u64(noun a)
     return 0;
 }
 
+/* I2 service-request payload → UART print (STRING typed value or bare atom) */
+static void i2_service_uart_tx(noun data)
+{
+    /* service-request ::= [token [cap [op [deadline payload]]]] */
+    if (!noun_is_cell(data))
+        return;
+    cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(data);
+    if (!noun_is_cell(c0->tail))
+        return;
+    cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
+    if (!noun_is_cell(c1->tail))
+        return;
+    cell_t *c2 = (cell_t *)(uintptr_t)cell_ptr(c1->tail);
+    if (!noun_is_cell(c2->tail))
+        return;
+    cell_t *c3 = (cell_t *)(uintptr_t)cell_ptr(c2->tail);
+    noun payload = c3->tail;
+    /* typed STRING: [tid [len bytes-atom]] */
+    if (noun_is_cell(payload)) {
+        cell_t *pv = (cell_t *)(uintptr_t)cell_ptr(payload);
+        if (noun_is_cell(pv->tail)) {
+            cell_t *sv = (cell_t *)(uintptr_t)cell_ptr(pv->tail);
+            atom_print_uart(sv->tail);
+            return;
+        }
+    }
+    if (noun_is_atom(payload))
+        atom_print_uart(payload);
+}
+
 static void dispatch_one(noun tag, noun data) {
     if (!noun_is_atom(tag)) return;
     uint64_t t = noun_is_direct(tag) ? direct_val(tag) : 0;
+
+    /* ── I2 Host ABI effects (full names + short direct aliases) ──────── */
+    if (tag_is_i2_timer_set(tag, t)) {
+        /* data = [token delay-ns] */
+        if (!noun_is_cell(data))
+            return;
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(data);
+        noun token = c->head;
+        uint64_t delay_ns = atom_u64(c->tail);
+        uint64_t owner = i2_token_owner(token);
+        if (owner == 0)
+            return;
+        uint64_t ticks = ns_to_cntvct_ticks(delay_ns);
+        tarm_set_i2(owner, ticks, token);
+        return;
+    }
+    if (tag_is_i2_timer_cancel(tag, t)) {
+        uint64_t owner = i2_token_owner(data);
+        if (owner)
+            tarm_can(owner);
+        return;
+    }
+    if (tag_is_i2_service_request(tag, t)) {
+        i2_service_uart_tx(data);
+        return;
+    }
+    if (tag_is_i2_service_cancel(tag, t)) {
+        /* one-shot UART: no driver cancel in D0 substrate */
+        return;
+    }
 
     if (t == CORD_OUT || t == CORD_BLIT) {
         atom_print_uart(data);
@@ -771,6 +989,38 @@ static void kernel_loop(noun kernel_init, int shrine)
             continue;
         }
         cell_t *r = (cell_t *)(uintptr_t)cell_ptr(result);
+
+        /*
+         * I2 hybrid product (shrine):
+         *   [%commit [effects [gate causes]]]  → promote + dispatch + enqueue
+         *   [%abort  fault]                    → no promote, no effects
+         * I1 shrine product remains [effects [gate causes]].
+         */
+        if (g_shrine_mode && noun_is_direct(r->head)) {
+            uint64_t rh = direct_val(r->head);
+            if (rh == CORD_COMMIT) {
+                if (!noun_is_cell(r->tail)) {
+                    uart_puts("bad result\r\n");
+                    continue;
+                }
+                cell_t *prod = (cell_t *)(uintptr_t)cell_ptr(r->tail);
+                noun effects = prod->head;
+                if (!noun_is_cell(prod->tail)) {
+                    uart_puts("bad result\r\n");
+                    continue;
+                }
+                cell_t *gc = (cell_t *)(uintptr_t)cell_ptr(prod->tail);
+                g_kernel = gc->head;
+                evq_enq_list(gc->tail);
+                dispatch_effects(effects);
+                continue;
+            }
+            if (rh == CORD_ABORT) {
+                /* keep g_kernel; drop effects (Host ABI abort path) */
+                continue;
+            }
+        }
+
         noun effects = r->head;
 
         if (g_shrine_mode) {

@@ -1419,6 +1419,27 @@ T "tset: fire id" "0000000000000009" \
 T "tset: fire %TICK" "000000004B434954" \
     "TACLR QCLR  9 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  TPOLL  DEQ DROP  CDR CDR CAR NOUN> ."
 
+# ── I2 Host ABI effects on Trinitite (short aliases i2ts/i2tc/i2sr) ────────
+# Cords: i2ts=1936994921 i2tc=1668559465 i2sr=1920152169
+# Mirror working %tset DO-FX line exactly; only tag differs.
+
+T "i2: i2ts timer-set arms (mirror tset)" "FFFFFFFFFFFFFFFF" \
+    "TACLR  7 1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  7 TACT? ."
+
+T "i2: i2tc cancel after i2ts" "0000000000000000" \
+    "TACLR  7 1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  7 >NOUN  1668559465 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  7 TACT? ."
+
+T "i2: i2ts fire %ei bare-token" "0000000000006965" \
+    "TACLR QCLR  9 1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
+
+# full token [1 [1 [9 1]]] → reinject %i2-timer
+T "i2: i2ts fire full-token i2-timer" "72656D69742D3269" \
+    "TACLR QCLR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
+
+# payload atom 0 prints nothing (no UART pollution of hex capture)
+T "i2: i2sr service no crash" "000000000000002A" \
+    "TACLR  1000 0 CONS 1 SWAP CONS 1 SWAP CONS  7 SWAP CONS  1920152169 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  42 ."
+
 # After fire, arm still active (periodic)
 T "tset: still armed after fire" "FFFFFFFFFFFFFFFF" \
     "TACLR QCLR  4 1000 CONS  1952805748 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  4 TDUE  TPOLL  DEQ DROP DROP  4 TACT? ."
