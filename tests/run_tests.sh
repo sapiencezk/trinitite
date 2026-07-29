@@ -1322,6 +1322,9 @@ T "m3: queue pressure FIFO/reject 50 percent" "0000000000000000" \
 T "m3: queue pressure FIFO/reject 90 percent" "0000000000000000" \
     "RSTCLR 90 QPM3 ."
 
+T "i2: queued preflight refusal retains FIFO head" "0000000000000000" \
+    "QCLR QRETRY ."
+
 T "m3: bounded novel atom characterization" "0000000000000000" \
     "RSTCLR 10 NOVM3 ."
 

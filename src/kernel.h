@@ -90,6 +90,7 @@ uint64_t evq_hwm(void);                 /* high-water depth this session */
 uint64_t evq_overflows(void);           /* drop-newest count */
 void     evq_metrics_reset(void);       /* zero overflows + hwm baseline */
 uint64_t kernel_queue_pressure_selftest(uint64_t percent);
+uint64_t kernel_queue_retry_selftest(void);
 
 /* WP4 — crash recovery: 0 hard (clear tarms), 1 soft (keep tarms) */
 void     crash_soft_set(int soft);
@@ -152,6 +153,12 @@ noun     kernel_pill_load(void);
 /* Lab/test preparation: admit PILL2 and install its clean roots without
  * entering the scheduler. This is used to construct restart fixtures. */
 int      kernel_prepare_pill(void);
+
+/* Generic, read-only I2 lab probes over the currently installed live gate.
+ * They address instances/variables by admitted numeric IDs and contain no
+ * application-specific knowledge.  UINT64_MAX means missing or malformed. */
+uint64_t kernel_i2_active_state(uint64_t instance_id);
+uint64_t kernel_i2_output_atom(uint64_t instance_id, uint64_t variable_id);
 
 /* Focused M2 device-code probe; zero means bounded TX activation passed. */
 uint64_t kernel_tx_stuck_selftest(void);

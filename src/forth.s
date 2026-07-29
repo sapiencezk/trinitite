@@ -2859,6 +2859,13 @@ defcode "QPM3", 4, queue_pressure_test, 0
     str     x0, [DSP]
     NEXT
 
+// QRETRY ( -- failures ) checks that a queued I2 event remains FIFO-visible
+// through a failed preflight and is consumed only on an explicit dequeue.
+defcode "QRETRY", 6, queue_retry_test, 0
+    bl      kernel_queue_retry_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "NOVM3", 5, novel_atom_test, 0
     ldr     x0, [DSP]
     bl      runtime_stats_characterize_novel
@@ -2870,6 +2877,22 @@ defcode "M3RUN", 5, runtime_stats_run, 0
     ldr     x0, [DSP]
     bl      kernel_run_bounded
     sxtw    x0, w0
+    str     x0, [DSP]
+    NEXT
+
+// Generic read-only I2 lab probes.  UINT64_MAX means missing/malformed.
+// I2STATE ( instance-id -- state-id|-1 )
+// I2OUT   ( instance-id variable-id -- direct-payload|-1 )
+defcode "I2STATE", 7, i2_state_fetch, 0
+    ldr     x0, [DSP]
+    bl      kernel_i2_active_state
+    str     x0, [DSP]
+    NEXT
+
+defcode "I2OUT", 5, i2_output_fetch, 0
+    ldr     x1, [DSP], #8
+    ldr     x0, [DSP]
+    bl      kernel_i2_output_atom
     str     x0, [DSP]
     NEXT
 

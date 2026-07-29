@@ -550,11 +550,8 @@ static evq_timing_t g_evq_timing[EVQ_CAP];
 static evq_timing_t g_evq_timing_candidate[EVQ_CAP];
 static uint32_t g_evq_timing_head;
 
-static evq_timing_t evq_timing_at(uint64_t logical_index)
-{
-    return g_evq_timing[
-        (g_evq_timing_head + (uint32_t)logical_index) & (EVQ_CAP - 1u)];
-}
+static int i2_preflight_effects(noun effects, noun causes,
+                                int consume_queued);
 
 static void evq_note_depth(void)
 {
@@ -686,6 +683,17 @@ static int evq_deq_timed(noun *out, evq_timing_t *timing)
     return 1;
 }
 
+static int evq_peek_timed(noun *out, evq_timing_t *timing)
+{
+    if (!noun_is_cell(g_evq))
+        return 0;
+    cell_t *c = (cell_t *)(uintptr_t)cell_ptr(g_evq);
+    *out = c->head;
+    if (timing)
+        *timing = g_evq_timing[g_evq_timing_head];
+    return 1;
+}
+
 int evq_deq(noun *out)
 {
     return evq_deq_timed(out, 0);
@@ -693,11 +701,7 @@ int evq_deq(noun *out)
 
 int evq_peek(noun *out)
 {
-    if (!noun_is_cell(g_evq))
-        return 0;
-    cell_t *c = (cell_t *)(uintptr_t)cell_ptr(g_evq);
-    *out = c->head;
-    return 1;
+    return evq_peek_timed(out, 0);
 }
 
 uint64_t evq_len(void)
@@ -758,6 +762,37 @@ uint64_t kernel_queue_pressure_selftest(uint64_t percent)
     return failures;
 }
 
+uint64_t kernel_queue_retry_selftest(void)
+{
+    uint64_t failures = 0;
+    noun event = NOUN_ZERO;
+    evq_timing_t timing = {0};
+    if (g_evq_n != 0)
+        return 1;
+
+    evq_enq(direct(0x51));
+    evq_enq(direct(0x52));
+    noun retained_head = g_evq;
+    uint64_t retained_n = g_evq_n;
+    if (!evq_peek_timed(&event, &timing) || event != direct(0x51)
+        || g_evq != retained_head || g_evq_n != retained_n)
+        failures |= 1ULL << 0;
+
+    /* A failed I2 preflight is a retry boundary: the peeked FIFO head and
+     * its timing metadata stay live until a later successful publication. */
+    if (i2_preflight_effects(direct(1), NOUN_ZERO, 1)
+        || g_evq != retained_head || g_evq_n != retained_n
+        || !evq_peek_timed(&event, &timing) || event != direct(0x51))
+        failures |= 1ULL << 1;
+
+    if (!evq_deq_timed(&event, &timing) || event != direct(0x51)
+        || !evq_deq_timed(&event, &timing) || event != direct(0x52)
+        || g_evq_n != 0)
+        failures |= 1ULL << 2;
+    evq_clear();
+    return failures;
+}
+
 /*
  * Persist semispace compaction (ArenaHost-shaped).
  *
@@ -792,7 +827,7 @@ static int candidate_enqueue(noun event, int copy_event,
 }
 
 static int persist_compact(noun new_gate, noun new_causes, noun effects,
-                           noun *slam_out)
+                           int consume_queued, noun *slam_out)
 {
     enum { QCAP = 256 };
     if (!slam_out)
@@ -800,6 +835,13 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
 
     /* Capture queue chain head before we rebuild (still in old half) */
     noun old_q = g_evq;
+    uint32_t old_timing_head = g_evq_timing_head;
+    if (consume_queued) {
+        if (!noun_is_cell(old_q) || g_evq_n == 0)
+            return 0;
+        old_q = ((cell_t *)(uintptr_t)cell_ptr(old_q))->tail;
+        old_timing_head = (old_timing_head + 1u) & (EVQ_CAP - 1u);
+    }
     tarm_t candidate_tarms[TARM_MAX];
     for (int i = 0; i < TARM_MAX; i++) {
         candidate_tarms[i] = g_tarms[i];
@@ -831,7 +873,8 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
         uint64_t n = 0;
         while (noun_is_cell(q) && n < QCAP) {
             cell_t *c = (cell_t *)(uintptr_t)cell_ptr(q);
-            evq_timing_t timing = evq_timing_at(n);
+            evq_timing_t timing = g_evq_timing[
+                (old_timing_head + (uint32_t)n) & (EVQ_CAP - 1u)];
             if (!candidate_enqueue(
                     c->head, 1, timing,
                     &candidate_q, &candidate_tail, &candidate_n))
@@ -982,7 +1025,7 @@ static int promotion_depth_selftest(void)
 
     noun unused_slam;
     int rejected = !persist_compact(
-        deep, NOUN_ZERO, NOUN_ZERO, &unused_slam);
+        deep, NOUN_ZERO, NOUN_ZERO, 0, &unused_slam);
     int unchanged = rejected
         && g_kernel == old_kernel && g_slam_formula == old_slam
         && g_evq == old_q && g_evq_tail == old_tail && g_evq_n == old_qn
@@ -1340,7 +1383,8 @@ uint64_t kernel_tx_stuck_selftest(void)
  * I2 effect preflight before promote (Host ABI §12.5 subset).
  * On failure: do not replace g_kernel, do not dispatch, do not enqueue causes.
  */
-static int i2_preflight_effects(noun effects, noun causes)
+static int i2_preflight_effects(noun effects, noun causes,
+                                int consume_queued)
 {
     int new_timers = 0;
     int new_svcs   = 0;
@@ -1461,7 +1505,10 @@ static int i2_preflight_effects(noun effects, noun causes)
     }
     if (cur != NOUN_ZERO)
         return 0;
-    if (g_evq_n + cause_n + (uint64_t)new_svcs > EVQ_CAP)
+    if (consume_queued && (!noun_is_cell(g_evq) || g_evq_n == 0))
+        return 0;
+    uint64_t retained_queue = g_evq_n - (consume_queued ? 1u : 0u);
+    if (retained_queue + cause_n + (uint64_t)new_svcs > EVQ_CAP)
         return 0;
     return 1;
 }
@@ -1822,7 +1869,9 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
         int event_from_queue = 0;
         evq_timing_t event_timing = {0};
         uint64_t event_admit_tick = 0;
-        if (evq_deq_timed(&event, &event_timing)) {
+        if ((runtime_identity_live()
+             ? evq_peek_timed(&event, &event_timing)
+             : evq_deq_timed(&event, &event_timing))) {
             event_from_queue = 1;
             event_admit_tick = event_timing.admitted_tick;
         } else {
@@ -1852,7 +1901,9 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                     break;
                 }
                 tarm_poll();
-                if (evq_deq_timed(&event, &event_timing)) {
+                if ((runtime_identity_live()
+                     ? evq_peek_timed(&event, &event_timing)
+                     : evq_deq_timed(&event, &event_timing))) {
                     event_from_queue = 1;
                     event_admit_tick = event_timing.admitted_tick;
                     break;
@@ -1953,7 +2004,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                     continue;
                 }
                 cell_t *gc = (cell_t *)(uintptr_t)cell_ptr(prod->tail);
-                if (!i2_preflight_effects(effects, gc->tail)) {
+                if (!i2_preflight_effects(
+                        effects, gc->tail, event_from_queue)) {
                     runtime_stats_count(RT_COUNT_PREFLIGHT_REJECTS, 1);
                     runtime_stats_count(RT_COUNT_ABORTS, 1);
                     static int pf_uart;
@@ -1971,7 +2023,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 */
                 g_i2_preparing = 1;
                 if (!persist_compact(
-                        gc->head, gc->tail, effects, &slam)) {
+                        gc->head, gc->tail, effects,
+                        event_from_queue, &slam)) {
                     g_i2_preparing = 0;
                     runtime_stats_count(RT_COUNT_PROMOTE_COPY_FAULTS, 1);
                     runtime_stats_count(RT_COUNT_ABORTS, 1);
@@ -2017,6 +2070,10 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             }
             if (rh == CORD_ABORT) {
                 /* keep g_kernel; drop effects (Host ABI abort path) */
+                if (event_from_queue) {
+                    noun consumed;
+                    (void)evq_deq_timed(&consumed, 0);
+                }
                 runtime_stats_count(RT_COUNT_ABORTS, 1);
                 reject_event_scratch();
                 continue;
@@ -2044,7 +2101,7 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             }
             cell_t *r2 = (cell_t *)(uintptr_t)cell_ptr(r->tail);
             if (!persist_compact(
-                    r2->head, r2->tail, NOUN_ZERO, &slam)) {
+                    r2->head, r2->tail, NOUN_ZERO, 0, &slam)) {
                 runtime_stats_count(RT_COUNT_PROMOTE_COPY_FAULTS, 1);
                 runtime_stats_count(RT_COUNT_ABORTS, 1);
                 uart_puts("promote\r\n");
@@ -2146,6 +2203,86 @@ static int noun_take(noun n, noun *head, noun *tail)
     *head = c->head;
     *tail = c->tail;
     return 1;
+}
+
+static int i2_tag_is(noun tag, const char *text, size_t len)
+{
+    char buffer[16];
+    if (!noun_is_atom(tag) || len + 1 > sizeof(buffer)
+        || cord_to_cstr(tag, buffer, sizeof(buffer)) != len)
+        return 0;
+    for (size_t i = 0; i < len; i++)
+        if (buffer[i] != text[i])
+            return 0;
+    return 1;
+}
+
+static int i2_live_instance(uint64_t wanted, noun *instance_state)
+{
+    noun battery, sample, axis, state;
+    noun tag, rest, header, program, dynamic, states, formula;
+    noun gate = g_kernel;
+    if (!instance_state || !noun_take(gate, &battery, &sample)
+        || !noun_take(sample, &axis, &state)
+        || !noun_is_direct(axis) || direct_val(axis) != 0
+        || !noun_take(state, &tag, &rest)
+        || !i2_tag_is(tag, "i2-state", 8)
+        || !noun_take(rest, &header, &rest)
+        || !noun_take(rest, &program, &dynamic)
+        || !noun_take(dynamic, &states, &formula))
+        return 0;
+
+    for (uint64_t count = 0; count < 64 && noun_is_cell(states); count++) {
+        cell_t *list = (cell_t *)(uintptr_t)cell_ptr(states);
+        noun id, body;
+        if (!noun_take(list->head, &id, &body)
+            || !noun_is_direct(id) || direct_val(id) == 0)
+            return 0;
+        if (direct_val(id) == wanted) {
+            *instance_state = body;
+            return 1;
+        }
+        states = list->tail;
+    }
+    return 0;
+}
+
+uint64_t kernel_i2_active_state(uint64_t instance_id)
+{
+    noun state, tag, rest, active;
+    if (!i2_live_instance(instance_id, &state)
+        || !noun_take(state, &tag, &rest)
+        || !i2_tag_is(tag, "bfb-state", 9)
+        || !noun_take(rest, &active, &rest)
+        || !noun_is_direct(active))
+        return UINT64_MAX;
+    return direct_val(active);
+}
+
+uint64_t kernel_i2_output_atom(uint64_t instance_id, uint64_t variable_id)
+{
+    noun state, tag, rest, field, outputs;
+    if (!i2_live_instance(instance_id, &state)
+        || !noun_take(state, &tag, &rest)
+        || !i2_tag_is(tag, "bfb-state", 9)
+        || !noun_take(rest, &field, &rest) /* active state */
+        || !noun_take(rest, &field, &rest) /* inputs */
+        || !noun_take(rest, &outputs, &field))
+        return UINT64_MAX;
+
+    for (uint64_t count = 0; count < 64 && noun_is_cell(outputs); count++) {
+        cell_t *list = (cell_t *)(uintptr_t)cell_ptr(outputs);
+        noun id, typed, type_id, payload;
+        if (!noun_take(list->head, &id, &typed)
+            || !noun_is_direct(id) || direct_val(id) == 0
+            || !noun_take(typed, &type_id, &payload)
+            || !noun_is_direct(type_id) || direct_val(type_id) == 0)
+            return UINT64_MAX;
+        if (direct_val(id) == variable_id)
+            return noun_is_direct(payload) ? direct_val(payload) : UINT64_MAX;
+        outputs = list->tail;
+    }
+    return UINT64_MAX;
 }
 
 static int positive_direct(noun n, uint64_t *out)
