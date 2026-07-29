@@ -40,10 +40,10 @@ Walk `[[tag data] rest]`. Known tags (cords, LSB-first ASCII):
 | `%mmio` | `[addr val]` | 32-bit store |
 | `%tmrarm` / `%tmrcan` | abs / — | Legacy **single** cooperative wall deadline (slam wall) |
 | `%tset` / `%tcan` | `[id period]` / `id` | Multi-arm **IEC periods** (CNTVCT ticks; period 0 cancels) |
-| `i2-timer-set` / `i2ts` | `[token delay-ns]` | I2 timer arm; cell token → fire `[%i2-timer token fired-at]`; bare atom owner → TICK path; ns→CNTVCT |
+| `i2-timer-set` / `i2ts` | `[token delay-ns]` | One-shot I2 timer arm; full token → fire `[%i2-timer token fired-at]` then release the arm; bare atom owner is a test/legacy alias; ns→CNTVCT |
 | `i2-timer-cancel` / `i2tc` | `token` | Cancel arm for token owner |
 | `i2-service-request` / `i2sr` | service-req | UART TX of STRING payload; then reinject `[%i2-service token [0 0] 0]` (instant complete) |
-| `i2-service-cancel` / `i2sc` | token | D0 nop |
+| `i2-service-cancel` / `i2sc` | token | Strict unknown-cancel rejection: the current UART service completes synchronously and has no deferred driver entry to cancel |
 
 Long I2 names (`i2-timer-set`, …) are **indirect atoms** (BLAKE3-62 identity). Dispatch matches them by precomputed hash62 (not only `cord_to_cstr`), so recognition does not depend on atom-store residency after long slam sessions.
 | `%irq` | noun | Enqueue as event |
@@ -59,7 +59,22 @@ Long I2 names (`i2-timer-set`, …) are **indirect atoms** (BLAKE3-62 identity).
 | I2 hybrid | `[%commit [effects [gate causes]]]` | preflight effects → persist gate/causes → dispatch |
 | I2 hybrid | `[%abort fault]` | **no** promote, **no** effects |
 
-**I2 preflight** (before promote): proper effect list; known I2 tags only; timer delay &gt; 0; timer count ≤ 16; service shape + UART cap; deadline &gt; 0; max 4 service reqs in one list. Fail → keep gate, UART `preflight` once/session, no effects.
+**I2 transaction**: `prepare → validate → reserve → promote → activate`, with
+abort permitted before promote. Preflight/reservation requires a proper effect
+list and proper complete causes list; known I2 tags only; full lifecycle tokens
+`[generation incarnation owner sequence]`; timer delay &gt; 0; timer count ≤ 16;
+service shape + UART cap; deadline &gt; 0; and complete FIFO capacity for existing
+backlog, every cause, and every instant service completion. Fail → keep gate,
+FIFO, timer roots and effects unchanged; UART `preflight` once/session, no
+effects. The queue's ordinary drop-newest policy is never applied to a
+committed I2 cause list.
+
+The device builds candidate gate/FIFO/timer-token roots in the inactive
+semispace and publishes them once only after those copies complete. Candidate
+copy exhaustion rolls the semispace selector/pointer back to the old roots.
+The remaining limitation is service-driver activation that allocates outside
+this candidate set; the current UART instant-completion path is capacity
+reserved, but a generic asynchronous driver transaction is not claimed here.
 
 **Unknown tags:** not silent — `trace_rec(T_UFX)` + one-shot UART `unkfx` per session. Apps should not rely on unknown tags.
 

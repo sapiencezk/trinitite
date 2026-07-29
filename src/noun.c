@@ -17,6 +17,9 @@ static uint8_t *persist_ptr;
 static uint8_t *scratch_ptr;
 static int      heap_mode;     /* HEAP_MODE_PERSIST | HEAP_MODE_SCRATCH */
 static int      persist_sel;   /* 0 or 1 — active semispace */
+static uint8_t *persist_tx_saved_ptr;
+static int      persist_tx_saved_sel;
+static int      persist_tx_active;
 
 void noun_heap_init(void);   /* forward — also inits atom store */
 
@@ -55,6 +58,28 @@ void heap_persist_flip(void)
     /* Allocate into the other half; leave the old half readable until next flip */
     persist_sel ^= 1;
     persist_ptr  = persist_base(persist_sel);
+}
+
+void heap_persist_begin_tx(void)
+{
+    persist_tx_saved_ptr = persist_ptr;
+    persist_tx_saved_sel = persist_sel;
+    persist_tx_active = 1;
+    heap_persist_flip();
+}
+
+void heap_persist_commit_tx(void)
+{
+    persist_tx_active = 0;
+}
+
+void heap_persist_abort_tx(void)
+{
+    if (!persist_tx_active)
+        return;
+    persist_ptr = persist_tx_saved_ptr;
+    persist_sel = persist_tx_saved_sel;
+    persist_tx_active = 0;
 }
 
 static void *heap_alloc(size_t bytes) {
@@ -372,6 +397,7 @@ size_t cord_to_cstr(noun n, char *buf, size_t bufsz)
 void noun_heap_init(void) {
     persist_sel = 0;
     persist_ptr = persist_base(0);
+    persist_tx_active = 0;
     scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
     heap_mode   = HEAP_MODE_PERSIST;  /* pill load / cold boot into persist */
     atom_store_init();

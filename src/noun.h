@@ -82,6 +82,11 @@ int   heap_get_mode(void);
 void  heap_scratch_reset(void);    /* bump scratch ptr to HEAP_SCRATCH_BASE */
 void  heap_persist_reset(void);    /* bump current persist semispace to its base */
 void  heap_persist_flip(void);     /* switch to other semispace (empty); for compact */
+/* Transactional candidate semispace.  A failed pre-promotion copy restores
+ * both selector and bump pointer, leaving live roots readable. */
+void  heap_persist_begin_tx(void);
+void  heap_persist_commit_tx(void);
+void  heap_persist_abort_tx(void);
 
 noun  alloc_cell(noun head, noun tail);
 void  cell_inc(noun n);   /* increment refcount */
