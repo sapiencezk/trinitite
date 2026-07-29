@@ -30,20 +30,24 @@ cold_media_status_t cold_media_fake_sector_read(
 cold_media_status_t cold_media_fake_sector_write(
     uint64_t, const uint8_t *, uint64_t, int *);
 cold_media_status_t cold_media_fake_barrier(uint64_t);
+void cold_media_fake_backend_reset(void);
 #define backend_probe cold_media_fake_probe
 #define backend_read cold_media_fake_sector_read
 #define backend_write cold_media_fake_sector_write
 #define backend_barrier cold_media_fake_barrier
+#define backend_reset cold_media_fake_backend_reset
 #elif defined(COLD_MEDIA_RPI4_SD)
 cold_media_status_t rpi4_sd_probe(uint64_t *, int *, uint64_t);
 cold_media_status_t rpi4_sd_sector_read(uint64_t, uint8_t *, uint64_t);
 cold_media_status_t rpi4_sd_sector_write(
     uint64_t, const uint8_t *, uint64_t, int *);
 cold_media_status_t rpi4_sd_barrier(uint64_t);
+void rpi4_sd_reset_session(void);
 #define backend_probe rpi4_sd_probe
 #define backend_read rpi4_sd_sector_read
 #define backend_write rpi4_sd_sector_write
 #define backend_barrier rpi4_sd_barrier
+#define backend_reset rpi4_sd_reset_session
 #else
 static cold_media_status_t backend_probe(
     uint64_t *capacity, int *read_only, uint64_t deadline)
@@ -74,6 +78,9 @@ static cold_media_status_t backend_barrier(uint64_t deadline)
 {
     (void)deadline;
     return COLD_MEDIA_DISABLED;
+}
+static void backend_reset(void)
+{
 }
 #endif
 
@@ -209,13 +216,22 @@ cold_media_status_t cold_media_read(cold_media_phase_t phase,
                                     uint64_t logical_off, void *dst,
                                     uint64_t len, uint64_t deadline)
 {
-    if (!dst || !range_ok(logical_off, len))
+    if (!dst || !range_ok(logical_off, len)) {
+        diag_set(phase, COLD_MEDIA_RANGE, logical_off, 0, 0, 0);
         return COLD_MEDIA_RANGE;
+    }
     cold_media_status_t status = initialize(deadline);
     if (status != COLD_MEDIA_OK)
         return status;
-    if (g_owner)
+    if (g_reset_required) {
+        diag_set(phase, COLD_MEDIA_RESET_REQUIRED,
+                 logical_off, 0, 0, 0);
+        return COLD_MEDIA_RESET_REQUIRED;
+    }
+    if (g_owner) {
+        diag_set(phase, COLD_MEDIA_BUSY, logical_off, 0, 0, 0);
         return COLD_MEDIA_BUSY;
+    }
     g_owner = 1;
     uint8_t *out = (uint8_t *)dst;
     uint64_t done = 0;
@@ -242,6 +258,8 @@ cold_media_status_t cold_media_read(cold_media_phase_t phase,
         sectors++;
     }
     g_owner = 0;
+    if (status != COLD_MEDIA_OK)
+        g_reset_required = 1;
     uint64_t end = runtime_counter_now();
     runtime_stats_record(
         RT_PHASE_MEDIA_READ, end >= start ? end - start : 0);
@@ -254,17 +272,26 @@ cold_media_status_t cold_media_write(cold_media_phase_t phase,
                                      uint64_t logical_off, const void *src,
                                      uint64_t len, uint64_t deadline)
 {
-    if (!src || !range_ok(logical_off, len))
+    if (!src || !range_ok(logical_off, len)) {
+        diag_set(phase, COLD_MEDIA_RANGE, logical_off, 0, 0, 0);
         return COLD_MEDIA_RANGE;
+    }
     cold_media_status_t status = initialize(deadline);
     if (status != COLD_MEDIA_OK)
         return status;
-    if (g_reset_required)
+    if (g_reset_required) {
+        diag_set(phase, COLD_MEDIA_RESET_REQUIRED,
+                 logical_off, 0, 0, 0);
         return COLD_MEDIA_RESET_REQUIRED;
-    if (g_read_only)
+    }
+    if (g_read_only) {
+        diag_set(phase, COLD_MEDIA_READ_ONLY, logical_off, 0, 0, 0);
         return COLD_MEDIA_READ_ONLY;
-    if (g_owner)
+    }
+    if (g_owner) {
+        diag_set(phase, COLD_MEDIA_BUSY, logical_off, 0, 0, 0);
         return COLD_MEDIA_BUSY;
+    }
     g_owner = 1;
     const uint8_t *input = (const uint8_t *)src;
     uint64_t done = 0;
@@ -295,9 +322,9 @@ cold_media_status_t cold_media_write(cold_media_phase_t phase,
         submitted_total += submitted ? 1u : 0u;
         if (status != COLD_MEDIA_OK) {
             if (submitted) {
-                g_reset_required = 1;
                 status = COLD_MEDIA_WRITE_UNKNOWN;
             }
+            g_reset_required = 1;
             break; /* never retry a submitted mutation */
         }
         done += n;
@@ -318,12 +345,18 @@ cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
     cold_media_status_t status = initialize(deadline);
     if (status != COLD_MEDIA_OK)
         return status;
-    if (g_reset_required)
+    if (g_reset_required) {
+        diag_set(phase, COLD_MEDIA_RESET_REQUIRED, 0, 0, 0, 0);
         return COLD_MEDIA_RESET_REQUIRED;
-    if (g_owner)
+    }
+    if (g_owner) {
+        diag_set(phase, COLD_MEDIA_BUSY, 0, 0, 0, 0);
         return COLD_MEDIA_BUSY;
-    if (deadline_expired(deadline))
+    }
+    if (deadline_expired(deadline)) {
+        diag_set(phase, COLD_MEDIA_TIMEOUT, 0, 0, 0, 0);
         return COLD_MEDIA_TIMEOUT;
+    }
     g_owner = 1;
     uint64_t start = runtime_counter_now();
     status = backend_barrier(deadline);
@@ -349,8 +382,7 @@ cold_media_status_t cold_media_load_window(uint64_t deadline)
         COLD_MEDIA_PHASE_BOOT_LOAD, 0,
         (void *)(uintptr_t)COLD_BASE, COLD_SIZE, deadline);
     uint64_t end = runtime_counter_now();
-    runtime_stats_record(
-        RT_PHASE_BOOT_LOAD, end >= start ? end - start : 0);
+    runtime_stats_record_boot_load(end >= start ? end - start : 0);
     if (status == COLD_MEDIA_OK)
         g_window_loaded = 1;
     return status;
@@ -368,6 +400,7 @@ const cold_media_diag_t *cold_media_last_diag(void)
 
 void cold_media_reset_session(void)
 {
+    backend_reset();
     g_initialized = 0;
     g_active = 0;
     g_window_loaded = 0;
@@ -378,6 +411,11 @@ void cold_media_reset_session(void)
 }
 
 #if !defined(COLD_MEDIA_FAKE)
+uint64_t cold_media_fake_smoketest(void)
+{
+    return 0;
+}
+
 uint64_t cold_media_fake_selftest(void)
 {
     return 0;

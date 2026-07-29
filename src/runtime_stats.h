@@ -120,6 +120,8 @@ void runtime_stats_count(runtime_counter_t counter, uint64_t amount);
 void runtime_stats_set(runtime_counter_t counter, uint64_t value);
 void runtime_stats_max(runtime_counter_t counter, uint64_t value);
 void runtime_stats_record(runtime_phase_t phase, uint64_t ticks);
+/* Boot occurs before instrumentation is enabled; hand this sample to reset. */
+void runtime_stats_record_boot_load(uint64_t ticks);
 void runtime_stats_note_memory(void);
 void runtime_stats_note_ingress_reject(unsigned reason);
 /* Post-run control path: retained even when instrumentation was disabled. */

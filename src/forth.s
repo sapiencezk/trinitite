@@ -2841,6 +2841,11 @@ defcode "RSTM3", 5, runtime_stats_test, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "MEDB3", 5, cold_media_smoke, 0
+    bl      cold_media_fake_smoketest
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "MEDM3", 5, cold_media_test, 0
     bl      cold_media_fake_selftest
     str     x0, [DSP, #-8]!

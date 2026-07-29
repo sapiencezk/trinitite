@@ -4,6 +4,8 @@
 #include "uart.h"
 
 static runtime_stats_t g_stats;
+static uint64_t g_boot_load_ticks;
+static int g_boot_load_pending;
 
 static const char *const g_counter_name[RT_COUNT_COUNT] = {
     "events_admitted",
@@ -112,6 +114,18 @@ static unsigned log2_bucket(uint64_t ticks)
     return bucket;
 }
 
+static void histogram_add(runtime_histogram_t *hist, uint64_t ticks)
+{
+    hist->count = sat_add(hist->count, 1);
+    hist->ticks_sum = sat_add(hist->ticks_sum, ticks);
+    if (hist->count == 1 || ticks < hist->ticks_min)
+        hist->ticks_min = ticks;
+    if (ticks > hist->ticks_max)
+        hist->ticks_max = ticks;
+    unsigned bucket = log2_bucket(ticks);
+    hist->bucket[bucket] = sat_add(hist->bucket[bucket], 1);
+}
+
 void runtime_stats_enable(int enabled)
 {
     g_stats.enabled = enabled ? 1 : 0;
@@ -147,6 +161,11 @@ void runtime_stats_reset(void)
     g_stats.counter[RT_COUNT_ATOM_BYTES_HWM] = atoms;
     g_stats.counter[RT_COUNT_ATOM_INDEX_OCCUPANCY] = index;
     g_stats.counter[RT_COUNT_ATOM_INDEX_START] = index;
+    if (g_boot_load_pending) {
+        histogram_add(
+            &g_stats.phase[RT_PHASE_BOOT_LOAD], g_boot_load_ticks);
+        g_boot_load_pending = 0;
+    }
 }
 
 const runtime_stats_t *runtime_stats_get(void)
@@ -180,15 +199,13 @@ void runtime_stats_record(runtime_phase_t phase, uint64_t ticks)
 {
     if (!g_stats.enabled || (unsigned)phase >= RT_PHASE_COUNT)
         return;
-    runtime_histogram_t *hist = &g_stats.phase[phase];
-    hist->count = sat_add(hist->count, 1);
-    hist->ticks_sum = sat_add(hist->ticks_sum, ticks);
-    if (hist->count == 1 || ticks < hist->ticks_min)
-        hist->ticks_min = ticks;
-    if (ticks > hist->ticks_max)
-        hist->ticks_max = ticks;
-    unsigned bucket = log2_bucket(ticks);
-    hist->bucket[bucket] = sat_add(hist->bucket[bucket], 1);
+    histogram_add(&g_stats.phase[phase], ticks);
+}
+
+void runtime_stats_record_boot_load(uint64_t ticks)
+{
+    g_boot_load_ticks = ticks;
+    g_boot_load_pending = 1;
 }
 
 void runtime_stats_note_memory(void)
@@ -274,6 +291,7 @@ uint64_t runtime_stats_selftest(void)
     uint64_t failures = 0;
     int prior = runtime_stats_enabled();
     runtime_stats_enable(1);
+    runtime_stats_record_boot_load(7);
     runtime_stats_reset();
     runtime_stats_count(RT_COUNT_COMMITS, UINT64_MAX - 1);
     runtime_stats_count(RT_COUNT_COMMITS, 2);
@@ -289,6 +307,10 @@ uint64_t runtime_stats_selftest(void)
         || s->phase[RT_PHASE_NOCK_SLAM].bucket[0] != 1
         || s->phase[RT_PHASE_NOCK_SLAM].bucket[1] != 1
         || s->phase[RT_PHASE_NOCK_SLAM].bucket[63] != 1)
+        failures++;
+    if (s->phase[RT_PHASE_BOOT_LOAD].count != 1
+        || s->phase[RT_PHASE_BOOT_LOAD].ticks_min != 7
+        || s->phase[RT_PHASE_BOOT_LOAD].ticks_max != 7)
         failures++;
     runtime_stats_enable(prior);
     runtime_stats_reset();

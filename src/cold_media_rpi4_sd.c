@@ -391,3 +391,12 @@ cold_media_status_t rpi4_sd_barrier(uint64_t deadline)
             return COLD_MEDIA_TIMEOUT;
     }
 }
+
+void rpi4_sd_reset_session(void)
+{
+    g_rca = 0;
+    g_capacity = 0;
+    g_high_capacity = 0;
+    g_ready = 0;
+    g_last_interrupt = 0;
+}

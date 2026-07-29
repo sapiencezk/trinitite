@@ -1,7 +1,9 @@
 #include <stdint.h>
 #include "blake3.h"
+#include "cold.h"
 #include "cold_media.h"
 #include "memory.h"
+#include "noun.h"
 
 #define DESC_MAGIC 0x31444D433249ULL
 #define FAKE_SECTORS (COLD_MEDIA_EXTENT_SECTORS + 2u)
@@ -25,6 +27,7 @@ static int g_fake_removed;
 static cold_media_fake_fault_t g_fault;
 static uint64_t g_fault_boundary;
 static uint64_t g_transfer;
+static int g_fault_effect_fired;
 
 static uint8_t *fake_sector(uint64_t lba)
 {
@@ -75,6 +78,11 @@ static int boundary(void)
         && g_transfer == g_fault_boundary;
 }
 
+static void fault_effect(void)
+{
+    g_fault_effect_fired = 1;
+}
+
 cold_media_status_t cold_media_fake_probe(
     uint64_t *capacity, int *read_only, uint64_t deadline)
 {
@@ -98,21 +106,37 @@ cold_media_status_t cold_media_fake_sector_read(
         return COLD_MEDIA_REMOVED;
     if (boundary()) {
         if (g_fault == COLD_MEDIA_FAKE_TIMEOUT
-            || g_fault == COLD_MEDIA_FAKE_RESET)
+            || g_fault == COLD_MEDIA_FAKE_RESET) {
+            fault_effect();
             return COLD_MEDIA_TIMEOUT;
-        if (g_fault == COLD_MEDIA_FAKE_COMMAND_CRC)
+        }
+        if (g_fault == COLD_MEDIA_FAKE_COMMAND_CRC) {
+            fault_effect();
             return COLD_MEDIA_COMMAND_CRC;
-        if (g_fault == COLD_MEDIA_FAKE_DATA_CRC)
+        }
+        if (g_fault == COLD_MEDIA_FAKE_DATA_CRC) {
+            fault_effect();
             return COLD_MEDIA_DATA_CRC;
-        if (g_fault == COLD_MEDIA_FAKE_READ_FAILURE)
+        }
+        if (g_fault == COLD_MEDIA_FAKE_READ_FAILURE
+            || g_fault == COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE
+            || g_fault == COLD_MEDIA_FAKE_BARRIER_FAILURE) {
+            fault_effect();
             return COLD_MEDIA_READ_FAILURE;
+        }
         if (g_fault == COLD_MEDIA_FAKE_REMOVAL) {
+            fault_effect();
             g_fake_removed = 1;
             return COLD_MEDIA_REMOVED;
         }
     }
     for (uint64_t i = 0; i < COLD_MEDIA_SECTOR_BYTES; i++)
         dst[i] = src[i];
+    if (g_fault == COLD_MEDIA_FAKE_BIT_FLIP
+        && g_transfer == g_fault_boundary) {
+        fault_effect();
+        dst[COLD_MEDIA_SECTOR_BYTES / 2] ^= 1;
+    }
     return COLD_MEDIA_OK;
 }
 
@@ -129,23 +153,39 @@ cold_media_status_t cold_media_fake_sector_write(
     int fire = boundary();
     if (fire && (g_fault == COLD_MEDIA_FAKE_TIMEOUT
                  || g_fault == COLD_MEDIA_FAKE_COMMAND_CRC
-                 || g_fault == COLD_MEDIA_FAKE_RESET))
-        return g_fault == COLD_MEDIA_FAKE_COMMAND_CRC
-            ? COLD_MEDIA_COMMAND_CRC : COLD_MEDIA_TIMEOUT;
+                 || g_fault == COLD_MEDIA_FAKE_READ_FAILURE
+                 || g_fault == COLD_MEDIA_FAKE_BARRIER_FAILURE
+                 || g_fault == COLD_MEDIA_FAKE_RESET)) {
+        fault_effect();
+        if (g_fault == COLD_MEDIA_FAKE_COMMAND_CRC)
+            return COLD_MEDIA_COMMAND_CRC;
+        if (g_fault == COLD_MEDIA_FAKE_READ_FAILURE
+            || g_fault == COLD_MEDIA_FAKE_BARRIER_FAILURE)
+            return COLD_MEDIA_READ_FAILURE;
+        return COLD_MEDIA_TIMEOUT;
+    }
     *submitted = 1;
     uint64_t n = COLD_MEDIA_SECTOR_BYTES;
-    if (fire && g_fault == COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE)
+    if (fire && (g_fault == COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE
+                 || g_fault == COLD_MEDIA_FAKE_DATA_CRC))
         n /= 2;
     for (uint64_t i = 0; i < n; i++)
         dst[i] = src[i];
-    if (fire && g_fault == COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE)
-        return COLD_MEDIA_WRITE_UNKNOWN;
+    if (fire && (g_fault == COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE
+                 || g_fault == COLD_MEDIA_FAKE_DATA_CRC)) {
+        fault_effect();
+        return g_fault == COLD_MEDIA_FAKE_DATA_CRC
+            ? COLD_MEDIA_DATA_CRC : COLD_MEDIA_WRITE_UNKNOWN;
+    }
     if (fire && g_fault == COLD_MEDIA_FAKE_REMOVAL) {
+        fault_effect();
         g_fake_removed = 1;
         return COLD_MEDIA_REMOVED;
     }
-    if (fire && g_fault == COLD_MEDIA_FAKE_BIT_FLIP)
+    if (fire && g_fault == COLD_MEDIA_FAKE_BIT_FLIP) {
+        fault_effect();
         dst[COLD_MEDIA_SECTOR_BYTES / 2] ^= 1;
+    }
     return COLD_MEDIA_OK;
 }
 
@@ -154,18 +194,47 @@ cold_media_status_t cold_media_fake_barrier(uint64_t deadline)
     (void)deadline;
     if (g_fake_removed)
         return COLD_MEDIA_REMOVED;
-    if (boundary() && g_fault == COLD_MEDIA_FAKE_BARRIER_FAILURE)
-        return COLD_MEDIA_BARRIER_FAILURE;
+    if (boundary()) {
+        switch (g_fault) {
+        case COLD_MEDIA_FAKE_TIMEOUT:
+        case COLD_MEDIA_FAKE_RESET:
+            fault_effect();
+            return COLD_MEDIA_TIMEOUT;
+        case COLD_MEDIA_FAKE_COMMAND_CRC:
+        case COLD_MEDIA_FAKE_DATA_CRC:
+        case COLD_MEDIA_FAKE_READ_FAILURE:
+            fault_effect();
+            return COLD_MEDIA_COMMAND_CRC;
+        case COLD_MEDIA_FAKE_REMOVAL:
+            fault_effect();
+            g_fake_removed = 1;
+            return COLD_MEDIA_REMOVED;
+        case COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE:
+        case COLD_MEDIA_FAKE_BARRIER_FAILURE:
+        case COLD_MEDIA_FAKE_BIT_FLIP:
+            fault_effect();
+            return COLD_MEDIA_BARRIER_FAILURE;
+        default:
+            break;
+        }
+    }
     return COLD_MEDIA_OK;
 }
 
-void cold_media_fake_fault_set(cold_media_fake_fault_t fault,
-                               uint64_t transfer_boundary)
+static void arm_fault(cold_media_fake_fault_t fault,
+                      uint64_t transfer_boundary)
 {
     g_fault = fault;
     g_fault_boundary = transfer_boundary ? transfer_boundary : 1;
     g_transfer = 0;
     g_fake_removed = 0;
+    g_fault_effect_fired = 0;
+}
+
+void cold_media_fake_fault_set(cold_media_fake_fault_t fault,
+                               uint64_t transfer_boundary)
+{
+    arm_fault(fault, transfer_boundary);
     cold_media_reset_session();
 }
 
@@ -175,10 +244,89 @@ void cold_media_fake_fault_clear(void)
     g_fault_boundary = 0;
     g_transfer = 0;
     g_fake_removed = 0;
+    g_fault_effect_fired = 0;
     cold_media_reset_session();
 }
 
-uint64_t cold_media_fake_selftest(void)
+void cold_media_fake_backend_reset(void)
+{
+    g_fake_removed = 0;
+}
+
+static int sentinels_ok(void)
+{
+    for (uint64_t i = 0; i < COLD_MEDIA_SECTOR_BYTES; i++)
+        if (g_fake[0][i] != 0xa5
+            || g_fake[FAKE_SECTORS - 1][i] != 0x5a)
+            return 0;
+    return 1;
+}
+
+static void reload_window_from_media(void)
+{
+    uint8_t *window = (uint8_t *)(uintptr_t)COLD_BASE;
+    uint8_t *a = fake_sector(COLD_MEDIA_START_LBA + 1);
+    uint8_t *b = fake_sector(COLD_MEDIA_START_LBA + 2);
+    for (uint64_t i = 0; i < 256; i++) {
+        window[i] = a[i];
+        window[256 + i] = b[i];
+    }
+    uint64_t logical = 512;
+    for (uint64_t lba = COLD_MEDIA_START_LBA + 3;
+         logical < COLD_SIZE; lba++) {
+        uint8_t *sector = fake_sector(lba);
+        for (uint64_t i = 0;
+             i < COLD_MEDIA_SECTOR_BYTES && logical < COLD_SIZE;
+             i++, logical++)
+            window[logical] = sector[i];
+    }
+}
+
+static int activate_media(void)
+{
+    uint8_t ignored;
+    return cold_media_read(
+        COLD_MEDIA_PHASE_LAYOUT, 0, &ignored, 1, 0) == COLD_MEDIA_OK;
+}
+
+static int prepare_old_generation(void)
+{
+    restore_blank_media();
+    reload_window_from_media();
+    if (!activate_media() || cold_format() != 0
+        || cold_snap_save(direct(42)) != 0)
+        return 0;
+    return 1;
+}
+
+static int remount_and_select(void)
+{
+    cold_media_fake_fault_clear();
+    reload_window_from_media();
+    if (!activate_media())
+        return 0;
+    return cold_probe() == COLD_RESULT_VALID;
+}
+
+static int load_expected(uint64_t expected)
+{
+    heap_scratch_reset();
+    noun got = cold_snap_load();
+    int ok = noun_is_direct(got) && direct_val(got) == expected;
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return ok;
+}
+
+static int digest_equal(const uint8_t a[32], const uint8_t b[32])
+{
+    uint8_t diff = 0;
+    for (unsigned i = 0; i < 32; i++)
+        diff |= a[i] ^ b[i];
+    return diff == 0;
+}
+
+uint64_t cold_media_fake_smoketest(void)
 {
     uint64_t failures = 0;
     initialize_fake();
@@ -232,5 +380,82 @@ uint64_t cold_media_fake_selftest(void)
                             sizeof a, 0) != COLD_MEDIA_RESET_REQUIRED)
         failures++;
     restore_blank_media();
+    return failures;
+}
+
+uint64_t cold_media_fake_selftest(void)
+{
+    uint64_t failures = cold_media_fake_smoketest();
+    /*
+     * Exercise the real cold.c append path through this adapter at every
+     * physical read/write/barrier boundary, then reconstruct the RAM window
+     * from fake media and run the production selector/decoder.
+     */
+    if (!prepare_old_generation()) {
+        restore_blank_media();
+        return failures | (1ULL << 16);
+    }
+    arm_fault(COLD_MEDIA_FAKE_NONE, 1);
+    if (cold_snap_save(direct(43)) != 0 || g_transfer == 0)
+        failures |= 1ULL << 17;
+    uint64_t transfer_boundaries = g_transfer;
+    static const cold_media_fake_fault_t matrix[] = {
+        COLD_MEDIA_FAKE_TIMEOUT,
+        COLD_MEDIA_FAKE_COMMAND_CRC,
+        COLD_MEDIA_FAKE_DATA_CRC,
+        COLD_MEDIA_FAKE_READ_FAILURE,
+        COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE,
+        COLD_MEDIA_FAKE_BARRIER_FAILURE,
+        COLD_MEDIA_FAKE_REMOVAL,
+        COLD_MEDIA_FAKE_BIT_FLIP,
+        COLD_MEDIA_FAKE_RESET
+    };
+    for (unsigned f = 0; f < sizeof matrix / sizeof matrix[0]; f++) {
+        for (uint64_t edge = 1; edge <= transfer_boundaries; edge++) {
+            if (!prepare_old_generation()) {
+                failures |= 1ULL << 18;
+                continue;
+            }
+            arm_fault(matrix[f], edge);
+            (void)cold_snap_save(direct(43));
+            int injected = g_fault_effect_fired;
+            if (!remount_and_select()) {
+                failures |= 1ULL << 19;
+                continue;
+            }
+            uint64_t generation = cold_selected_generation();
+            if (!injected
+                || (generation == 2 && !load_expected(42))
+                || (generation == 3 && !load_expected(43))
+                || (generation != 2 && generation != 3)
+                || !sentinels_ok())
+                failures |= 1ULL << 20;
+        }
+    }
+
+    /* Preflight media faults must not mutate a physical byte. */
+    static const cold_media_fake_fault_t preflight[] = {
+        COLD_MEDIA_FAKE_ABSENT,
+        COLD_MEDIA_FAKE_READ_ONLY,
+        COLD_MEDIA_FAKE_UNDERSIZED
+    };
+    for (unsigned i = 0; i < sizeof preflight / sizeof preflight[0]; i++) {
+        uint8_t before[32], after[32], ignored;
+        if (!prepare_old_generation()) {
+            failures |= 1ULL << 21;
+            continue;
+        }
+        blake3_hash((const uint8_t *)g_fake, sizeof g_fake, before);
+        cold_media_fake_fault_set(preflight[i], 1);
+        reload_window_from_media();
+        cold_media_status_t status = cold_media_read(
+            COLD_MEDIA_PHASE_LAYOUT, 0, &ignored, 1, 0);
+        if (preflight[i] == COLD_MEDIA_FAKE_READ_ONLY
+            && status == COLD_MEDIA_OK)
+            (void)cold_snap_save(direct(43));
+        blake3_hash((const uint8_t *)g_fake, sizeof g_fake, after);
+        if (digest_equal(before, after) == 0 || !sentinels_ok())
+            failures |= 1ULL << 22;
+    }
     return failures;
 }

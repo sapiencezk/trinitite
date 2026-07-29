@@ -107,7 +107,9 @@ test: all
 
 test-media-fake:
 	$(MAKE) clean
-	$(MAKE) COLD_MEDIA=fake test
+	$(MAKE) COLD_MEDIA=fake all
+	./tests/run_tests.sh
+	./tests/media-fake-matrix.sh
 
 test-media-rpi4-build:
 	$(MAKE) clean

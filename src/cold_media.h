@@ -93,4 +93,5 @@ void cold_media_fake_fault_set(cold_media_fake_fault_t fault,
 void cold_media_fake_fault_clear(void);
 
 /* Returns zero for non-fake builds and on a passing fake build. */
+uint64_t cold_media_fake_smoketest(void);
 uint64_t cold_media_fake_selftest(void);
