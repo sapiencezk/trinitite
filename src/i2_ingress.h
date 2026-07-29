@@ -1,0 +1,35 @@
+#pragma once
+
+#include <stdint.h>
+#include "noun.h"
+
+typedef enum {
+    I2_RX_REASON_NONE = 0,
+    I2_RX_REASON_VERSION,
+    I2_RX_REASON_HEADER,
+    I2_RX_REASON_LENGTH,
+    I2_RX_REASON_DIGEST,
+    I2_RX_REASON_CUE,
+    I2_RX_REASON_TIMEOUT,
+    I2_RX_REASON_COUNT
+} i2_rx_reason_t;
+
+void i2_rx_init(void);
+/* Consume at most byte_budget UART bytes. Returns 1 when a verified payload
+ * is ready for bounded cue, otherwise 0. */
+int i2_rx_poll(uint32_t byte_budget);
+/* Decode the ready payload into SCRATCH. Success leaves noun_tx active. */
+int i2_rx_take(noun *out);
+
+/* Deterministic parser hooks used by focused tests. */
+void i2_rx_feed_byte(uint8_t byte, uint64_t now);
+void i2_rx_check_timeout(uint64_t now);
+int i2_rx_ready(void);
+
+uint64_t i2_rx_reject_count(i2_rx_reason_t reason);
+i2_rx_reason_t i2_rx_last_reason(void);
+const char *i2_rx_reason_name(i2_rx_reason_t reason);
+
+/* Focused device-code regression probes; return zero on success. */
+uint64_t i2_rx_selftest(void);
+uint64_t cue_bounded_selftest(void);

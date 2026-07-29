@@ -11,11 +11,11 @@ VPATH   = $(SRCDIR)
 
 CFLAGS  = -Wall -O2 -ffreestanding -nostdlib -nostartfiles \
           -mcpu=cortex-a72 -mgeneral-regs-only \
-          -fno-pic -fno-stack-protector \
+          -fno-pic -fno-stack-protector -fno-builtin \
           -I$(SRCDIR)
 LDFLAGS = -T $(SRCDIR)/linker.ld -nostdlib -no-pie
 
-OBJS    = boot.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o kernel.o core.o cold.o cold_nv.o trace.o net.o ska.o forth.o pill_embed.o main.o
+OBJS    = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o i2_ingress.o kernel.o core.o cold.o cold_nv.o trace.o net.o ska.o forth.o pill_embed.o main.o
 
 all: $(TARGET).img
 

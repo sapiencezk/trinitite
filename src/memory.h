@@ -101,13 +101,12 @@
 #endif
 
 /*
- * PILL format v2 (written by tools/mkpill.py):
- *   bytes  0-7:   uint64_t (LE) = byte count of jam data
- *   byte   8:     kernel shape  (0 = Arvo, 1 = Shrine)
- *   bytes  9-15:  reserved/padding (zeros)
- *   bytes  16+:   raw jam bytes (16-byte aligned)
+ * PILL_BASE carries either:
+ *   - isolated legacy I1 PILL v2: u64 len, shape, version/pad, jam at +16; or
+ *   - I2 PILL2: 256-byte integrity/RuntimeIdentity header, then bounded jam.
+ * Exact I2 layout: 1499kernel/docs/I2-M2-CONTRACT.md.
  *
- * 256 MB: safely above all allocators (~107 MB top) and below MMIO (0x3F000000).
+ * 256 MB: safely above all allocators and below MMIO (0x3F000000).
  */
 #define PILL_BASE  0x10000000
 
@@ -124,8 +123,9 @@
 #endif
 
 /*
- * UART receive buffer: below TIB (0xFF000). Used by uart_recv_noun.
- * ~28 KB — enough for Phase 6 test events / modest jam payloads.
+ * UART receive buffer: below TIB (0xFF000). I2 uses it only after a strict
+ * 56-byte incremental frame header admits an exact payload length. I1 keeps
+ * the isolated legacy uart_recv_noun path.
  */
 #define UART_RXBUF_BASE  0x000F8000
 #define UART_RXBUF_SIZE  0x00007000

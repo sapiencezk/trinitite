@@ -22,6 +22,9 @@ static int      persist_tx_saved_sel;
 static int      persist_tx_active;
 static int      heap_noalloc;
 static uint64_t heap_noalloc_faults;
+static int      noun_tx_live;
+static int      noun_tx_mode;
+static uint8_t *noun_tx_cell_mark;
 
 void noun_heap_init(void);   /* forward — also inits atom store */
 
@@ -110,6 +113,31 @@ static void *heap_alloc(size_t bytes) {
     return p;
 }
 
+static void *heap_alloc_checked(size_t bytes)
+{
+    if (heap_noalloc)
+        return 0;
+    bytes = (bytes + 7) & ~(size_t)7;
+    if (bytes == 0)
+        bytes = 8;
+    uint8_t *p;
+    uint8_t *top;
+    if (heap_mode == HEAP_MODE_SCRATCH) {
+        p = scratch_ptr;
+        top = (uint8_t *)(uintptr_t)HEAP_TOP;
+        if (p > top || (size_t)(top - p) < bytes)
+            return 0;
+        scratch_ptr = p + bytes;
+    } else {
+        p = persist_ptr;
+        top = persist_limit(persist_sel);
+        if (p > top || (size_t)(top - p) < bytes)
+            return 0;
+        persist_ptr = p + bytes;
+    }
+    return p;
+}
+
 void heap_noalloc_begin(void)
 {
     heap_noalloc = 1;
@@ -133,6 +161,21 @@ noun alloc_cell(noun head, noun tail) {
     return cell_noun((uint32_t)(uintptr_t)c);
 }
 
+int alloc_cell_checked(noun head, noun tail, noun *out)
+{
+    cell_t *c = heap_alloc_checked(sizeof(cell_t));
+    if (!c)
+        return 0;
+    c->refcount = 1;
+    c->_pad = 0;
+    c->head = head;
+    c->tail = tail;
+    if (noun_is_cell(head)) cell_inc(head);
+    if (noun_is_cell(tail)) cell_inc(tail);
+    *out = cell_noun((uint32_t)(uintptr_t)c);
+    return 1;
+}
+
 void cell_inc(noun n) {
     if (!noun_is_cell(n)) return;
     cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
@@ -154,9 +197,11 @@ void cell_dec(noun n) {
  * persist_reclaim of a ~7k-cell I2 gate too slow for QEMU smoke.
  */
 #define COPY_MAP_MAX  65536u
+#define COPY_DEPTH_MAX 256u
 static uint32_t g_copy_key[COPY_MAP_MAX];
 static noun     g_copy_val[COPY_MAP_MAX];
 static uint8_t  g_copy_used[COPY_MAP_MAX];
+static int64_t  g_copy_fail_after = -1;
 
 static noun noun_copy_rec(noun n)
 {
@@ -200,6 +245,67 @@ noun noun_copy(noun n)
     return noun_copy_rec(n);
 }
 
+static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
+{
+    if (!noun_is_cell(n)) {
+        *out = n;
+        return 1;
+    }
+    /* Refuse the recursive edge in the current frame.  Root depth is one,
+     * so both successful and rejecting copies use at most 256 C frames. */
+    if (depth >= COPY_DEPTH_MAX)
+        return 0;
+    uint32_t op = cell_ptr(n);
+    uint32_t h = op * 2654435761u;
+    for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
+        uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
+        if (!g_copy_used[i])
+            break;
+        if (g_copy_key[i] == op) {
+            *out = g_copy_val[i];
+            return 1;
+        }
+    }
+    cell_t *c = (cell_t *)(uintptr_t)op;
+    noun nh, nt, neu;
+    if (!noun_copy_checked_rec(c->head, &nh, depth + 1)
+        || !noun_copy_checked_rec(c->tail, &nt, depth + 1))
+        return 0;
+    if (g_copy_fail_after == 0)
+        return 0;
+    if (g_copy_fail_after > 0)
+        g_copy_fail_after--;
+    if (!alloc_cell_checked(nh, nt, &neu))
+        return 0;
+    for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
+        uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
+        if (!g_copy_used[i]) {
+            g_copy_key[i] = op;
+            g_copy_val[i] = neu;
+            g_copy_used[i] = 1;
+            *out = neu;
+            return 1;
+        }
+        if (g_copy_key[i] == op) {
+            *out = g_copy_val[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int noun_copy_checked(noun n, noun *out)
+{
+    for (uint32_t i = 0; i < COPY_MAP_MAX; i++)
+        g_copy_used[i] = 0;
+    return noun_copy_checked_rec(n, out, 1);
+}
+
+void noun_test_copy_fail_after(int64_t cells)
+{
+    g_copy_fail_after = cells;
+}
+
 noun noun_persist(noun n)
 {
     int old = heap_mode;
@@ -228,6 +334,9 @@ typedef struct {
 } atom_index_entry_t;
 
 static uint8_t *atom_data_ptr;
+static uint8_t *atom_tx_data_mark;
+static uint32_t atom_tx_slots[ATOM_INDEX_SLOTS];
+static uint32_t atom_tx_slot_count;
 
 static void atom_store_init(void) {
     /* QEMU zeroes RAM at startup, so the index is already zeroed.
@@ -251,36 +360,20 @@ atom_t *atom_store_get(uint64_t hash62) {
     return 0;  /* table full or not found */
 }
 
-static atom_t *atom_store_alloc(uint64_t size_limbs) {
-    if (heap_noalloc) {
-        heap_noalloc_faults++;
-        nock_crash("post-promote allocation");
-    }
-    size_t bytes = ((sizeof(atom_t) + size_limbs * sizeof(uint64_t)) + 7) & ~(size_t)7;
+static atom_t *atom_store_alloc_checked(uint64_t size_limbs)
+{
+    if (heap_noalloc)
+        return 0;
+    size_t bytes = ((sizeof(atom_t) + size_limbs * sizeof(uint64_t)) + 7)
+                 & ~(size_t)7;
     if (bytes == 0)
         bytes = 8;
     uint8_t *p = atom_data_ptr;
     uint8_t *top = (uint8_t *)(uintptr_t)ATOM_DATA_TOP;
     if (p > top || (size_t)(top - p) < bytes)
-        nock_crash("atom store exhausted");
+        return 0;
     atom_data_ptr = p + bytes;
     return (atom_t *)p;
-}
-
-static void atom_store_insert(uint64_t hash62, atom_t *ptr) {
-    atom_index_entry_t *idx = (atom_index_entry_t *)ATOM_INDEX_BASE;
-    uint32_t slot = (uint32_t)(hash62 & ATOM_INDEX_MASK);
-    for (uint32_t i = 0; i < ATOM_INDEX_SLOTS; i++) {
-        uint32_t s = (slot + i) & ATOM_INDEX_MASK;
-        if (idx[s].ptr == 0) {
-            idx[s].hash62 = hash62;
-            idx[s].ptr    = ptr;
-            return;
-        }
-        if (idx[s].hash62 == hash62) return;  /* already present */
-    }
-    /* Open-address table full — crash (silent drop left dangling indirects). */
-    nock_crash("atom index full");
 }
 
 /* ── make_atom ───────────────────────────────────────────────────────────────
@@ -302,13 +395,44 @@ static size_t last_limb_bytes(uint64_t w) {
 }
 
 noun make_atom(const uint64_t *limbs, uint64_t size) {
+    noun out;
+    if (!make_atom_checked(limbs, size, &out))
+        nock_crash("atom store exhausted/collision");
+    return out;
+}
+
+static int atom_content_equal(const atom_t *a, const uint8_t hash[32],
+                              const uint64_t *limbs, uint64_t size)
+{
+    if (a->size != size)
+        return 0;
+    for (int i = 0; i < 8; i++) {
+        uint32_t word = (uint32_t)hash[i * 4]
+                      | ((uint32_t)hash[i * 4 + 1] << 8)
+                      | ((uint32_t)hash[i * 4 + 2] << 16)
+                      | ((uint32_t)hash[i * 4 + 3] << 24);
+        if (a->blake3[i] != word)
+            return 0;
+    }
+    for (uint64_t i = 0; i < size; i++)
+        if (a->limbs[i] != limbs[i])
+            return 0;
+    return 1;
+}
+
+int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
+    if (!limbs || !out || size == 0)
+        return 0;
     /* Strip trailing zero limbs */
     while (size > 1 && limbs[size - 1] == 0)
         size--;
 
     /* Promote to direct if value fits in 63 bits */
     if (size == 1 && limbs[0] < (1ULL << 63))
-        return (noun)limbs[0];   /* direct(v) == v */
+    {
+        *out = (noun)limbs[0];   /* direct(v) == v */
+        return 1;
+    }
 
     /* Compute canonical byte length (trim trailing zero bytes of last limb) */
     size_t byte_len = (size - 1) * 8 + last_limb_bytes(limbs[size - 1]);
@@ -326,11 +450,29 @@ noun make_atom(const uint64_t *limbs, uint64_t size) {
 
     /* Check atom store: if already present, reuse */
     atom_t *existing = atom_store_get(hash62);
-    if (existing != 0)
-        return indirect(hash62);
+    if (existing != 0) {
+        if (!atom_content_equal(existing, h, limbs, size))
+            return 0; /* the 62-bit noun identity cannot represent collision */
+        *out = indirect(hash62);
+        return 1;
+    }
 
     /* Allocate new atom_t in the data area */
-    atom_t *a = atom_store_alloc(size);
+    atom_index_entry_t *idx = (atom_index_entry_t *)ATOM_INDEX_BASE;
+    uint32_t start = (uint32_t)(hash62 & ATOM_INDEX_MASK);
+    uint32_t empty = ATOM_INDEX_SLOTS;
+    for (uint32_t i = 0; i < ATOM_INDEX_SLOTS; i++) {
+        uint32_t s = (start + i) & ATOM_INDEX_MASK;
+        if (idx[s].ptr == 0) {
+            empty = s;
+            break;
+        }
+    }
+    if (empty == ATOM_INDEX_SLOTS)
+        return 0;
+    atom_t *a = atom_store_alloc_checked(size);
+    if (!a)
+        return 0;
     a->size = size;
 
     /* Store full 256-bit hash */
@@ -345,8 +487,110 @@ noun make_atom(const uint64_t *limbs, uint64_t size) {
     for (uint64_t i = 0; i < size; i++)
         a->limbs[i] = limbs[i];
 
-    atom_store_insert(hash62, a);
-    return indirect(hash62);
+    idx[empty].hash62 = hash62;
+    idx[empty].ptr = a;
+    if (noun_tx_live) {
+        if (atom_tx_slot_count >= ATOM_INDEX_SLOTS) {
+            idx[empty].hash62 = 0;
+            idx[empty].ptr = 0;
+            atom_data_ptr = (uint8_t *)a;
+            return 0;
+        }
+        atom_tx_slots[atom_tx_slot_count++] = empty;
+    }
+    *out = indirect(hash62);
+    return 1;
+}
+
+int noun_atom_read_fixed(noun n, uint8_t *out, size_t len)
+{
+    if (!out || noun_is_cell(n))
+        return 0;
+    for (size_t i = 0; i < len; i++)
+        out[i] = 0;
+    if (noun_is_direct(n)) {
+        uint64_t v = direct_val(n);
+        for (size_t i = 0; i < len && i < 8; i++) {
+            out[i] = (uint8_t)(v & 0xff);
+            v >>= 8;
+        }
+        return v == 0;
+    }
+    atom_t *a = atom_store_get(indirect_hash(n));
+    if (!a)
+        return 0;
+    size_t bytes = (size_t)a->size * 8;
+    while (bytes > 1 && ((const uint8_t *)a->limbs)[bytes - 1] == 0)
+        bytes--;
+    if (bytes > len)
+        return 0;
+    for (size_t i = 0; i < bytes; i++)
+        out[i] = ((const uint8_t *)a->limbs)[i];
+    return 1;
+}
+
+int noun_tx_begin(int mode)
+{
+    if (noun_tx_live)
+        return 0;
+    noun_tx_live = 1;
+    noun_tx_mode = (mode == HEAP_MODE_SCRATCH)
+        ? HEAP_MODE_SCRATCH : HEAP_MODE_PERSIST;
+    heap_mode = noun_tx_mode;
+    noun_tx_cell_mark = noun_tx_mode == HEAP_MODE_SCRATCH
+        ? scratch_ptr : persist_ptr;
+    atom_tx_data_mark = atom_data_ptr;
+    atom_tx_slot_count = 0;
+    return 1;
+}
+
+void noun_tx_commit(void)
+{
+    noun_tx_live = 0;
+    atom_tx_slot_count = 0;
+}
+
+void noun_tx_abort(void)
+{
+    if (!noun_tx_live)
+        return;
+    atom_index_entry_t *idx = (atom_index_entry_t *)ATOM_INDEX_BASE;
+    for (uint32_t i = 0; i < atom_tx_slot_count; i++) {
+        uint32_t slot = atom_tx_slots[i];
+        idx[slot].hash62 = 0;
+        idx[slot].ptr = 0;
+    }
+    atom_data_ptr = atom_tx_data_mark;
+    if (noun_tx_mode == HEAP_MODE_SCRATCH)
+        scratch_ptr = noun_tx_cell_mark;
+    else
+        persist_ptr = noun_tx_cell_mark;
+    noun_tx_live = 0;
+    atom_tx_slot_count = 0;
+}
+
+int noun_tx_active(void)
+{
+    return noun_tx_live;
+}
+
+uint64_t heap_cells_used(int mode)
+{
+    uint8_t *base;
+    uint8_t *ptr;
+    if (mode == HEAP_MODE_SCRATCH) {
+        base = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
+        ptr = scratch_ptr;
+    } else {
+        base = persist_base(persist_sel);
+        ptr = persist_ptr;
+    }
+    return (uint64_t)(ptr - base) / sizeof(cell_t);
+}
+
+uint64_t atom_store_bytes_used(void)
+{
+    return (uint64_t)(atom_data_ptr - (uint8_t *)(uintptr_t)ATOM_DATA_BASE);
 }
 
 /* ── cord_from_bytes ─────────────────────────────────────────────────────────
@@ -420,6 +664,8 @@ void noun_heap_init(void) {
     persist_tx_active = 0;
     heap_noalloc = 0;
     heap_noalloc_faults = 0;
+    noun_tx_live = 0;
+    atom_tx_slot_count = 0;
     scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
     heap_mode   = HEAP_MODE_PERSIST;  /* pill load / cold boot into persist */
     atom_store_init();

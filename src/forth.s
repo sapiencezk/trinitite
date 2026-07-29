@@ -2744,6 +2744,74 @@ defcode "CKAUTO@", 7, ckpt_auto_fetch, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// Narrow M2 diagnostics: stable rejection reason/counter and generation.
+defcode "RXWHY", 5, rx_reason_fetch, 0
+    bl      i2_rx_last_reason
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "RXCNT", 5, rx_count_fetch, 0
+    ldr     x0, [DSP]
+    bl      i2_rx_reject_count
+    str     x0, [DSP]
+    NEXT
+
+defcode "CKRES", 5, ckpt_result_fetch, 0
+    bl      checkpoint_last_result
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "CKGEN", 5, ckpt_generation_fetch, 0
+    bl      checkpoint_selected_generation
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "CRES", 4, cold_result_fetch, 0
+    bl      cold_last_result
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "CGEN", 4, cold_generation_fetch, 0
+    bl      cold_selected_generation
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// Focused Milestone 2 boundary probes ( -- failures )
+defcode "RXM2", 4, i2_rx_m2_test, 0
+    bl      i2_rx_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "CUEM2", 5, cue_m2_test, 0
+    bl      cue_bounded_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "TXM2", 4, tx_m2_test, 0
+    bl      kernel_tx_stuck_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "COLDM2", 6, cold_m2_test, 0
+    bl      cold_m2_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M2PREP ( -- st ) admit/install PILL2 roots without entering scheduler.
+defcode "M2PREP", 6, m2_prepare_pill, 0
+    bl      kernel_prepare_pill
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// CKM2 ( -- failures ) requires M2PREP; transactional restore matrix.
+defcode "CKM2", 4, ckpt_m2_test, 0
+    bl      checkpoint_m2_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "KGATE!", 6, kgate_store, 0
     ldr     x0, [DSP], #8
     bl      shrine_gate_set
@@ -3102,14 +3170,13 @@ defcode "NVFLUSH", 7, nvflush_word, 0
 //   Load PILL, apply BOOTPOL (pill / snap-else-pill / snap-only), enter loop.
 //   Falls back to QUIT if policy cannot boot.
 defcode "KERNEL", 6, kernel, 0
-    bl      pill_load               // x0 = jammed atom; sets noun_pill_shape
+    bl      kernel_pill_load        // x0 = decoded gate; strict PILL2 or I1
     // propagate C global noun_pill_shape → KSHAPE variable
     ldr     x1, =noun_pill_shape
     ldr     w1, [x1]                // 32-bit C int
     ldr     x2, =word_kshape + 32   // KSHAPE storage cell
     str     x1, [x2]
     cbz     x0, .Lkernel_nopill
-    bl      cue                     // x0 = kernel gate noun
     bl      kernel_boot             // never returns if boot ok; -1 → REPL
     b       code_quit
 .Lkernel_nopill:

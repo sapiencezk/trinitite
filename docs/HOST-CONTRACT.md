@@ -1,6 +1,6 @@
 # Trinitite host contract (IEC consumers)
 
-**Status:** as built 2026-07-26 (industrial epic WP1–WP5)  
+**Status:** as built through I2 Hybrid v1 Milestone 2
 **Audience:** IEC 61499 Nock kernels / pills on this substrate  
 **Normative product freeze:** `1499kernel/docs/I1.md` (do not reopen without user)  
 **Epic log:** `1499kernel/docs/HOST-INDUSTRIAL.md`
@@ -42,7 +42,7 @@ Walk `[[tag data] rest]`. Known tags (cords, LSB-first ASCII):
 | `%tset` / `%tcan` | `[id period]` / `id` | Multi-arm **IEC periods** (CNTVCT ticks; period 0 cancels) |
 | `i2-timer-set` / `i2ts` | `[token delay-ns]` | One-shot I2 timer arm; full token → fire `[%i2-timer token fired-at]` then release the arm; bare atom owner is a test/legacy alias; ns→CNTVCT |
 | `i2-timer-cancel` / `i2tc` | `token` | Cancel arm for token owner |
-| `i2-service-request` / `i2sr` | service-req | UART TX of STRING payload; then reinject `[%i2-service token [0 0] 0]` (instant complete) |
+| `i2-service-request` / `i2sr` | service-req | Bounded UART TX of STRING payload; activate exactly one pre-reserved `[%i2-service token [status detail] 0]` completion (`status=0` success, `6` TX deadline) |
 | `i2-service-cancel` / `i2sc` | token | Strict unknown-cancel rejection: the current UART service completes synchronously and has no deferred driver entry to cancel |
 
 Long I2 names (`i2-timer-set`, …) are **indirect atoms** (BLAKE3-62 identity). Dispatch matches them by precomputed hash62 (not only `cord_to_cstr`), so recognition does not depend on atom-store residency after long slam sessions.
@@ -71,10 +71,12 @@ committed I2 cause list.
 
 The device builds candidate gate/FIFO/timer-token roots and UART instant
 completion FIFO events in the inactive semispace and publishes them once only after
-those copies complete. Candidate copy exhaustion rolls the semispace
-selector/pointer back to the old roots. Promotion installs the prepared timer
-roots and completions; post-publish activation is executed under a
-no-allocation guard and only emits UART bytes. Generic asynchronous driver
+those copies complete. Candidate copies use a status-returning 256-frame
+depth-bounded copier. Over-depth, sharing-map, or semispace exhaustion rolls the
+selector/pointer back to the old roots. The FIFO owns the exact reserved
+completion noun whose status activation mutates. Promotion installs the
+prepared timer roots and completions; post-publish activation is executed under
+a no-allocation guard and only emits UART bytes. Generic asynchronous driver
 transactions are not claimed here.
 
 **Unknown tags:** not silent — `trace_rec(T_UFX)` + one-shot UART `unkfx` per session. Apps should not rely on unknown tags.
@@ -115,7 +117,7 @@ Multi-arm `%tset` → host enqueues `[%ei id %TICK 0]` while idle (**no second U
 | Situation | Behaviour |
 |-----------|-----------|
 | Queue non-empty | `DEQ` → slam |
-| Queue empty | **Idle poll:** `uart_rx_ready` else `tarm_poll` + soft WDT (no forever block on UART) |
+| Queue empty | I2 consumes at most 32 framed-RX bytes, then polls timers + soft WDT; legacy I1 alone uses its old length frame |
 | Timer due | Enqueue `[%ei id %TICK 0]` (independent arms, max 16) |
 | Slam budget | Default **1e6** Nock ops per event (`slam_budget_set` / `BUDGET!`); mid-eval wall polls `%tmrarm` every 256 ops |
 | Budget / wall fire | No product commit; **tarms kept**; emit `%timeout`; UART `budget` |
@@ -158,23 +160,27 @@ Hard clear of tarms: after a structural crash, re-arm periods from Nock state on
 
 Per event: slam product in **scratch**. On successful promote, **semispace flip + root copy**: allocate into the other persist half, deep-copy live roots (gate, queue, timer tokens, causes) while the previous half stays readable (shared battery cells), then abandon the old half. Slam formula is rebuilt after compact. Scratch is then reset. Bounds long-lived memory to one gate + queue + tokens.
 
-### 5.2 Durable checkpoint (power-cycle path)
+### 5.2 Identity-bound checkpoint (power-cycle path)
 
 Live roots can be **jammed into the cold store** (RAM region today; SD later):
 
 ```text
-checkpoint ::= [%i2-ckpt ver=1 shrine gate queue tarms]
+checkpoint ::= [%i2-ckpt 2 [152 runtime-identity-record] 1 gate queue tarms]
 tarms      ::= * [id period remain-ticks token]
 ```
 
 | Word / API | Role |
 |------------|------|
 | `CKPT!` / `checkpoint_save` | Capture live gate + queue + tarms → `cold_snap_save` |
-| `CKLOAD` / `checkpoint_load` | Load snap → install roots (semispace flip + re-arm timers with relative remain) |
+| `CKLOAD` / `checkpoint_load` | Bounded-decode and fully validate snap → build candidate semispace → publish once |
 | `CKAUTO!` *n* | Auto-save every *n* successful I2 commits (`0` = off) |
 | `KGATE!` / `KGATE@` | Set/get live gate without entering `KERNEL` loop |
 
-**Law:** checkpoint is a **host transaction boundary** image (same roots as persist compact), not a trace of every Nock intermediate. Restore does not re-run history; it reinstalls the last committed resource + host work.
+**Law:** checkpoint is a **host transaction boundary** image, not a trace of
+every Nock intermediate. Its full RuntimeIdentity must exactly equal the
+admitted PILL2 anchor. Queue/timer lists, capacities, event shapes, full unique
+lifecycle tokens, and gate identity validate before candidate allocation.
+Failure leaves all live roots and allocator selection unchanged.
 
 **Working storage:** `COLD_BASE` 8MB RAM window (always).  
 **NV path (QEMU):** after each snap, `cold_nv_flush()` writes the window to host file `cold.img` via ARM semihosting (`-semihosting`). Next boot reloads with:
@@ -188,12 +194,21 @@ tarms      ::= * [id period remain-ticks token]
 | Policy | Value | Behaviour |
 |--------|------:|-----------|
 | pill only | 0 | Load pill gate (default) |
-| snap else pill | 1 | `CKLOAD` if snap present, else pill |
-| snap only | 2 | Require snap; else REPL |
+| snap else pill | 1 | Accept exact snapshot, else record reason and install clean PILL2 roots |
+| snap only | 2 | Accept exact snapshot, else install nothing and return to safe REPL |
 
-UART marks: `boot: snap`, `boot: pill`, `boot: snap miss → pill`, `boot: no snap`, `boot: no pill`.
+UART marks: `boot: snap` plus identity/generation evidence, `boot: pill`,
+`boot: snap reject <reason> -> pill`, `boot: no snap <reason>`, `boot: no pill`.
 
-Real SDHCI can replace `cold_nv_flush` later without changing the checkpoint noun or boot policy.
+Cold v2 uses dual checksummed superblocks and append-only committed objects;
+selection validates the full contiguous generation/object chain, log count,
+and latest snapshot pointer. Divergent equal-generation superblocks and
+nonblank corrupt/unsupported media fail closed and are never auto-formatted.
+Exact byte layout, digest domains, diagnostic codes, PILL2, framed ingress,
+bounded cue, and boot fallback rules are normative in
+`1499kernel/docs/I2-M2-CONTRACT.md`.
+Semihost `cold.img` is a lab/fault-injection transport only, not filesystem,
+fsync/rename, physical-media, or power-cut durability evidence.
 
 ---
 
@@ -218,8 +233,8 @@ Existing pure jets are **sufficient** for the shipped closed pure-Nock IEC lower
 
 | Knob | Where | Meaning |
 |------|-------|---------|
-| Pill version | PILL v2 bytes 9–12 LE; `noun_pill_version` / `KVER@` | Host packaging / live version for hot-swap |
-| Pill shape | byte 8; `KSHAPE` | 0 Arvo / 1 Shrine |
+| I1 pill | legacy 16-byte PILL v2 header | Frozen I1 compatibility path only |
+| I2 pill | PILL2 256-byte header + RuntimeIdentity | Strict I2 admission/restart anchor |
 | IEC `kver` | Nock `kstate` in app state (`docs/I1.md`) | **Profile / kernel schema** version — independent of pill header |
 
 **I1 host ABI (WP1–5):** no new **app-facing** effect tags required. Budget reuses `%timeout`. Overflow is host metrics/UART only. **No pill-version bump required** for consumers of the pure-Nock demo pill.

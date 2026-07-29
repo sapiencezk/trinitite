@@ -10,3 +10,7 @@ int  uart_getc_nb(uint8_t *out);
 void uart_puts(const char *s);
 void uart_read_bytes(uint8_t *buf, uint64_t n);
 void uart_write_bytes(const uint8_t *buf, uint64_t n);
+/* I2 service TX: poll no later than absolute CNTVCT deadline. */
+int  uart_putc_bounded(char c, uint64_t absolute_deadline);
+/* Deterministic QEMU/unit probe: affects only bounded I2 writes. */
+void uart_test_tx_stuck(int stuck);

@@ -10,6 +10,8 @@
 #include "net.h"
 #include "cold.h"
 #include "kernel.h"
+#include "runtime_identity.h"
+#include "i2_ingress.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
 #define CORD_OUT     7632239ULL              /* %out      */
@@ -56,17 +58,20 @@
 #define H62_I2_TIMER_CANCEL     0x00a0daca2d33f298ULL  /* "i2-timer-cancel" */
 #define H62_I2_SERVICE_REQUEST  0x35d925d61fab343bULL  /* "i2-service-request" */
 #define H62_I2_SERVICE_CANCEL   0x36d39945d04ddb18ULL  /* "i2-service-cancel" */
+#define CORD_I2_TIMER           0x72656d69742d3269ULL  /* "i2-timer" host→app */
 #define H62_I2_SERVICE          0x30cfa0e9c7ed95b9ULL  /* "i2-service" host→app */
 #define CORD_I2_CKPT            32774703826154089ULL   /* %i2-ckpt durable snap  */
-#define CKPT_VER                1ULL
 
 /* Host ABI D0 ceilings (subset of tools/i2 HostAbiLimits) */
 #define I2_MAX_TIMERS              TARM_MAX
 #define I2_MAX_PENDING_SERVICES    4
+#define I2_UART_TX_MAX_NS  1000000000ULL
 
 /* Auto-checkpoint: save live roots to cold store every N successful commits */
 static uint64_t g_ckpt_every;
 static uint64_t g_ckpt_commits;
+static noun g_activation_completions[I2_MAX_PENDING_SERVICES];
+static int g_activation_completion_n;
 
 #define TARM_MAX     16
 
@@ -77,6 +82,7 @@ static uint64_t g_ckpt_commits;
 extern jmp_buf nock_abort;
 extern int noun_pill_shape;
 extern uint32_t noun_pill_version;
+static int noun_take(noun n, noun *head, noun *tail);
 
 /* ── Phase 6 — live kernel + staging ─────────────────────────────────────── */
 
@@ -85,6 +91,9 @@ static int           g_shrine_mode;
 static uint32_t      g_live_version;
 static volatile int  g_i2_preparing;
 static noun build_slam_formula(void);
+static int build_slam_formula_checked(noun *out);
+static int make_timer_event_checked(noun token, noun *out);
+static noun g_slam_formula;
 
 static noun     g_staged_kernel;
 static int      g_staged_shape;
@@ -302,6 +311,22 @@ static noun make_i2_service_event(noun token)
     noun ev  = alloc_cell(tag, alloc_cell(tok, alloc_cell(st, NOUN_ZERO)));
     heap_set_mode(old);
     return ev;
+}
+
+static int make_i2_service_event_checked(noun token, noun *out)
+{
+    static const uint64_t tag_limbs[2] = {
+        0x69767265732d3269ULL, /* "i2-servi" */
+        0x0000000000006563ULL  /* "ce" */
+    };
+    noun tag, tok = token, status, body1, body0;
+    if (!make_atom_checked(tag_limbs, 2, &tag)
+        || (noun_is_cell(token) && !noun_copy_checked(token, &tok)))
+        return 0;
+    return alloc_cell_checked(direct(0), direct(0), &status)
+        && alloc_cell_checked(status, NOUN_ZERO, &body1)
+        && alloc_cell_checked(tok, body1, &body0)
+        && alloc_cell_checked(tag, body0, out);
 }
 
 /* CNTVCT ticks for delay_ns (I2 §16.2 publish conversion). */
@@ -615,9 +640,29 @@ void evq_enq_list(noun list)
  * Caller must retain scratch until after the corresponding activation pass
  * (the effect nouns remain in scratch until UART activation completes).
  */
-static noun persist_compact(noun new_gate, noun new_causes, noun effects)
+static int candidate_enqueue(noun event, int copy_event, noun *head,
+                             noun *tail, uint64_t *count)
+{
+    noun retained = event, node;
+    if ((copy_event && !noun_copy_checked(event, &retained))
+        || !alloc_cell_checked(retained, NOUN_ZERO, &node))
+        return 0;
+    if (!noun_is_cell(*head))
+        *head = *tail = node;
+    else {
+        ((cell_t *)(uintptr_t)cell_ptr(*tail))->tail = node;
+        *tail = node;
+    }
+    (*count)++;
+    return 1;
+}
+
+static int persist_compact(noun new_gate, noun new_causes, noun effects,
+                           noun *slam_out)
 {
     enum { QCAP = 256 };
+    if (!slam_out)
+        return 0;
 
     /* Capture queue chain head before we rebuild (still in old half) */
     noun old_q = g_evq;
@@ -635,18 +680,14 @@ static noun persist_compact(noun new_gate, noun new_causes, noun effects)
     heap_set_mode(HEAP_MODE_PERSIST);
 
     /* Build every candidate root without publishing a live root. */
-    noun candidate_gate = noun_copy(new_gate);
+    noun candidate_gate;
     noun candidate_q = NOUN_ZERO;
     noun candidate_tail = NOUN_ZERO;
     uint64_t candidate_n = 0;
-
-#define CANDIDATE_ENQ(ev) do { \
-    noun ce = noun_copy((ev)); \
-    noun cc = alloc_cell(ce, NOUN_ZERO); \
-    if (!noun_is_cell(candidate_q)) { candidate_q = cc; candidate_tail = cc; } \
-    else { ((cell_t *)(uintptr_t)cell_ptr(candidate_tail))->tail = cc; candidate_tail = cc; } \
-    candidate_n++; \
-} while (0)
+    noun candidate_completions[I2_MAX_PENDING_SERVICES];
+    int candidate_completion_n = 0;
+    if (!noun_copy_checked(new_gate, &candidate_gate))
+        goto alloc_fail;
 
     /* Prior queue events (old half) then new causes (scratch) */
     {
@@ -654,23 +695,30 @@ static noun persist_compact(noun new_gate, noun new_causes, noun effects)
         uint64_t n = 0;
         while (noun_is_cell(q) && n < QCAP) {
             cell_t *c = (cell_t *)(uintptr_t)cell_ptr(q);
-            CANDIDATE_ENQ(c->head);
+            if (!candidate_enqueue(
+                    c->head, 1, &candidate_q, &candidate_tail, &candidate_n))
+                goto alloc_fail;
             q = c->tail;
             n++;
         }
     }
     while (noun_is_cell(new_causes)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(new_causes);
-        CANDIDATE_ENQ(c->head);
+        if (!candidate_enqueue(
+                c->head, 1, &candidate_q, &candidate_tail, &candidate_n))
+            goto alloc_fail;
         new_causes = c->tail;
     }
 
     for (int i = 0; i < TARM_MAX; i++) {
-        if (candidate_tarms[i].i2_token != NOUN_ZERO)
-            candidate_tarms[i].i2_token = noun_copy(g_tarms[i].i2_token);
-        if (candidate_tarms[i].i2_token != NOUN_ZERO)
-            candidate_tarms[i].i2_event_cell = alloc_cell(
-                make_i2_timer_event(candidate_tarms[i].i2_token, 0), NOUN_ZERO);
+        if (candidate_tarms[i].i2_token != NOUN_ZERO) {
+            if (!noun_copy_checked(
+                    g_tarms[i].i2_token, &candidate_tarms[i].i2_token)
+                || !make_timer_event_checked(
+                    candidate_tarms[i].i2_token,
+                    &candidate_tarms[i].i2_event_cell))
+                goto alloc_fail;
+        }
     }
 
     /* Materialize every timer token and instant service completion before the
@@ -695,9 +743,11 @@ static noun persist_compact(noun new_gate, noun new_causes, noun effects)
             candidate_tarms[slot].id = i2_token_owner(token);
             candidate_tarms[slot].period = ns_to_cntvct_ticks(atom_u64_early(c->tail));
             candidate_tarms[slot].next = cntvct() + candidate_tarms[slot].period;
-            candidate_tarms[slot].i2_token = noun_copy(token);
-            candidate_tarms[slot].i2_event_cell = alloc_cell(
-                make_i2_timer_event(candidate_tarms[slot].i2_token, 0), NOUN_ZERO);
+            if (!noun_copy_checked(token, &candidate_tarms[slot].i2_token)
+                || !make_timer_event_checked(
+                    candidate_tarms[slot].i2_token,
+                    &candidate_tarms[slot].i2_event_cell))
+                goto alloc_fail;
         } else if (tag_is_i2_timer_cancel(tag, t)) {
             int slot = -1;
             for (int i = 0; i < TARM_MAX; i++)
@@ -711,17 +761,26 @@ static noun persist_compact(noun new_gate, noun new_causes, noun effects)
             candidate_tarms[slot].i2_event_cell = NOUN_ZERO;
         } else if (tag_is_i2_service_request(tag, t)) {
             cell_t *c = (cell_t *)(uintptr_t)cell_ptr(data);
-            CANDIDATE_ENQ(make_i2_service_event(c->head));
+            noun completion;
+            if (candidate_completion_n >= I2_MAX_PENDING_SERVICES
+                || !make_i2_service_event_checked(c->head, &completion)
+                || !candidate_enqueue(
+                    completion, 0, &candidate_q, &candidate_tail, &candidate_n))
+                goto alloc_fail;
+            candidate_completions[candidate_completion_n++] = completion;
         }
         fxcur = list->tail;
     }
 
     /* The fixed slam formula is a persistent root too.  Materialize it before
      * publication so formula allocation can still abort the transaction. */
-    noun candidate_slam = build_slam_formula();
+    noun candidate_slam;
+    if (!build_slam_formula_checked(&candidate_slam))
+        goto alloc_fail;
 
     /* The one publication point: no candidate allocation follows. */
     g_kernel = candidate_gate;
+    g_slam_formula = candidate_slam;
     g_evq = candidate_q;
     g_evq_tail = candidate_tail;
     g_evq_n = candidate_n;
@@ -729,9 +788,66 @@ static noun persist_compact(noun new_gate, noun new_causes, noun effects)
         g_evq_hwm = g_evq_n;
     for (int i = 0; i < TARM_MAX; i++)
         g_tarms[i] = candidate_tarms[i];
+    for (int i = 0; i < candidate_completion_n; i++)
+        g_activation_completions[i] = candidate_completions[i];
+    g_activation_completion_n = candidate_completion_n;
     heap_persist_commit_tx();
-#undef CANDIDATE_ENQ
-    return candidate_slam;
+    *slam_out = candidate_slam;
+    return 1;
+
+alloc_fail:
+    heap_persist_abort_tx();
+    return 0;
+}
+
+static int promotion_depth_selftest(void)
+{
+    noun old_kernel = g_kernel;
+    noun old_slam = g_slam_formula;
+    noun old_q = g_evq;
+    noun old_tail = g_evq_tail;
+    uint64_t old_qn = g_evq_n;
+    uint64_t old_cells = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t old_atoms = atom_store_bytes_used();
+    int old_completion_n = g_activation_completion_n;
+    tarm_t old_tarms[TARM_MAX];
+    for (int i = 0; i < TARM_MAX; i++)
+        old_tarms[i] = g_tarms[i];
+
+    heap_scratch_reset();
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return 0;
+    noun deep = NOUN_ZERO, node;
+    for (int i = 0; i < 256; i++) {
+        if (!alloc_cell_checked(NOUN_ZERO, deep, &node)) {
+            noun_tx_abort();
+            return 0;
+        }
+        deep = node;
+    }
+
+    noun unused_slam;
+    int rejected = !persist_compact(
+        deep, NOUN_ZERO, NOUN_ZERO, &unused_slam);
+    int unchanged = rejected
+        && g_kernel == old_kernel && g_slam_formula == old_slam
+        && g_evq == old_q && g_evq_tail == old_tail && g_evq_n == old_qn
+        && heap_cells_used(HEAP_MODE_PERSIST) == old_cells
+        && atom_store_bytes_used() == old_atoms
+        && g_activation_completion_n == old_completion_n;
+    for (int i = 0; i < TARM_MAX; i++) {
+        if (g_tarms[i].active != old_tarms[i].active
+            || g_tarms[i].id != old_tarms[i].id
+            || g_tarms[i].period != old_tarms[i].period
+            || g_tarms[i].next != old_tarms[i].next
+            || g_tarms[i].i2_token != old_tarms[i].i2_token
+            || g_tarms[i].i2_event_cell != old_tarms[i].i2_event_cell)
+            unchanged = 0;
+    }
+    noun_tx_abort();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return unchanged;
 }
 
 /* ── Phase 3 — IRQ ring (SPSC; capacity SIZE-1) ───────────────────────────── */
@@ -858,33 +974,63 @@ static uint64_t atom_u64(noun a)
 
 /* I2 service-request payload → UART bytes.  Completion admission is handled
  * separately by the transaction candidate builder. */
-static void i2_service_uart_print(noun data)
+static int atom_byte(noun atom, uint64_t offset, uint8_t *out)
+{
+    if (!noun_is_atom(atom) || !out)
+        return 0;
+    if (noun_is_direct(atom)) {
+        uint64_t v = direct_val(atom);
+        *out = offset < 8 ? (uint8_t)(v >> (offset * 8)) : 0;
+        return 1;
+    }
+    atom_t *at = atom_store_get(indirect_hash(atom));
+    if (!at)
+        return 0;
+    *out = offset < at->size * 8
+        ? ((const uint8_t *)at->limbs)[offset] : 0;
+    return 1;
+}
+
+static int i2_service_uart_print_bounded(noun data)
 {
     /* service-request ::= [token [cap [op [deadline payload]]]] */
     if (!noun_is_cell(data))
-        return;
+        return 0;
     cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(data);
     if (!noun_is_cell(c0->tail))
-        return;
+        return 0;
     cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
     if (!noun_is_cell(c1->tail))
-        return;
+        return 0;
     cell_t *c2 = (cell_t *)(uintptr_t)cell_ptr(c1->tail);
     if (!noun_is_cell(c2->tail))
-        return;
+        return 0;
     cell_t *c3 = (cell_t *)(uintptr_t)cell_ptr(c2->tail);
+    uint64_t deadline_ns = atom_u64(c3->head);
+    if (deadline_ns == 0 || deadline_ns > I2_UART_TX_MAX_NS)
+        return 0;
     noun payload = c3->tail;
     /* typed STRING: [tid [len bytes-atom]] */
-    if (noun_is_cell(payload)) {
-        cell_t *pv = (cell_t *)(uintptr_t)cell_ptr(payload);
-        if (noun_is_cell(pv->tail)) {
-            cell_t *sv = (cell_t *)(uintptr_t)cell_ptr(pv->tail);
-            atom_print_uart(sv->tail);
-            return;
-        }
+    if (!noun_is_cell(payload))
+        return 0;
+    cell_t *pv = (cell_t *)(uintptr_t)cell_ptr(payload);
+    if (!noun_is_direct(pv->head) || direct_val(pv->head) == 0
+        || !noun_is_cell(pv->tail))
+        return 0;
+    cell_t *sv = (cell_t *)(uintptr_t)cell_ptr(pv->tail);
+    uint64_t len = atom_u64(sv->head);
+    if (len > 256 || !noun_is_atom(sv->tail))
+        return 0;
+    uint64_t ticks = ns_to_cntvct_ticks(deadline_ns);
+    uint64_t now = cntvct();
+    uint64_t deadline = UINT64_MAX - now < ticks ? UINT64_MAX : now + ticks;
+    for (uint64_t i = 0; i < len; i++) {
+        uint8_t byte;
+        if (!atom_byte(sv->tail, i, &byte)
+            || !uart_putc_bounded((char)byte, deadline))
+            return 0;
     }
-    if (noun_is_atom(payload))
-        atom_print_uart(payload);
+    return 1;
 }
 
 /* Legacy direct dispatcher: print then allocate/enqueue an instant completion.
@@ -893,15 +1039,32 @@ static void i2_service_uart_tx(noun data)
 {
     noun token = noun_is_cell(data)
         ? ((cell_t *)(uintptr_t)cell_ptr(data))->head : NOUN_ZERO;
-    i2_service_uart_print(data);
+    (void)i2_service_uart_print_bounded(data);
     /* Instant completion (HostRunner instant_services): success status 0 */
     evq_enq(make_i2_service_event(token));
+}
+
+static void i2_service_completion_status(noun event, uint64_t code)
+{
+    if (!noun_is_cell(event))
+        return;
+    cell_t *outer = (cell_t *)(uintptr_t)cell_ptr(event);
+    if (!noun_is_cell(outer->tail))
+        return;
+    cell_t *body0 = (cell_t *)(uintptr_t)cell_ptr(outer->tail);
+    if (!noun_is_cell(body0->tail))
+        return;
+    cell_t *body1 = (cell_t *)(uintptr_t)cell_ptr(body0->tail);
+    if (!noun_is_cell(body1->head))
+        return;
+    ((cell_t *)(uintptr_t)cell_ptr(body1->head))->head = direct(code);
 }
 
 static void dispatch_i2_activate(noun effects)
 {
     /* This is intentionally guarded in production and QEMU: a future effect
      * implementation cannot silently reintroduce a post-publish allocation. */
+    int completion_i = 0;
     heap_noalloc_begin();
     while (noun_is_cell(effects)) {
         cell_t *list = (cell_t *)(uintptr_t)cell_ptr(effects);
@@ -909,13 +1072,111 @@ static void dispatch_i2_activate(noun effects)
         noun tag = fx->head;
         noun data = fx->tail;
         uint64_t t = noun_is_direct(tag) ? direct_val(tag) : 0;
-        if (tag_is_i2_service_request(tag, t))
-            i2_service_uart_print(data);
+        if (tag_is_i2_service_request(tag, t)) {
+            int ok = i2_service_uart_print_bounded(data);
+            if (completion_i < g_activation_completion_n)
+                i2_service_completion_status(
+                    g_activation_completions[completion_i], ok ? 0 : 6);
+            completion_i++;
+        }
         /* Timer set/cancel and service completion insertion were fully
          * materialized in persist_compact(); cancellation has no driver work. */
         effects = list->tail;
     }
     heap_noalloc_end();
+    g_activation_completion_n = 0;
+}
+
+static int test_completion(noun token, uint64_t status_code, noun *out)
+{
+    if (!make_i2_service_event_checked(token, out))
+        return 0;
+    i2_service_completion_status(*out, status_code);
+    return 1;
+}
+
+static int test_completion_code(noun event, uint64_t *out)
+{
+    noun tag, body0, token, body1, status, data, code, detail;
+    return noun_take(event, &tag, &body0)
+        && noun_take(body0, &token, &body1)
+        && noun_take(body1, &status, &data)
+        && noun_take(status, &code, &detail)
+        && noun_is_direct(code)
+        && ((*out = direct_val(code)), 1);
+}
+
+uint64_t kernel_tx_stuck_selftest(void)
+{
+    uint64_t failures = 0;
+    noun n0, n1, token, payload, req3, req2, req1, request;
+    noun effect, effects, completion0, completion1;
+
+    heap_scratch_reset();
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return UINT64_MAX;
+    /* token = [1 1 7 1] */
+    if (!alloc_cell_checked(direct(7), direct(1), &n0)
+        || !alloc_cell_checked(direct(1), n0, &n1)
+        || !alloc_cell_checked(direct(1), n1, &token)
+        /* typed STRING = [1 [1 "X"]] */
+        || !alloc_cell_checked(direct(1), direct('X'), &n0)
+        || !alloc_cell_checked(direct(1), n0, &payload)
+        /* request = [token [CAP_UART [op [1ms payload]]]] */
+        || !alloc_cell_checked(direct(1000000), payload, &req3)
+        || !alloc_cell_checked(direct(1), req3, &req2)
+        || !alloc_cell_checked(direct(1), req2, &req1)
+        || !alloc_cell_checked(token, req1, &request)
+        || !alloc_cell_checked(
+            indirect(H62_I2_SERVICE_REQUEST), request, &effect)
+        || !alloc_cell_checked(effect, NOUN_ZERO, &effects)
+        || !test_completion(token, 0, &completion0)
+        || !test_completion(token, 99, &completion1)) {
+        noun_tx_abort();
+        heap_scratch_reset();
+        return UINT64_MAX;
+    }
+
+    noun reserved_q = NOUN_ZERO, reserved_tail = NOUN_ZERO;
+    uint64_t reserved_n = 0;
+    if (!candidate_enqueue(
+            completion0, 0, &reserved_q, &reserved_tail, &reserved_n)
+        || reserved_n != 1 || !noun_is_cell(reserved_q)
+        || ((cell_t *)(uintptr_t)cell_ptr(reserved_q))->head != completion0) {
+        noun_tx_abort();
+        heap_scratch_reset();
+        return UINT64_MAX;
+    }
+    noun reserved_completion =
+        ((cell_t *)(uintptr_t)cell_ptr(reserved_q))->head;
+    uint64_t cells_before = heap_cells_used(HEAP_MODE_SCRATCH);
+    uint64_t atoms_before = atom_store_bytes_used();
+    g_activation_completions[0] = completion0;
+    g_activation_completions[1] = completion1;
+    g_activation_completion_n = 1;
+    uart_test_tx_stuck(1);
+    dispatch_i2_activate(effects);
+    uart_test_tx_stuck(0);
+
+    uint64_t code0 = 0, code1 = 0;
+    if (!test_completion_code(completion0, &code0) || code0 != 6)
+        failures++;
+    if (!test_completion_code(reserved_completion, &code0) || code0 != 6)
+        failures++;
+    if (!test_completion_code(completion1, &code1) || code1 != 99)
+        failures++;
+    if (g_activation_completion_n != 0)
+        failures++;
+    if (heap_cells_used(HEAP_MODE_SCRATCH) != cells_before
+        || atom_store_bytes_used() != atoms_before)
+        failures++;
+
+    noun_tx_abort();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    if (!promotion_depth_selftest())
+        failures++;
+    return failures;
 }
 
 /*
@@ -999,7 +1260,18 @@ static int i2_preflight_effects(noun effects, noun causes)
                 return 0;
             cell_t *c3 = (cell_t *)(uintptr_t)cell_ptr(c2->tail);
             uint64_t deadline = atom_u64(c3->head);
-            if (deadline == 0)
+            if (deadline == 0 || deadline > I2_UART_TX_MAX_NS)
+                return 0;
+            noun payload = c3->tail;
+            if (!noun_is_cell(payload))
+                return 0;
+            cell_t *pv = (cell_t *)(uintptr_t)cell_ptr(payload);
+            if (!noun_is_direct(pv->head) || direct_val(pv->head) == 0
+                || !noun_is_cell(pv->tail))
+                return 0;
+            cell_t *sv = (cell_t *)(uintptr_t)cell_ptr(pv->tail);
+            if (!noun_is_direct(sv->head) || direct_val(sv->head) > 256
+                || !noun_is_atom(sv->tail))
                 return 0;
             new_svcs++;
             if (new_svcs > I2_MAX_PENDING_SERVICES)
@@ -1242,6 +1514,19 @@ static noun build_slam_formula(void) {
                alloc_cell(direct(0), direct(2))))));
 }
 
+static int build_slam_formula_checked(noun *out)
+{
+    noun n0, n1, n2, n3, n4, n5, n6;
+    return alloc_cell_checked(direct(0), direct(3), &n0)
+        && alloc_cell_checked(direct(6), n0, &n1)
+        && alloc_cell_checked(direct(0), direct(2), &n2)
+        && alloc_cell_checked(n1, n2, &n3)
+        && alloc_cell_checked(direct(10), n3, &n4)
+        && alloc_cell_checked(direct(2), n4, &n5)
+        && alloc_cell_checked(direct(9), n5, &n6)
+        && ((*out = n6), 1);
+}
+
 /* ── Crash recovery policy (WP4) ─────────────────────────────────────────── */
 /*
  * Hard crash (default): clear evq + IRQ ring + all tarms.
@@ -1292,12 +1577,22 @@ uint64_t slam_budget_get(void)
     return g_slam_budget;
 }
 
+static void reject_event_scratch(void)
+{
+    if (noun_tx_active())
+        noun_tx_abort();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+}
+
 static void kernel_loop(noun kernel_init, int shrine)
 {
     g_kernel       = kernel_init;
     g_shrine_mode  = shrine ? 1 : 0;
     g_live_version = noun_pill_version;  /* from pill header if any */
-    noun slam = build_slam_formula();
+    if (!noun_is_cell(g_slam_formula))
+        g_slam_formula = build_slam_formula();
+    noun slam = g_slam_formula;
     /* Mid-eval wall: poll deadline every 256 ops inside nock_budget_tick */
     nock_wall_check_set(deadline_expired);
     uart_puts(g_shrine_mode ? "\r\ntrinitite shrine\r\n"
@@ -1309,6 +1604,8 @@ static void kernel_loop(noun kernel_init, int shrine)
             uart_puts("\r\nkernel crash\r\n");
             heap_noalloc_end();
             heap_persist_abort_tx();
+            if (noun_tx_active())
+                noun_tx_abort();
             if (g_i2_preparing) {
                 /* Candidate allocation failed before publication.  Roll back
                  * allocator state only; old gate/FIFO/registries are still
@@ -1331,6 +1628,7 @@ static void kernel_loop(noun kernel_init, int shrine)
             trace_rec(T_BUD, (uint32_t)nock_ops_used());
             emit_timeout(nock_ops_used());
             deadline_set(0);
+            reject_event_scratch();
             continue;
         }
 
@@ -1353,6 +1651,7 @@ static void kernel_loop(noun kernel_init, int shrine)
         tarm_poll();
 
         noun event;
+        int event_from_i2_rx = 0;
         if (!evq_deq(&event)) {
             /*
              * Idle path (WP1): do not block forever in uart_recv_noun.
@@ -1360,11 +1659,20 @@ static void kernel_loop(noun kernel_init, int shrine)
              * keep polling multi-arm timers + soft WDT so period-driven
              * IEC graphs advance without a second host poke.
              *
-             * Once RX has a byte, take a full framed noun (remaining
-             * bytes may still block briefly mid-frame — acceptable).
+             * RX advances by a fixed byte budget per pass. Partial/malformed
+             * frames therefore coexist with timer and watchdog polling.
              */
             for (;;) {
-                if (uart_rx_ready()) {
+                if (runtime_identity_live()) {
+                    if (i2_rx_poll(32)) {
+                        heap_scratch_reset();
+                        heap_set_mode(HEAP_MODE_SCRATCH);
+                        if (i2_rx_take(&event)) {
+                            event_from_i2_rx = 1;
+                            break;
+                        }
+                    }
+                } else if (uart_rx_ready()) {
                     event = uart_recv_noun();
                     break;
                 }
@@ -1388,7 +1696,8 @@ static void kernel_loop(noun kernel_init, int shrine)
         }
 
         /* Per-event scratch: Nock product dies after promote/dispatch */
-        heap_scratch_reset();
+        if (!event_from_i2_rx)
+            heap_scratch_reset();
         heap_set_mode(HEAP_MODE_SCRATCH);
 
         nock_budget_set(g_slam_budget);
@@ -1404,15 +1713,13 @@ static void kernel_loop(noun kernel_init, int shrine)
         if (deadline_expired()) {
             emit_timeout(0);
             deadline_set(0);
-            heap_set_mode(HEAP_MODE_PERSIST);
-            heap_scratch_reset();
+            reject_event_scratch();
             continue;
         }
 
         if (!noun_is_cell(result)) {
             uart_puts("bad result\r\n");
-            heap_set_mode(HEAP_MODE_PERSIST);
-            heap_scratch_reset();
+            reject_event_scratch();
             continue;
         }
         cell_t *r = (cell_t *)(uintptr_t)cell_ptr(result);
@@ -1429,16 +1736,14 @@ static void kernel_loop(noun kernel_init, int shrine)
             if (rh == CORD_COMMIT) {
                 if (!noun_is_cell(r->tail)) {
                     uart_puts("bad result\r\n");
-                    heap_set_mode(HEAP_MODE_PERSIST);
-                    heap_scratch_reset();
+                    reject_event_scratch();
                     continue;
                 }
                 cell_t *prod = (cell_t *)(uintptr_t)cell_ptr(r->tail);
                 noun effects = prod->head;
                 if (!noun_is_cell(prod->tail)) {
                     uart_puts("bad result\r\n");
-                    heap_set_mode(HEAP_MODE_PERSIST);
-                    heap_scratch_reset();
+                    reject_event_scratch();
                     continue;
                 }
                 cell_t *gc = (cell_t *)(uintptr_t)cell_ptr(prod->tail);
@@ -1448,18 +1753,25 @@ static void kernel_loop(noun kernel_init, int shrine)
                         pf_uart = 1;
                         uart_puts("preflight\r\n");
                     }
-                    heap_set_mode(HEAP_MODE_PERSIST);
-                    heap_scratch_reset();
+                    reject_event_scratch();
                     continue;
                 }
                 /*
                  * Compact PERSIST to live roots (gate + queue + tokens + causes).
                  * Slam formula was on old persist — rebuild after compact.
                  * Effects stay in SCRATCH until dispatch finishes.
-                 */
+                */
                 g_i2_preparing = 1;
-                slam = persist_compact(gc->head, gc->tail, effects);
+                if (!persist_compact(
+                        gc->head, gc->tail, effects, &slam)) {
+                    g_i2_preparing = 0;
+                    uart_puts("promote\r\n");
+                    reject_event_scratch();
+                    continue;
+                }
                 g_i2_preparing = 0;
+                if (noun_tx_active())
+                    noun_tx_commit();
                 dispatch_i2_activate(effects);
                 heap_set_mode(HEAP_MODE_PERSIST);
                 heap_scratch_reset();
@@ -1473,10 +1785,18 @@ static void kernel_loop(noun kernel_init, int shrine)
             }
             if (rh == CORD_ABORT) {
                 /* keep g_kernel; drop effects (Host ABI abort path) */
-                heap_set_mode(HEAP_MODE_PERSIST);
-                heap_scratch_reset();
+                reject_event_scratch();
                 continue;
             }
+        }
+
+        /* An identity-admitted I2 gate may not fall back to the legacy I1
+         * Shrine product grammar. The compatibility path is selected only by
+         * a legacy pill lacking the I2 magic/identity anchor. */
+        if (runtime_identity_live()) {
+            uart_puts("bad result\r\n");
+            reject_event_scratch();
+            continue;
         }
 
         noun effects = r->head;
@@ -1484,12 +1804,16 @@ static void kernel_loop(noun kernel_init, int shrine)
         if (g_shrine_mode) {
             if (!noun_is_cell(r->tail)) {
                 uart_puts("bad result\r\n");
-                heap_set_mode(HEAP_MODE_PERSIST);
-                heap_scratch_reset();
+                reject_event_scratch();
                 continue;
             }
             cell_t *r2 = (cell_t *)(uintptr_t)cell_ptr(r->tail);
-            slam = persist_compact(r2->head, r2->tail, NOUN_ZERO);
+            if (!persist_compact(
+                    r2->head, r2->tail, NOUN_ZERO, &slam)) {
+                uart_puts("promote\r\n");
+                reject_event_scratch();
+                continue;
+            }
         } else {
             g_kernel = noun_persist(r->tail);
         }
@@ -1517,6 +1841,8 @@ void shrine_gate_set(noun gate)
     heap_set_mode(HEAP_MODE_PERSIST);
     g_kernel = noun_persist(gate);
     g_shrine_mode = 1;
+    g_slam_formula = NOUN_ZERO;
+    runtime_identity_clear();
 }
 
 noun shrine_gate_get(void)
@@ -1540,150 +1866,703 @@ uint64_t checkpoint_auto_get(void)
     return g_ckpt_every;
 }
 
-/*
- * Capture: [%i2-ckpt ver shrine gate queue tarms]
- * tarms entry: [id [period [remain-ticks token]]]
- * remain-ticks relative so restore is phase-preserving without absolute CNTVCT.
- */
-noun checkpoint_capture(void)
-{
-    int old = heap_get_mode();
-    heap_set_mode(HEAP_MODE_PERSIST);
+#define CKPT_VER 2ULL
+#define H62_I2_LIFECYCLE 0x13ee37098c30ee2fULL
+#define H62_I2_CONTROL   0x3c349df1606d200dULL
+#define CORD_I2_EI       0x69652d3269ULL
 
+typedef struct {
+    noun gate;
+    noun queue;
+    noun tarms;
+    runtime_identity_t identity;
+    uint64_t incarnation;
+    uint64_t queue_n;
+    uint64_t timer_n;
+} checkpoint_view_t;
+
+static int g_checkpoint_last_result;
+static uint64_t g_checkpoint_selected_generation;
+
+static int noun_take(noun n, noun *head, noun *tail)
+{
+    if (!noun_is_cell(n))
+        return 0;
+    cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
+    *head = c->head;
+    *tail = c->tail;
+    return 1;
+}
+
+static int positive_direct(noun n, uint64_t *out)
+{
+    if (!noun_is_direct(n) || direct_val(n) == 0)
+        return 0;
+    if (out)
+        *out = direct_val(n);
+    return 1;
+}
+
+static int token_fields(noun token, uint64_t *gen, uint64_t *inc,
+                        uint64_t *owner, uint64_t *seq)
+{
+    noun h, rest;
+    return noun_take(token, &h, &rest) && positive_direct(h, gen)
+        && noun_take(rest, &h, &rest) && positive_direct(h, inc)
+        && noun_take(rest, &h, &rest) && positive_direct(h, owner)
+        && positive_direct(rest, seq);
+}
+
+static int token_unique(noun token, noun *tokens, uint64_t *count,
+                        uint64_t cap)
+{
+    for (uint64_t i = 0; i < *count; i++)
+        if (noun_eq(tokens[i], token))
+            return 0;
+    if (*count >= cap)
+        return 0;
+    tokens[(*count)++] = token;
+    return 1;
+}
+
+static int proper_samples(noun samples)
+{
+    uint64_t last = 0;
+    uint64_t n = 0;
+    while (noun_is_cell(samples)) {
+        if (++n > 256)
+            return 0;
+        cell_t *list = (cell_t *)(uintptr_t)cell_ptr(samples);
+        noun id, value;
+        if (!noun_take(list->head, &id, &value)
+            || !noun_is_direct(id) || direct_val(id) <= last)
+            return 0;
+        last = direct_val(id);
+        samples = list->tail;
+    }
+    return samples == NOUN_ZERO;
+}
+
+static int validate_queued_event(noun event, uint64_t generation,
+                                 uint64_t incarnation, noun *tokens,
+                                 uint64_t *token_n, uint64_t token_cap)
+{
+    noun tag, rest;
+    if (!noun_take(event, &tag, &rest) || !noun_is_atom(tag))
+        return 0;
+    uint64_t direct_tag = noun_is_direct(tag) ? direct_val(tag) : 0;
+    uint64_t h = noun_is_indirect(tag) ? indirect_hash(tag) : 0;
+    if (noun_is_direct(tag) && direct_val(tag) == CORD_I2_EI) {
+        noun target, input, samples;
+        return noun_take(rest, &target, &rest) && positive_direct(target, 0)
+            && noun_take(rest, &input, &samples) && positive_direct(input, 0)
+            && proper_samples(samples);
+    }
+    if (h == H62_I2_LIFECYCLE || h == H62_I2_CONTROL)
+        return noun_is_atom(rest) && rest != NOUN_ZERO;
+    int timer_event = direct_tag == CORD_I2_TIMER;
+    if (timer_event || h == H62_I2_SERVICE) {
+        noun token, tail;
+        uint64_t gen, inc, owner, seq;
+        if (!noun_take(rest, &token, &tail)
+            || !token_fields(token, &gen, &inc, &owner, &seq)
+            || gen != generation || inc != incarnation
+            || !token_unique(token, tokens, token_n, token_cap))
+            return 0;
+        if (timer_event)
+            return noun_is_direct(tail);
+        noun status, data, code, detail;
+        return noun_take(tail, &status, &data)
+            && noun_take(status, &code, &detail)
+            && noun_is_direct(code) && noun_is_direct(detail);
+    }
+    return 0;
+}
+
+static int checkpoint_validate(noun ckpt, checkpoint_view_t *view)
+{
+    noun tag, rest, version, identity_noun, shrine, gate, queue, tarms;
+    const runtime_identity_t *live = runtime_identity_get();
+    if (!view || !live
+        || !noun_take(ckpt, &tag, &rest)
+        || !noun_is_direct(tag) || direct_val(tag) != CORD_I2_CKPT
+        || !noun_take(rest, &version, &rest)
+        || !noun_is_direct(version) || direct_val(version) != CKPT_VER
+        || !noun_take(rest, &identity_noun, &rest)
+        || !runtime_identity_from_noun(identity_noun, &view->identity)
+        || !runtime_identity_equal(&view->identity, live)
+        || !noun_take(rest, &shrine, &rest)
+        || !noun_is_direct(shrine) || direct_val(shrine) != 1
+        || !noun_take(rest, &gate, &rest)
+        || !noun_take(rest, &queue, &tarms)
+        || !runtime_identity_validate_gate(
+            gate, &view->identity, &view->incarnation))
+        return 0;
+
+    noun tokens[EVQ_CAP + TARM_MAX];
+    uint64_t token_n = 0;
+    noun q = queue;
+    uint64_t qn = 0;
+    while (noun_is_cell(q)) {
+        if (++qn > EVQ_CAP)
+            return 0;
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(q);
+        if (!validate_queued_event(
+                c->head, view->identity.generation, view->incarnation,
+                tokens, &token_n, EVQ_CAP + TARM_MAX))
+            return 0;
+        q = c->tail;
+    }
+    if (q != NOUN_ZERO)
+        return 0;
+
+    noun ids[TARM_MAX];
+    uint64_t id_n = 0;
+    noun tl = tarms;
+    uint64_t tn = 0;
+    while (noun_is_cell(tl)) {
+        if (++tn > TARM_MAX)
+            return 0;
+        cell_t *le = (cell_t *)(uintptr_t)cell_ptr(tl);
+        noun id_noun, erest, period_noun, remain_noun, token;
+        uint64_t id, period, remain, gen, inc, owner, seq;
+        if (!noun_take(le->head, &id_noun, &erest)
+            || !positive_direct(id_noun, &id)
+            || !noun_take(erest, &period_noun, &erest)
+            || !positive_direct(period_noun, &period)
+            || !noun_take(erest, &remain_noun, &token)
+            || !positive_direct(remain_noun, &remain)
+            || !token_fields(token, &gen, &inc, &owner, &seq)
+            || gen != view->identity.generation
+            || inc != view->incarnation || owner != id
+            || !token_unique(token, tokens, &token_n, EVQ_CAP + TARM_MAX))
+            return 0;
+        for (uint64_t i = 0; i < id_n; i++)
+            if (direct_val(ids[i]) == id)
+                return 0;
+        ids[id_n++] = id_noun;
+        tl = le->tail;
+    }
+    if (tl != NOUN_ZERO)
+        return 0;
+    view->gate = gate;
+    view->queue = queue;
+    view->tarms = tarms;
+    view->queue_n = qn;
+    view->timer_n = tn;
+    return 1;
+}
+
+static int checkpoint_identity_matches(noun ckpt, int *identity_represented)
+{
+    noun tag, rest, version, identity_noun;
+    runtime_identity_t identity;
+    const runtime_identity_t *live = runtime_identity_get();
+    *identity_represented = 0;
+    if (!live
+        || !noun_take(ckpt, &tag, &rest)
+        || !noun_is_direct(tag) || direct_val(tag) != CORD_I2_CKPT
+        || !noun_take(rest, &version, &rest)
+        || !noun_is_direct(version) || direct_val(version) != CKPT_VER
+        || !noun_take(rest, &identity_noun, &rest)
+        || !runtime_identity_from_noun(identity_noun, &identity))
+        return 0;
+    *identity_represented = 1;
+    return runtime_identity_equal(&identity, live);
+}
+
+static int make_timer_event_checked(noun token, noun *out)
+{
+    noun body, event, cell;
+    return alloc_cell_checked(token, direct(0), &body)
+        && alloc_cell_checked(direct(CORD_I2_TIMER), body, &event)
+        && alloc_cell_checked(event, NOUN_ZERO, &cell)
+        && ((*out = cell), 1);
+}
+
+static int checkpoint_capture_checked(noun *out)
+{
+    const runtime_identity_t *identity = runtime_identity_get();
+    uint64_t incarnation;
+    if (!out || !identity || !noun_is_cell(g_kernel) || !g_shrine_mode
+        || !runtime_identity_validate_gate(g_kernel, identity, &incarnation))
+        return 0;
+    noun identity_noun, queue, gate;
+    if (!runtime_identity_to_noun(identity, &identity_noun)
+        || !noun_copy_checked(g_evq, &queue)
+        || !noun_copy_checked(g_kernel, &gate))
+        return 0;
     uint64_t now = cntvct();
     noun tarms = NOUN_ZERO;
     for (int i = TARM_MAX - 1; i >= 0; i--) {
         if (!g_tarms[i].active)
             continue;
-        uint64_t remain = 1;
-        if (g_tarms[i].next > now)
-            remain = g_tarms[i].next - now;
-        noun tok = g_tarms[i].i2_token;
-        if (noun_is_cell(tok))
-            tok = noun_copy(tok);
-        noun ent = alloc_cell(direct(g_tarms[i].id),
-                   alloc_cell(direct(g_tarms[i].period),
-                   alloc_cell(direct(remain), tok)));
-        tarms = alloc_cell(ent, tarms);
+        uint64_t gen, inc, owner, seq;
+        if (!token_fields(g_tarms[i].i2_token, &gen, &inc, &owner, &seq)
+            || gen != identity->generation || inc != incarnation
+            || owner != g_tarms[i].id || g_tarms[i].period == 0)
+            return 0;
+        uint64_t remain = g_tarms[i].next > now
+            ? g_tarms[i].next - now : 1;
+        noun tok, n0, n1, ent, list;
+        if (!noun_copy_checked(g_tarms[i].i2_token, &tok)
+            || !alloc_cell_checked(direct(remain), tok, &n0)
+            || !alloc_cell_checked(direct(g_tarms[i].period), n0, &n1)
+            || !alloc_cell_checked(direct(g_tarms[i].id), n1, &ent)
+            || !alloc_cell_checked(ent, tarms, &list))
+            return 0;
+        tarms = list;
     }
+    noun n0, n1, n2, n3, n4, ckpt;
+    if (!alloc_cell_checked(queue, tarms, &n0)
+        || !alloc_cell_checked(gate, n0, &n1)
+        || !alloc_cell_checked(direct(1), n1, &n2)
+        || !alloc_cell_checked(identity_noun, n2, &n3)
+        || !alloc_cell_checked(direct(CKPT_VER), n3, &n4)
+        || !alloc_cell_checked(direct(CORD_I2_CKPT), n4, &ckpt))
+        return 0;
+    *out = ckpt;
+    return 1;
+}
 
-    noun queue = noun_copy(g_evq);
-    noun gate  = noun_copy(g_kernel);
-    noun ckpt  = alloc_cell(direct(CORD_I2_CKPT),
-                 alloc_cell(direct(CKPT_VER),
-                 alloc_cell(direct(g_shrine_mode ? 1ULL : 0ULL),
-                 alloc_cell(gate,
-                 alloc_cell(queue, tarms)))));
-
-    heap_set_mode(old);
-    return ckpt;
+noun checkpoint_capture(void)
+{
+    noun out = NOUN_ZERO;
+    if (!checkpoint_capture_checked(&out))
+        return NOUN_ZERO;
+    return out;
 }
 
 int checkpoint_install(noun ckpt)
 {
-    if (!noun_is_cell(ckpt))
+    checkpoint_view_t view = {0};
+    int identity_represented = 0;
+    if (!checkpoint_identity_matches(ckpt, &identity_represented)) {
+        g_checkpoint_last_result = identity_represented
+            ? COLD_RESULT_IDENTITY : COLD_RESULT_SHAPE;
+        if (noun_tx_active())
+            noun_tx_abort();
         return -1;
-    cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(ckpt);
-    if (!noun_is_direct(c0->head) || direct_val(c0->head) != CORD_I2_CKPT)
+    }
+    if (!checkpoint_validate(ckpt, &view)) {
+        g_checkpoint_last_result = COLD_RESULT_SHAPE;
+        if (noun_tx_active())
+            noun_tx_abort();
         return -1;
-    if (!noun_is_cell(c0->tail))
-        return -1;
-    cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
-    if (!noun_is_direct(c1->head) || direct_val(c1->head) != CKPT_VER)
-        return -1;
-    if (!noun_is_cell(c1->tail))
-        return -1;
-    cell_t *c2 = (cell_t *)(uintptr_t)cell_ptr(c1->tail);
-    uint64_t shrine = atom_u64_early(c2->head);
-    if (!noun_is_cell(c2->tail))
-        return -1;
-    cell_t *c3 = (cell_t *)(uintptr_t)cell_ptr(c2->tail);
-    noun gate = c3->head;
-    if (!noun_is_cell(c3->tail))
-        return -1;
-    cell_t *c4 = (cell_t *)(uintptr_t)cell_ptr(c3->tail);
-    noun queue = c4->head;
-    noun tarms = c4->tail;
-
-    /* Fresh persist half; install roots (old half readable during copy) */
-    tarm_clear();
-    evq_clear();
-    heap_persist_flip();
-    heap_set_mode(HEAP_MODE_PERSIST);
-
-    g_kernel      = noun_copy(gate);
-    g_shrine_mode = shrine ? 1 : 0;
-
-    {
-        noun q = queue;
-        uint64_t n = 0;
-        while (noun_is_cell(q) && n < EVQ_CAP) {
-            cell_t *c = (cell_t *)(uintptr_t)cell_ptr(q);
-            evq_enq(c->head);
-            q = c->tail;
-            n++;
-        }
     }
 
+    tarm_t candidate_tarms[TARM_MAX] = {0};
+    noun candidate_gate, candidate_q = NOUN_ZERO, candidate_tail = NOUN_ZERO;
+    noun candidate_slam;
+    uint64_t candidate_n = 0;
     uint64_t now = cntvct();
-    noun tl = tarms;
+
+    heap_persist_begin_tx();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    if (!noun_copy_checked(view.gate, &candidate_gate))
+        goto alloc_fail;
+
+    noun q = view.queue;
+    while (noun_is_cell(q)) {
+        cell_t *old = (cell_t *)(uintptr_t)cell_ptr(q);
+        noun event, node;
+        if (!noun_copy_checked(old->head, &event)
+            || !alloc_cell_checked(event, NOUN_ZERO, &node))
+            goto alloc_fail;
+        if (!noun_is_cell(candidate_q))
+            candidate_q = candidate_tail = node;
+        else {
+            ((cell_t *)(uintptr_t)cell_ptr(candidate_tail))->tail = node;
+            candidate_tail = node;
+        }
+        candidate_n++;
+        q = old->tail;
+    }
+
+    noun tl = view.tarms;
+    int ti = 0;
     while (noun_is_cell(tl)) {
         cell_t *le = (cell_t *)(uintptr_t)cell_ptr(tl);
-        noun ent = le->head;
+        noun id_noun = 0, erest = 0, period_noun = 0;
+        noun remain_noun = 0, token = 0;
+        noun copied_token, event_cell;
+        if (!noun_take(le->head, &id_noun, &erest)
+            || !noun_take(erest, &period_noun, &erest)
+            || !noun_take(erest, &remain_noun, &token))
+            goto alloc_fail;
+        uint64_t remain = direct_val(remain_noun);
+        if (UINT64_MAX - now < remain
+            || !noun_copy_checked(token, &copied_token)
+            || !make_timer_event_checked(copied_token, &event_cell))
+            goto alloc_fail;
+        candidate_tarms[ti].active = 1;
+        candidate_tarms[ti].id = direct_val(id_noun);
+        candidate_tarms[ti].period = direct_val(period_noun);
+        candidate_tarms[ti].next = now + remain;
+        candidate_tarms[ti].i2_token = copied_token;
+        candidate_tarms[ti].i2_event_cell = event_cell;
+        ti++;
         tl = le->tail;
-        if (!noun_is_cell(ent))
-            continue;
-        cell_t *e0 = (cell_t *)(uintptr_t)cell_ptr(ent);
-        uint64_t id = atom_u64_early(e0->head);
-        if (!noun_is_cell(e0->tail))
-            continue;
-        cell_t *e1 = (cell_t *)(uintptr_t)cell_ptr(e0->tail);
-        uint64_t period = atom_u64_early(e1->head);
-        if (!noun_is_cell(e1->tail))
-            continue;
-        cell_t *e2 = (cell_t *)(uintptr_t)cell_ptr(e1->tail);
-        uint64_t remain = atom_u64_early(e2->head);
-        noun tok = e2->tail;
-        if (period == 0 || id == 0)
-            continue;
-        int i = tarm_free_slot();
-        if (i < 0)
-            break;
-        if (remain == 0)
-            remain = 1;
-        g_tarms[i].active   = 1;
-        g_tarms[i].id       = id;
-        g_tarms[i].period   = period;
-        g_tarms[i].next     = now + remain;
-        if (noun_is_cell(tok))
-            g_tarms[i].i2_token = noun_copy(tok);
-        else
-            g_tarms[i].i2_token = NOUN_ZERO;
-        if (g_tarms[i].i2_token != NOUN_ZERO)
-            g_tarms[i].i2_event_cell = alloc_cell(
-                make_i2_timer_event(g_tarms[i].i2_token, 0), NOUN_ZERO);
-        else
-            g_tarms[i].i2_event_cell = NOUN_ZERO;
     }
+    if (!build_slam_formula_checked(&candidate_slam))
+        goto alloc_fail;
 
+    /* One publication after complete validation and candidate allocation. */
+    g_kernel = candidate_gate;
+    g_slam_formula = candidate_slam;
+    g_shrine_mode = 1;
+    g_evq = candidate_q;
+    g_evq_tail = candidate_tail;
+    g_evq_n = candidate_n;
+    if (g_evq_n > g_evq_hwm)
+        g_evq_hwm = g_evq_n;
+    for (int i = 0; i < TARM_MAX; i++)
+        g_tarms[i] = candidate_tarms[i];
+    heap_persist_commit_tx();
+    if (noun_tx_active())
+        noun_tx_commit();
+    g_checkpoint_last_result = COLD_RESULT_VALID;
+    g_checkpoint_selected_generation = cold_selected_generation();
     return 0;
+
+alloc_fail:
+    heap_persist_abort_tx();
+    if (noun_tx_active())
+        noun_tx_abort();
+    g_checkpoint_last_result = COLD_RESULT_ALLOC;
+    return -1;
 }
 
 int checkpoint_save(void)
 {
-    if (!noun_is_cell(g_kernel))
+    if (!runtime_identity_live() || !noun_is_cell(g_kernel))
         return -1;
-    noun ck = checkpoint_capture();
-    /* RAM cold window only — NVFLUSH separately (needs QEMU -semihosting) */
-    return cold_snap_save(ck);
+    heap_scratch_reset();
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return -1;
+    noun ck;
+    if (!checkpoint_capture_checked(&ck)) {
+        noun_tx_abort();
+        heap_set_mode(HEAP_MODE_PERSIST);
+        heap_scratch_reset();
+        return -1;
+    }
+    int result = cold_snap_save(ck);
+    noun_tx_abort(); /* save image owns bytes; temporary noun owns no live root */
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    if (result == 0 && cold_nv_enabled())
+        result = cold_nv_flush();
+    return result;
 }
 
 int checkpoint_load(void)
 {
-    noun ck = cold_snap_load();
-    if (!noun_is_cell(ck))
+    noun ck;
+    if (!runtime_identity_live()) {
+        g_checkpoint_last_result = COLD_RESULT_IDENTITY;
         return -1;
-    return checkpoint_install(ck);
+    }
+    heap_scratch_reset();
+    if (cold_snap_decode(&ck) != 0) {
+        g_checkpoint_last_result = cold_last_result();
+        heap_set_mode(HEAP_MODE_PERSIST);
+        heap_scratch_reset();
+        return -1;
+    }
+    int result = checkpoint_install(ck);
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return result;
+}
+
+int checkpoint_last_result(void)
+{
+    return g_checkpoint_last_result;
+}
+
+uint64_t checkpoint_selected_generation(void)
+{
+    return g_checkpoint_selected_generation;
+}
+
+typedef struct {
+    noun kernel;
+    noun slam;
+    noun evq;
+    noun evq_tail;
+    uint64_t evq_n;
+    uint64_t persist_cells;
+    uint64_t atom_bytes;
+    tarm_t tarms[TARM_MAX];
+    runtime_identity_t identity;
+} checkpoint_test_live_t;
+
+static void checkpoint_test_snapshot(checkpoint_test_live_t *s)
+{
+    s->kernel = g_kernel;
+    s->slam = g_slam_formula;
+    s->evq = g_evq;
+    s->evq_tail = g_evq_tail;
+    s->evq_n = g_evq_n;
+    s->persist_cells = heap_cells_used(HEAP_MODE_PERSIST);
+    s->atom_bytes = atom_store_bytes_used();
+    for (int i = 0; i < TARM_MAX; i++)
+        s->tarms[i] = g_tarms[i];
+    s->identity = *runtime_identity_get();
+}
+
+static int checkpoint_test_unchanged(const checkpoint_test_live_t *s)
+{
+    if (g_kernel != s->kernel || g_slam_formula != s->slam
+        || g_evq != s->evq || g_evq_tail != s->evq_tail
+        || g_evq_n != s->evq_n
+        || heap_cells_used(HEAP_MODE_PERSIST) != s->persist_cells
+        || atom_store_bytes_used() != s->atom_bytes
+        || !runtime_identity_equal(runtime_identity_get(), &s->identity))
+        return 0;
+    for (int i = 0; i < TARM_MAX; i++) {
+        if (g_tarms[i].active != s->tarms[i].active
+            || g_tarms[i].id != s->tarms[i].id
+            || g_tarms[i].period != s->tarms[i].period
+            || g_tarms[i].next != s->tarms[i].next
+            || g_tarms[i].i2_token != s->tarms[i].i2_token
+            || g_tarms[i].i2_event_cell != s->tarms[i].i2_event_cell)
+            return 0;
+    }
+    return 1;
+}
+
+static int checkpoint_test_capture(noun *ckpt, noun *queue_tarms)
+{
+    noun rest, field;
+    heap_scratch_reset();
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return 0;
+    if (!checkpoint_capture_checked(ckpt)) {
+        noun_tx_abort();
+        return 0;
+    }
+    rest = *ckpt;
+    for (int i = 0; i < 5; i++) {
+        if (!noun_take(rest, &field, &rest)) {
+            noun_tx_abort();
+            return 0;
+        }
+    }
+    if (!noun_is_cell(rest)) {
+        noun_tx_abort();
+        return 0;
+    }
+    *queue_tarms = rest;
+    return 1;
+}
+
+static int checkpoint_test_token(uint64_t generation, uint64_t incarnation,
+                                 uint64_t owner, uint64_t sequence, noun *out)
+{
+    noun n0, n1;
+    return alloc_cell_checked(direct(owner), direct(sequence), &n0)
+        && alloc_cell_checked(direct(incarnation), n0, &n1)
+        && alloc_cell_checked(direct(generation), n1, out);
+}
+
+static int checkpoint_test_timer_entry(
+    uint64_t id, uint64_t generation, uint64_t incarnation,
+    uint64_t sequence, noun token_override, noun *out)
+{
+    noun token = token_override, n0, n1;
+    if (token == NOUN_ZERO
+        && !checkpoint_test_token(
+            generation, incarnation, id, sequence, &token))
+        return 0;
+    return alloc_cell_checked(direct(1), token, &n0)
+        && alloc_cell_checked(direct(1), n0, &n1)
+        && alloc_cell_checked(direct(id), n1, out);
+}
+
+static int checkpoint_test_reject(noun ckpt,
+                                  const checkpoint_test_live_t *live)
+{
+    int rejected = checkpoint_install(ckpt) != 0;
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return rejected && checkpoint_test_unchanged(live);
+}
+
+uint64_t checkpoint_m2_selftest(void)
+{
+    if (!runtime_identity_live() || !noun_is_cell(g_kernel))
+        return UINT64_MAX;
+    noun_test_copy_fail_after(-1);
+    checkpoint_test_live_t live;
+    checkpoint_test_snapshot(&live);
+    uint64_t failures = 0;
+    noun ckpt, pair;
+
+    if (!checkpoint_test_reject(NOUN_ZERO, &live))
+        failures |= 1ULL << 0;
+
+    if (!checkpoint_test_capture(&ckpt, &pair)) {
+        failures |= 1ULL << 1;
+    } else {
+        ((cell_t *)(uintptr_t)cell_ptr(pair))->head = direct(7);
+        if (!checkpoint_test_reject(ckpt, &live))
+            failures |= 1ULL << 1;
+    }
+
+    /* 257 proper, individually valid lifecycle events: never truncate. */
+    if (!checkpoint_test_capture(&ckpt, &pair)) {
+        failures |= 1ULL << 2;
+    } else {
+        noun tag = cord_from_bytes("i2-lifecycle", 12);
+        noun event, queue = NOUN_ZERO, node;
+        int built = 1;
+        if (!alloc_cell_checked(tag, direct(0x646c6f63), &event)) {
+            noun_tx_abort();
+            failures |= 1ULL << 2;
+        } else {
+            for (int i = 0; i < 257; i++) {
+                if (!alloc_cell_checked(event, queue, &node)) {
+                    noun_tx_abort();
+                    failures |= 1ULL << 2;
+                    built = 0;
+                    break;
+                }
+                queue = node;
+            }
+            if (built) {
+                ((cell_t *)(uintptr_t)cell_ptr(pair))->head = queue;
+                if (!checkpoint_test_reject(ckpt, &live))
+                    failures |= 1ULL << 2;
+            }
+        }
+    }
+
+    uint64_t incarnation = 0;
+    runtime_identity_validate_gate(
+        g_kernel, runtime_identity_get(), &incarnation);
+    uint64_t generation = runtime_identity_get()->generation;
+
+    /* 17 valid timer entries: never skip/truncate the seventeenth. */
+    if (!checkpoint_test_capture(&ckpt, &pair)) {
+        failures |= 1ULL << 3;
+    } else {
+        noun timers = NOUN_ZERO, entry, node;
+        int built = 1;
+        for (int i = 17; i >= 1; i--) {
+            if (!checkpoint_test_timer_entry(
+                    (uint64_t)i, generation, incarnation,
+                    (uint64_t)i, NOUN_ZERO, &entry)
+                || !alloc_cell_checked(entry, timers, &node)) {
+                noun_tx_abort();
+                failures |= 1ULL << 3;
+                built = 0;
+                break;
+            }
+            timers = node;
+        }
+        if (built) {
+            ((cell_t *)(uintptr_t)cell_ptr(pair))->tail = timers;
+            if (!checkpoint_test_reject(ckpt, &live))
+                failures |= 1ULL << 3;
+        }
+    }
+
+    /* Duplicate full lifecycle token. */
+    if (!checkpoint_test_capture(&ckpt, &pair)) {
+        failures |= 1ULL << 4;
+    } else {
+        noun token, entry0, entry1, list0, list1;
+        if (!checkpoint_test_token(
+                generation, incarnation, 1, 1, &token)
+            || !checkpoint_test_timer_entry(
+                1, generation, incarnation, 1, token, &entry0)
+            || !checkpoint_test_timer_entry(
+                1, generation, incarnation, 1, token, &entry1)
+            || !alloc_cell_checked(entry1, NOUN_ZERO, &list1)
+            || !alloc_cell_checked(entry0, list1, &list0)) {
+            noun_tx_abort();
+            failures |= 1ULL << 4;
+        } else {
+            ((cell_t *)(uintptr_t)cell_ptr(pair))->tail = list0;
+            if (!checkpoint_test_reject(ckpt, &live))
+                failures |= 1ULL << 4;
+        }
+    }
+
+    /* Stale generation and malformed short token. */
+    for (int which = 0; which < 2; which++) {
+        uint64_t bit = 5 + (uint64_t)which;
+        if (!checkpoint_test_capture(&ckpt, &pair)) {
+            failures |= 1ULL << bit;
+            continue;
+        }
+        noun token = NOUN_ZERO, entry, list;
+        if (which == 1)
+            token = direct(1);
+        if ((which == 0
+             && !checkpoint_test_token(
+                 generation + 1, incarnation, 1, 1, &token))
+            || !checkpoint_test_timer_entry(
+                1, generation, incarnation, 1, token, &entry)
+            || !alloc_cell_checked(entry, NOUN_ZERO, &list)) {
+            noun_tx_abort();
+            failures |= 1ULL << bit;
+            continue;
+        }
+        ((cell_t *)(uintptr_t)cell_ptr(pair))->tail = list;
+        if (!checkpoint_test_reject(ckpt, &live))
+            failures |= 1ULL << bit;
+    }
+
+    /* Candidate semispace copy failure occurs after full validation. */
+    if (!checkpoint_test_capture(&ckpt, &pair)) {
+        failures |= 1ULL << 7;
+    } else {
+        noun_test_copy_fail_after(0);
+        if (!checkpoint_test_reject(ckpt, &live)
+            || g_checkpoint_last_result != COLD_RESULT_ALLOC)
+            failures |= 1ULL << 7;
+        noun_test_copy_fail_after(-1);
+    }
+
+    /* Canonical queued timer/service completions with full distinct tokens. */
+    if (!checkpoint_test_capture(&ckpt, &pair)) {
+        failures |= 1ULL << 8;
+    } else {
+        noun timer_token, service_token, timer_node;
+        noun service_event, service_node;
+        checkpoint_view_t view = {0};
+        if (!checkpoint_test_token(
+                generation, incarnation, 1, 1, &timer_token)
+            || !checkpoint_test_token(
+                generation, incarnation, 2, 2, &service_token)
+            || !make_timer_event_checked(timer_token, &timer_node)
+            || !make_i2_service_event_checked(
+                service_token, &service_event)
+            || !alloc_cell_checked(
+                service_event, NOUN_ZERO, &service_node)) {
+            noun_tx_abort();
+            failures |= 1ULL << 8;
+        } else {
+            ((cell_t *)(uintptr_t)cell_ptr(timer_node))->tail = service_node;
+            ((cell_t *)(uintptr_t)cell_ptr(pair))->head = timer_node;
+            if (!checkpoint_validate(ckpt, &view)
+                || view.queue_n != 2 || view.timer_n != 0)
+                failures |= 1ULL << 8;
+            noun_tx_abort();
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
+            if (!checkpoint_test_unchanged(&live))
+                failures |= 1ULL << 8;
+        }
+    }
+
+    noun_test_copy_fail_after(-1);
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return failures;
 }
 
 /* ── Boot policy (pill vs durable snap) ─────────────────────────────────── */
@@ -1702,6 +2581,52 @@ int boot_policy_get(void)
     return g_boot_policy;
 }
 
+static void uart_hex64_kernel(uint64_t value)
+{
+    char buf[17];
+    buf[16] = 0;
+    for (int i = 15; i >= 0; i--) {
+        buf[i] = "0123456789abcdef"[value & 15];
+        value >>= 4;
+    }
+    uart_puts(buf);
+}
+
+static int install_clean_pill(noun pill_gate)
+{
+    if (!noun_is_cell(pill_gate))
+        return -1;
+    if (runtime_identity_live()
+        && !runtime_identity_validate_gate(
+            pill_gate, runtime_identity_get(), 0))
+        return -1;
+    heap_persist_begin_tx();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    noun candidate_gate, candidate_slam;
+    if (!noun_copy_checked(pill_gate, &candidate_gate)
+        || !build_slam_formula_checked(&candidate_slam)) {
+        heap_persist_abort_tx();
+        return -1;
+    }
+    tarm_t empty_tarms[TARM_MAX] = {0};
+    g_kernel = candidate_gate;
+    g_slam_formula = candidate_slam;
+    g_shrine_mode = noun_pill_shape ? 1 : 0;
+    g_evq = NOUN_ZERO;
+    g_evq_tail = NOUN_ZERO;
+    g_evq_n = 0;
+    for (int i = 0; i < TARM_MAX; i++)
+        g_tarms[i] = empty_tarms[i];
+    heap_persist_commit_tx();
+    return 0;
+}
+
+int kernel_prepare_pill(void)
+{
+    noun gate = kernel_pill_load();
+    return noun_is_cell(gate) && install_clean_pill(gate) == 0 ? 0 : -1;
+}
+
 int kernel_boot(noun pill_gate)
 {
     int want_snap = (g_boot_policy == BOOT_SNAP ||
@@ -1710,6 +2635,16 @@ int kernel_boot(noun pill_gate)
     if (want_snap) {
         if (checkpoint_load() == 0) {
             uart_puts("boot: snap\r\n");
+            uart_puts("boot: identity ");
+            const runtime_identity_t *identity = runtime_identity_get();
+            uint64_t prefix = 0;
+            if (identity)
+                for (int i = 0; i < 8; i++)
+                    prefix |= (uint64_t)identity->package_hash[i] << (i * 8);
+            uart_hex64_kernel(prefix);
+            uart_puts(" generation ");
+            uart_hex64_kernel(checkpoint_selected_generation());
+            uart_puts("\r\n");
             if (g_shrine_mode)
                 shrine_loop(g_kernel);
             else
@@ -1717,10 +2652,16 @@ int kernel_boot(noun pill_gate)
             return -1; /* unreachable */
         }
         if (g_boot_policy == BOOT_SNAP) {
-            uart_puts("boot: no snap\r\n");
+            uart_puts("boot: no snap ");
+            uart_puts(cold_result_name(
+                (cold_result_t)checkpoint_last_result()));
+            uart_puts("\r\n");
             return -1;
         }
-        uart_puts("boot: snap miss → pill\r\n");
+        uart_puts("boot: snap reject ");
+        uart_puts(cold_result_name(
+            (cold_result_t)checkpoint_last_result()));
+        uart_puts(" -> pill\r\n");
     }
 
     if (!noun_is_cell(pill_gate)) {
@@ -1728,12 +2669,35 @@ int kernel_boot(noun pill_gate)
         return -1;
     }
 
+    if (install_clean_pill(pill_gate) != 0) {
+        uart_puts("boot: pill reject\r\n");
+        return -1;
+    }
     uart_puts("boot: pill\r\n");
-    g_kernel      = noun_persist(pill_gate);
-    g_shrine_mode = noun_pill_shape ? 1 : 0;
     if (g_shrine_mode)
         shrine_loop(g_kernel);
     else
         arvo_loop(g_kernel);
     return -1;
+}
+
+noun kernel_pill_load(void)
+{
+    noun gate = NOUN_ZERO;
+    pill_i2_status_t status = pill_i2_load(&gate);
+    if (status == PILL_I2_OK)
+        return gate;
+    if (status == PILL_I2_NOT_I2 || status == PILL_I2_ABSENT) {
+        /* Frozen I1 compatibility: the old PILL v2 + recursive cue path is
+         * reachable only when the I2 magic is absent. */
+        runtime_identity_clear();
+        noun atom = pill_load();
+        if (!noun_is_atom(atom) || atom == NOUN_ZERO)
+            return NOUN_ZERO;
+        return cue(atom);
+    }
+    uart_puts("pill: reject ");
+    uart_puts(pill_i2_status_name(status));
+    uart_puts("\r\n");
+    return NOUN_ZERO;
 }

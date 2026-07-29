@@ -17,8 +17,9 @@
  *
  * I2 slam product (hybrid battery, shrine): [%commit [effects [gate causes]]]
  *   or [%abort fault] (no promote). I1 product [effects [gate causes]] still
- *   accepted. No device-side effect preflight yet (Host ABI preflight is
- *   offline/HostRunner); dispatch is best-effort on known tags.
+ *   accepted only for an isolated legacy pill. I2 performs device preflight,
+ *   complete reservation/candidate construction, one publication, and a
+ *   no-allocation activation pass.
  *
  * Heap/atom ceilings (noun.c): bump past HEAP_TOP or atom-data/index full →
  *   nock_crash (never silent overrun into atom index). Persist semispace
@@ -28,9 +29,9 @@
  * or [%i2-timer token fired-at] when armed via i2-timer-set.
  * Legacy %tmrarm/%tmrcan remain the single global cooperative deadline.
  *
- * Idle schedule (WP1): when the event queue is empty the loop polls UART RX
- * (non-blocking), tarm_poll, and soft WDT — it does not block forever in
- * uart_recv_noun, so %tset arms can fire without a second UART poke.
+ * Idle schedule: I2 consumes a fixed UART byte budget through an incremental
+ * framed parser, then polls tarm/WDT. Inter-byte/total-frame timeouts reset to
+ * magic scan. Legacy uart_recv_noun remains reachable only on the I1 path.
  *
  * Slam budget (WP2): each event arms nock_budget_set(slam_budget); runaway
  * eval longjmps NOCK_ABORT_BUDGET — no product commit, tarms kept, %timeout.
@@ -112,7 +113,7 @@ int      swap_status(void);           /* 0 idle, 1 staged, 2 pending */
 /*
  * Durable checkpoint of live host+resource roots (RAM cold store for now;
  * SD backend later via cold_*). Noun shape:
- *   [%i2-ckpt ver shrine gate queue tarms]
+ *   [%i2-ckpt 2 [152 runtime-identity-record] shrine gate queue tarms]
  * tarms ::= * [id period remain-ticks token]
  */
 void     shrine_gate_set(noun gate);   /* install live gate (persist copy) */
@@ -125,6 +126,8 @@ int      checkpoint_save(void);        /* capture → cold_snap_save; 0 ok */
 int      checkpoint_load(void);        /* cold_snap_load → install; 0 ok */
 void     checkpoint_auto_every(uint64_t n); /* 0=off; save every n commits */
 uint64_t checkpoint_auto_get(void);
+int      checkpoint_last_result(void);
+uint64_t checkpoint_selected_generation(void);
 
 /*
  * Boot policy for KERNEL:
@@ -140,3 +143,13 @@ int      boot_policy_get(void);
 /* Apply policy and enter arvo/shrine loop. pill_gate may be 0.
  * Never returns on success; returns -1 to fall back to REPL. */
 int      kernel_boot(noun pill_gate);
+/* Strict PILL2 bounded/identity load, with isolated legacy I1 fallback. */
+noun     kernel_pill_load(void);
+/* Lab/test preparation: admit PILL2 and install its clean roots without
+ * entering the scheduler. This is used to construct restart fixtures. */
+int      kernel_prepare_pill(void);
+
+/* Focused M2 device-code probe; zero means bounded TX activation passed. */
+uint64_t kernel_tx_stuck_selftest(void);
+/* Requires kernel_prepare_pill() first; zero means restore matrix passed. */
+uint64_t checkpoint_m2_selftest(void);

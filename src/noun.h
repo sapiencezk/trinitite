@@ -92,12 +92,27 @@ void  heap_persist_abort_tx(void);
 void  heap_noalloc_begin(void);
 void  heap_noalloc_end(void);
 
+/* Loader/decode transaction. Only one is active on the single scheduler
+ * core. Abort restores the selected cell bump pointer and all atom-store
+ * insertions made since begin. */
+int   noun_tx_begin(int mode);
+void  noun_tx_commit(void);
+void  noun_tx_abort(void);
+int   noun_tx_active(void);
+uint64_t heap_cells_used(int mode);
+uint64_t atom_store_bytes_used(void);
+
 noun  alloc_cell(noun head, noun tail);
+int   alloc_cell_checked(noun head, noun tail, noun *out);
 void  cell_inc(noun n);   /* increment refcount */
 void  cell_dec(noun n);   /* decrement; frees cell (and recursively children) when 0 */
 
 /* Deep-copy cells into the *current* heap mode (atoms shared via store). */
 noun  noun_copy(noun n);
+int   noun_copy_checked(noun n, noun *out);
+/* Deterministic test hook: fail a checked deep copy after N new cells.
+ * Negative disables injection. */
+void  noun_test_copy_fail_after(int64_t cells);
 /* Copy into PERSIST region (saves/restores mode). */
 noun  noun_persist(noun n);
 
@@ -111,6 +126,11 @@ int   noun_eq(noun a, noun b);
  * Returns a properly tagged noun (direct or indirect).
  */
 noun  make_atom(const uint64_t *limbs, uint64_t size);
+int   make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out);
+/* Read a canonical atom value into exactly len little-endian bytes, zero
+ * extending as needed. Returns 0 if n is a cell or has significant bytes
+ * beyond len. */
+int   noun_atom_read_fixed(noun n, uint8_t *out, size_t len);
 
 /* cord_from_bytes: create a cord (atom) from a C byte string */
 noun  cord_from_bytes(const char *str, size_t len);

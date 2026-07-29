@@ -8,6 +8,15 @@
 #define UART_LCRH   (*(volatile uint32_t*)(PL011_BASE + 0x2C))
 #define UART_CR     (*(volatile uint32_t*)(PL011_BASE + 0x30))
 
+static int g_test_tx_stuck;
+
+static uint64_t uart_counter(void)
+{
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+
 void uart_init(void) {
     UART_CR   = 0;
     UART_IBRD = 26;
@@ -54,4 +63,21 @@ void uart_read_bytes(uint8_t *buf, uint64_t n) {
 void uart_write_bytes(const uint8_t *buf, uint64_t n) {
     for (uint64_t i = 0; i < n; i++)
         uart_putc((char)buf[i]);
+}
+
+int uart_putc_bounded(char c, uint64_t absolute_deadline)
+{
+    for (;;) {
+        if (!g_test_tx_stuck && !(UART_FR & (1 << 5))) {
+            UART_DR = c;
+            return 1;
+        }
+        if (uart_counter() >= absolute_deadline)
+            return 0;
+    }
+}
+
+void uart_test_tx_stuck(int stuck)
+{
+    g_test_tx_stuck = stuck ? 1 : 0;
 }

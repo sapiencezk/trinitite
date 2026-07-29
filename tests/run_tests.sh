@@ -1287,15 +1287,28 @@ T "t5: log order" "0000000000000014" \
 T "t5: snap roundtrip" "0000000000000064" \
     "CFMT  100 >NOUN SNAP!  SNAP@ NOUN> ."
 
-# Durable I2 checkpoint: live gate+queue+tarms → cold snap → install
+# Durable I2 checkpoint requires an admitted PILL2 RuntimeIdentity anchor.
+# The real positive path is exercised by the two-boot KERNEL test.
 T "ckpt: save empty fails" "FFFFFFFFFFFFFFFF" \
     "CFMT  CKPT! ."
 
-T "ckpt: gate roundtrip" "0000000000000007" \
-    "CFMT  7 >NOUN 9 >NOUN CONS  KGATE!  CKPT! DROP  0 >NOUN KGATE!  CKLOAD DROP  KGATE@ CAR NOUN> ."
+T "ckpt: unanchored gate rejected" "FFFFFFFFFFFFFFFF" \
+    "CFMT  7 >NOUN 9 >NOUN CONS  KGATE!  CKPT! ."
 
-T "ckpt: tarm survive load" "FFFFFFFFFFFFFFFF" \
-    "CFMT  1 >NOUN 2 >NOUN CONS KGATE!  3 1000 CONS  1952805748 >NOUN SWAP CONS  0 >NOUN CONS DO-FX  CKPT! DROP  TACLR  3 TACT? 0 =  DROP  CKLOAD DROP  3 TACT? ."
+T "ckpt: rejected save preserves tarm" "FFFFFFFFFFFFFFFF" \
+    "CFMT  1 >NOUN 2 >NOUN CONS KGATE!  3 1000 CONS  1952805748 >NOUN SWAP CONS  0 >NOUN CONS DO-FX  CKPT! DROP  3 TACT? ."
+
+T "m2: incremental parser matrix" "0000000000000000" \
+    "RXM2 ."
+
+T "m2: bounded cue rollback matrix" "0000000000000000" \
+    "CUEM2 ."
+
+T "m2: stuck TX bounded reserved completion" "0000000000000000" \
+    "TXM2 ."
+
+T "m2: cold fail-closed and torn writes" "0000000000000000" \
+    "COLDM2 ."
 
 T "boot: policy default pill" "0000000000000000" \
     "0 BOOTPOL!  BOOTPOL@ ."
@@ -1452,10 +1465,9 @@ T "i2: i2ts fire %ei bare-token" "0000000000006965" \
 T "i2: i2ts fire full-token i2-timer" "72656D69742D3269" \
     "TACLR QCLR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
 
-# A restored full-token arm must rebuild its preallocated fire node; this
-# catches a CKLOAD path that otherwise dereferences a stale/no event cell.
-T "i2: ckload full-token fire" "72656D69742D3269" \
-    "CFMT  7 >NOUN 9 >NOUN CONS KGATE!  TACLR QCLR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  CKPT! DROP  TACLR QCLR  CKLOAD DROP  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
+# An identity-rejected save must not disturb the existing reserved timer event.
+T "i2: rejected ckpt preserves full-token fire" "72656D69742D3269" \
+    "CFMT  7 >NOUN 9 >NOUN CONS KGATE!  TACLR QCLR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  CKPT! DROP  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
 
 # payload atom 0 prints nothing (no UART pollution of hex capture)
 T "i2: i2sr service no crash" "000000000000002A" \

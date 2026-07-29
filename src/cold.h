@@ -1,40 +1,62 @@
 #pragma once
+
 #include <stdint.h>
 #include "noun.h"
 
-/*
- * Phase 5 — content-addressed cold store.
- *
- * Layout at COLD_BASE (see memory.h):
- *   superblock @ +0
- *   objects    @ +0x1000  append-only [hdr|payload|pad]
- *
- * Working storage is always the COLD_BASE RAM window (memcpy).
- * Optional NV flush (semihosting → host file "cold.img") makes snaps
- * survive QEMU reboot when the file is reloaded at COLD_BASE via loader.
- * Real SDHCI can replace cold_nv_flush later without API change.
- */
+typedef enum {
+    COLD_RESULT_VALID = 0,
+    COLD_RESULT_EMPTY = 1,
+    COLD_RESULT_ABSENT = 2,
+    COLD_RESULT_CORRUPT = -1,
+    COLD_RESULT_UNSUPPORTED = -2,
+    COLD_RESULT_SUPERBLOCK = -3,
+    COLD_RESULT_OFFSET = -4,
+    COLD_RESULT_ALIGNMENT = -5,
+    COLD_RESULT_HEADER = -6,
+    COLD_RESULT_KIND = -7,
+    COLD_RESULT_LENGTH = -8,
+    COLD_RESULT_HEADER_DIGEST = -9,
+    COLD_RESULT_PAYLOAD_DIGEST = -10,
+    COLD_RESULT_GENERATION = -11,
+    COLD_RESULT_COMMIT = -12,
+    COLD_RESULT_CUE = -13,
+    COLD_RESULT_SHAPE = -14,
+    COLD_RESULT_IDENTITY = -15,
+    COLD_RESULT_ALLOC = -16,
+    COLD_RESULT_WRITE_FAULT = -17
+} cold_result_t;
 
-int      cold_init(void);                 /* validate or format */
-int      cold_format(void);               /* wipe region */
+typedef enum {
+    COLD_WRITE_NONE = 0,
+    COLD_WRITE_OBJECT_HEADER = 1,
+    COLD_WRITE_PAYLOAD = 2,
+    COLD_WRITE_OBJECT_COMMIT = 3,
+    COLD_WRITE_SUPERBLOCK = 4
+} cold_write_phase_t;
 
-/* Store jammed noun; returns 62-bit hash (never 0 on success). 0 on error. */
+int cold_init(void);   /* auto-initialize only an exactly all-zero image */
+int cold_format(void); /* explicit destructive format */
+cold_result_t cold_probe(void);
+cold_result_t cold_last_result(void);
+const char *cold_result_name(cold_result_t result);
+uint64_t cold_selected_generation(void);
+
 uint64_t cold_store(noun n);
-
-/* Load by 62-bit hash; returns noun or 0 if missing. */
-noun     cold_load(uint64_t hash62);
-
-/* Append-only event log */
-int      cold_log(noun event);            /* 0 ok */
+noun cold_load(uint64_t hash62);
+int cold_log(noun event);
 uint64_t cold_log_len(void);
-noun     cold_log_at(uint64_t i);         /* 0 if OOB */
+noun cold_log_at(uint64_t i);
 
-/* Single snapshot root */
-int      cold_snap_save(noun root);       /* 0 ok; flushes NV if available */
-noun     cold_snap_load(void);            /* 0 if none */
+int cold_snap_save(noun root);
+noun cold_snap_load(void);    /* standalone/Forth wrapper; commits decode */
+int cold_snap_decode(noun *out); /* SCRATCH decode; leaves noun_tx active */
 
-/* NV flush of entire COLD_BASE window (0 ok, -1 unavailable/fail).
- * Requires cold_nv_arm() first (CKPT!/NVFLUSH arms) so bare QEMU never HLTs. */
-void     cold_nv_arm(void);
-int      cold_nv_flush(void);
-int      cold_nv_enabled(void);
+void cold_fault_set(cold_write_phase_t phase, int64_t after_bytes);
+void cold_fault_clear(void);
+
+/* Focused fail-closed/torn-write device-code regression probe. */
+uint64_t cold_m2_selftest(void);
+
+void cold_nv_arm(void);
+int cold_nv_flush(void);
+int cold_nv_enabled(void);
