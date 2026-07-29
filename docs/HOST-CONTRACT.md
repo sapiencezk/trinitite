@@ -1,6 +1,6 @@
 # Trinitite host contract (IEC consumers)
 
-**Status:** as built through I2 Hybrid v1 Milestone 2
+**Status:** as built through I2 Hybrid v1 Milestone 3
 **Audience:** IEC 61499 Nock kernels / pills on this substrate  
 **Normative product freeze:** `1499kernel/docs/I1.md` (do not reopen without user)  
 **Epic log:** `1499kernel/docs/HOST-INDUSTRIAL.md`
@@ -210,6 +210,42 @@ bounded cue, and boot fallback rules are normative in
 Semihost `cold.img` is a lab/fault-injection transport only, not filesystem,
 fsync/rename, physical-media, or power-cut durability evidence.
 
+### 5.3 M3 bounded measurements and Pi 4 media surface
+
+M3 adds one fixed, allocation-free `runtime_stats` block. It uses saturating
+64-bit counters/ticks and fixed 64-bin log2 histograms; reset never allocates.
+Queue residence uses a fixed 256-entry sidecar aligned with the FIFO and is
+not part of event identity or checkpoint nouns. `RSTON`, `RSTOFF`, `RSTCLR`,
+and `M3STAT` control and emit one stable `M3STAT1` summary. No timed event
+emits telemetry.
+
+The phase/counter schema, reset boundary, workload/tier rules, and claim
+classes are normative in `1499kernel/docs/I2-M3-PROFILE.md`. QEMU counter
+ticks are virtual timing and can earn only `qemu-functional`.
+
+Physical-media selection is compile-time only:
+
+```text
+COLD_MEDIA=ram       logical RAM window, no physical flush
+COLD_MEDIA=semihost  QEMU lab file transport
+COLD_MEDIA=fake      deterministic bounded fault adapter
+COLD_MEDIA=rpi4-sd   Pi 4B BCM2711 EMMC2 PIO target
+```
+
+The target-private adapter maps the two logical M2 superblocks to distinct
+512-byte physical sectors behind one versioned raw-extent descriptor. It
+checks descriptor, presence, read-only state, capacity, translated range,
+deadline, and non-reentrancy. Physical append ordering adds barriers after the
+object commit and inactive superblock. A submitted uncertain write is not
+retried. The barrier proves only controller/card ready completion, not
+power-cut durability. RuntimeIdentity, checkpoint v2, logical cold v2, boot
+selection, and fail-closed format policy are unchanged.
+
+No Pi 4/card run or destructive power-cut campaign is part of the repository
+tests. Therefore `target-timing`, `media-controller`, and
+`physical-power-cut` remain unproven until separately retained hardware
+evidence satisfies the M3 profile.
+
 ---
 
 ## 6. Jets (pure; no MMIO)
@@ -250,7 +286,9 @@ If a future change adds `%budget` / `%overflow` as effects, bump:
 ## 8. Verify
 
 ```bash
-make -C trinitite test          # 523+ goldens
+make -C trinitite test          # 544+ goldens
+make -C trinitite test-media-fake
+make -C trinitite test-media-rpi4-build
 bash trinitite/tests/kernel-boot.sh   # includes idle-timer path
 # from 1499kernel:
 bash tests/demo-poke.sh         # demo pill; UART OK
