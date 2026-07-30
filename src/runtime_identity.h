@@ -6,6 +6,7 @@
 #define RUNTIME_IDENTITY_RECORD_SIZE 152u
 #define RUNTIME_CAPABILITY_PROFILE_NONE        0u
 #define RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT 1u
+#define RUNTIME_CAPABILITY_PROFILE_M7_DIGITAL_OUT 2u
 
 typedef struct {
     uint32_t pill_container_version;

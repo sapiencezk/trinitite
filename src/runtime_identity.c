@@ -26,6 +26,9 @@ static const uint8_t g_identity_domain[8] = {
 static const uint8_t g_digital_out_request_grant_fingerprint[8] = {
     0x26, 0x48, 0x2a, 0xff, 0xfc, 0x96, 0x3f, 0x59
 };
+static const uint8_t g_m7_digital_out_request_grant_fingerprint[8] = {
+    0x77, 0x3c, 0x4c, 0x79, 0xd7, 0xbb, 0x23, 0xd0
+};
 
 static runtime_identity_t g_live_identity;
 static int g_live_identity_valid;
@@ -112,13 +115,18 @@ int runtime_identity_supported(const runtime_identity_t *id)
     int digital_host = id->host_abi[0] == 1 && id->host_abi[1] == 1
         && id->deployment_schema[0] == 1
         && id->deployment_schema[1] == 1;
-    if (!baseline_host && !digital_host)
+    int m7_host = id->host_abi[0] == 1 && id->host_abi[1] == 2
+        && id->deployment_schema[0] == 1
+        && id->deployment_schema[1] == 2;
+    if (!baseline_host && !digital_host && !m7_host)
         return 0;
     int legacy = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 0
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 0;
     int origin_v1 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 1
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 1;
-    if (!legacy && !origin_v1)
+    int m7 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 2
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 2;
+    if (!legacy && !origin_v1 && !m7)
         return 0;
     if (id->kernel_kver[0] != 2 || id->kernel_kver[1] != 0)
         return 0;
@@ -400,13 +408,20 @@ pill_i2_status_t pill_i2_load(noun *gate_out)
         identity.host_abi[0] == 1 && identity.host_abi[1] == 1
         && identity.deployment_schema[0] == 1
         && identity.deployment_schema[1] == 1;
+    int m7_digital_identity =
+        identity.host_abi[0] == 1 && identity.host_abi[1] == 2
+        && identity.deployment_schema[0] == 1
+        && identity.deployment_schema[1] == 2;
     uint8_t capability_profile = header[25];
-    if (digital_identity) {
-        if (capability_profile != RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
-            || !bytes_eq(
-                header + 248,
-                g_digital_out_request_grant_fingerprint,
-                8))
+    if (digital_identity || m7_digital_identity) {
+        const uint8_t *fingerprint = digital_identity
+            ? g_digital_out_request_grant_fingerprint
+            : g_m7_digital_out_request_grant_fingerprint;
+        uint8_t expected_profile = digital_identity
+            ? RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
+            : RUNTIME_CAPABILITY_PROFILE_M7_DIGITAL_OUT;
+        if (capability_profile != expected_profile
+            || !bytes_eq(header + 248, fingerprint, 8))
             return PILL_I2_IDENTITY;
     } else if (capability_profile != RUNTIME_CAPABILITY_PROFILE_NONE
                || bytes_nonzero(header + 248, 8)) {

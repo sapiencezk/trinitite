@@ -1210,12 +1210,19 @@ static uint64_t atom_u64(noun a)
 static int digital_output_identity_authorized(void)
 {
     const runtime_identity_t *identity = runtime_identity_get();
-    return identity
-        && runtime_identity_capability_profile()
-            == RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
-        && identity->host_abi[0] == 1 && identity->host_abi[1] == 1
+    int m6 = identity && identity->host_abi[0] == 1
+        && identity->host_abi[1] == 1
         && identity->deployment_schema[0] == 1
-        && identity->deployment_schema[1] == 1;
+        && identity->deployment_schema[1] == 1
+        && runtime_identity_capability_profile()
+            == RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT;
+    int m7 = identity && identity->host_abi[0] == 1
+        && identity->host_abi[1] == 2
+        && identity->deployment_schema[0] == 1
+        && identity->deployment_schema[1] == 2
+        && runtime_identity_capability_profile()
+            == RUNTIME_CAPABILITY_PROFILE_M7_DIGITAL_OUT;
+    return m6 || m7;
 }
 
 static int i2_service_fields(noun data, noun *token_out,
@@ -1871,11 +1878,10 @@ static noun g_checkpoint_limit_anchor;
 static int runtime_origin_v1(void)
 {
     const runtime_identity_t *identity = runtime_identity_get();
-    return identity
-        && identity->runtime_abi[0] == 1
-        && identity->runtime_abi[1] == 1
+    return identity && identity->runtime_abi[0] == 1
+        && (identity->runtime_abi[1] == 1 || identity->runtime_abi[1] == 2)
         && identity->formula_abi[0] == 1
-        && identity->formula_abi[1] == 1;
+        && identity->formula_abi[1] == identity->runtime_abi[1];
 }
 
 void slam_budget_set(uint64_t max_ops)

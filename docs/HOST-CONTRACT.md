@@ -359,3 +359,26 @@ Key sources: `src/kernel.c`, `src/kernel.h`, `src/nock.c`, `src/uart.c`, `src/me
 ---
 
 *Host industrial base + EP8 payload/field-demo contract. Prefer 1499kernel OUT product changes over host C unless print path is insufficient.*
+
+## M7 resource-supervisor boundary
+
+The M7 host ABI is `(1,2)` and is selected by the exact M7 RuntimeIdentity.
+Trinitite remains the bounded executor of framed transport, storage, timer /
+service completion, checkpoint, UART, and the fixed safe-low digital-output
+effect. Pure-Nock M7 owns MANAGER command/object validation, IEC Table-6/7
+status, lifecycle mode/incarnation, restart-event choice, and the closed
+deployment intent.
+
+M7 adds no C-side lifecycle authority or generic effect registry. The host
+checks generation+incarnation on timer/service/cause dequeue and again before
+activation. A standard STOP has one attempted `E_RESTART.STOP`; a failed or
+emergency path records non-delivery and forces safe-low. `TRI_RESOURCE.FORCE_STOP/RESET`
+and `TRI_DEPLOY` are vendor-namespaced, not IEC FB-level KILL/RESET or
+CREATE/DELETE.
+
+The M7 application FIFO is 256 entries; management is an independent
+one-entry priority mailbox. Target RuntimeIdentity admits M7
+host/deployment `(1,2)` and M7 digital-output profile 2 using the fixed
+`I2M7CAPv1` selector. PILL2, framed ingress, checkpoint, and cold-store
+container layouts remain unchanged. See the parent `docs/I2-M7-CONTRACT.md`
+for the full bounded transport and evidence contract.
