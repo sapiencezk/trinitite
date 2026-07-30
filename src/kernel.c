@@ -68,6 +68,8 @@
 /* Host ABI D0 ceilings (subset of tools/i2 HostAbiLimits) */
 #define I2_MAX_TIMERS              TARM_MAX
 #define I2_MAX_PENDING_SERVICES    4
+#define I2_MAX_CAUSES_PER_EVENT   2
+#define I2_MAX_EFFECTS_PER_EVENT  1
 #define I2_UART_TX_MAX_NS  1000000000ULL
 
 /* Auto-checkpoint: save live roots to cold store every N successful commits */
@@ -153,7 +155,8 @@ static noun make_i2_timer_event(noun token, uint64_t fired_at);
 static int evq_enq_timed(noun event, uint64_t admitted_tick,
                          uint64_t timer_due_tick, uint64_t flags);
 static int evq_enq_prebuilt(noun cell, uint64_t admitted_tick,
-                            uint64_t timer_due_tick, uint64_t flags);
+                             uint64_t timer_due_tick, uint64_t flags,
+                             int count_overflow);
 
 static int tarm_find(uint64_t id)
 {
@@ -473,7 +476,7 @@ void tarm_poll(void)
              * queue accepts it; the next poll can then retry the same
              * deterministic timer cause without losing E_CYCLE. */
             if (!evq_enq_prebuilt(
-                    g_tarms[i].i2_event_cell, now, due, 1))
+                    g_tarms[i].i2_event_cell, now, due, 1, 0))
                 continue;
             runtime_stats_count(RT_COUNT_TIMER_FIRES, 1);
             runtime_stats_max(
@@ -650,10 +653,13 @@ void evq_enq(noun event)
 
 /* Transaction-reserved queue node: append without copying or allocation. */
 static int evq_enq_prebuilt(noun cell, uint64_t admitted_tick,
-                            uint64_t timer_due_tick, uint64_t flags)
+                            uint64_t timer_due_tick, uint64_t flags,
+                            int count_overflow)
 {
     if (g_evq_n >= EVQ_CAP) {
-        evq_note_overflow();
+        /* A due I2 timer is a retained retry, not dropped newest ingress. */
+        if (count_overflow)
+            evq_note_overflow();
         return 0;
     }
     if (!noun_is_cell(g_evq)) {
@@ -1423,8 +1429,11 @@ static int i2_preflight_effects(noun effects, noun causes,
             live_tarms++;
     }
 
+    uint64_t effect_n = 0;
     noun cur = effects;
     while (noun_is_cell(cur)) {
+        if (++effect_n > I2_MAX_EFFECTS_PER_EVENT)
+            return 0;
         cell_t *list = (cell_t *)(uintptr_t)cell_ptr(cur);
         noun head = list->head;
         cur = list->tail;
@@ -1526,7 +1535,7 @@ static int i2_preflight_effects(noun effects, noun causes,
     cur = causes;
     while (noun_is_cell(cur)) {
         cause_n++;
-        if (cause_n > EVQ_CAP)
+        if (cause_n > I2_MAX_CAUSES_PER_EVENT)
             return 0;
         cur = ((cell_t *)(uintptr_t)cell_ptr(cur))->tail;
     }

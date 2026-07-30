@@ -1486,6 +1486,17 @@ T "i2: i2ts fire %ei bare-token" "0000000000006965" \
 T "i2: i2ts fire full-token i2-timer" "72656D69742D3269" \
     "TACLR QCLR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
 
+# A full FIFO is a retry boundary for the reserved I2 timer event: the arm
+# remains live and a retry does not masquerade as a dropped newest ingress.
+T "i2: full FIFO retains due timer" "FFFFFFFFFFFFFFFF" \
+    "TACLR QCLR QMETR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  QFILL  TPOLL  9 TACT? ."
+
+T "i2: timer retry does not count ingress overflow" "0000000000000000" \
+    "TACLR QCLR QMETR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  QFILL  TPOLL  QOVF@ ."
+
+T "i2: retained timer publishes after one dequeue" "0000000000000000" \
+    "TACLR QCLR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  9 TDUE  QFILL  TPOLL  DEQ DROP  TPOLL  9 TACT? ."
+
 # An identity-rejected save must not disturb the existing reserved timer event.
 T "i2: rejected ckpt preserves full-token fire" "72656D69742D3269" \
     "CFMT  7 >NOUN 9 >NOUN CONS KGATE!  TACLR QCLR  9 1 CONS 1 SWAP CONS 1 SWAP CONS  1000 CONS  1936994921 >NOUN  SWAP CONS  0 >NOUN CONS  DO-FX  CKPT! DROP  9 TDUE  TPOLL  DEQ DROP  CAR NOUN> ."
