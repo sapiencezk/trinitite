@@ -372,12 +372,18 @@ accepted by receipt and evaluated by the pure-Nock manager formula at
 and the related `M7*` Forth words are trusted-lab diagnostics; application
 events cannot forge these forms.
 
+The framed application receiver is a separate origin. It is admitted only in
+M7 RUNNING and rejects application-origin `i2-lifecycle`/`i2-control` nouns;
+the supervisor's internal restart queue is the sole lifecycle provenance.
+
 The Nock formula owns command shape, object validity, IEC status, and the
 closed lifecycle intent. The host executes only that fixed intent vocabulary,
 checks generation+incarnation on timer/service/cause dequeue and again before
 activation, and performs bounded safe-low/deployment effects. A standard STOP
 has one attempted `E_RESTART.STOP`; a failed or emergency path records
-non-delivery and forces safe-low. `TRI_RESOURCE.FORCE_STOP/RESET` and
+non-delivery and returns `SYSTEM_TERMINATION` if the backend clear did not
+complete; it never reports safe-low success in that case.
+`TRI_RESOURCE.FORCE_STOP/RESET` and
 `TRI_DEPLOY` are vendor-namespaced, not IEC FB-level KILL/RESET or
 CREATE/DELETE.
 
@@ -388,6 +394,9 @@ host/deployment `(1,2)` and M7 digital-output profile 2 using the fixed
 container layouts remain unchanged. Candidate PILL bytes occupy the fixed
 volatile stage at `PILL_SCRATCH_BASE` until `SEAL`; activation stores the full
 candidate as a cold blob, records its full digest plus identity in the M7
-supervisor snapshot, and publishes RAM only after cold selection. See the
+supervisor snapshot, and publishes RAM only after cold selection. The target
+preflights the complete jammed supervisor snapshot against 65,536 bytes and
+preflights every cold-store jam against the 131,072-byte writer before
+calling it. See the
 parent `docs/I2-M7-CONTRACT.md` and `docs/I2-M7-VERDICT.md` for the exact
 profile and nonclaims.

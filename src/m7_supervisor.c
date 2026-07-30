@@ -21,6 +21,7 @@
  * one end-to-end M7 deployment ceiling; larger PILL2 containers remain
  * admissible to the generic loader but not to TRI_DEPLOY. */
 #define M7_STAGE_BYTES 131066u
+#define M7_SNAPSHOT_BYTES 65536u
 #define M7_MAX_CHUNK 4096u
 #define M7_MAX_CHUNKS 256u
 
@@ -291,7 +292,9 @@ static int m7_snapshot_build(uint64_t pill_hash, uint64_t pill_len,
     rest = pair(direct(pill_len), rest);
     rest = pair(direct(pill_hash), rest);
     snapshot = pair(cord_from_bytes("M7-SUPERVISOR", 14), rest);
-    if (!noun_is_cell(snapshot))
+    uint64_t snapshot_bytes;
+    if (!noun_is_cell(snapshot)
+        || jam_size_checked(snapshot, M7_SNAPSHOT_BYTES, &snapshot_bytes) != 0)
         return 0;
     *out = snapshot;
     return 1;
@@ -303,15 +306,19 @@ static int m7_advance_incarnation(void)
         return 0;
     uint64_t next = g_m7.incarnation + 1;
     noun next_gate;
+    noun retained_formula, retained_result;
     heap_persist_begin_tx();
     heap_set_mode(HEAP_MODE_PERSIST);
     if (!kernel_m7_gate_with_incarnation(
             shrine_gate_get(), next, &next_gate)
+        || !m7_supervisor_retain_roots(
+            &retained_formula, &retained_result)
         || kernel_m7_replace_gate(next_gate) != 0) {
         heap_persist_abort_tx();
         heap_set_mode(HEAP_MODE_PERSIST);
         return 0;
     }
+    m7_supervisor_publish_roots(retained_formula, retained_result);
     heap_persist_commit_tx();
     g_m7.incarnation = next;
     return 1;
@@ -427,20 +434,61 @@ noun m7_formula_root(void)
     return g_m7.formula;
 }
 
-int m7_formula_retain(void)
+int m7_supervisor_retain_roots(noun *formula_out, noun *result_out)
 {
-    if (!noun_is_cell(g_m7.formula))
-        return 1;
-    noun retained;
-    if (!noun_copy_checked(g_m7.formula, &retained))
+    if (!formula_out || !result_out)
         return 0;
-    g_m7.formula = retained;
+    noun formula = g_m7.formula;
+    noun result = g_m7.result;
+    noun retained_formula = formula;
+    noun retained_result = result;
+    if (noun_is_cell(formula)
+        && !noun_copy_checked(formula, &retained_formula))
+        return 0;
+    if (noun_is_cell(result)
+        && !noun_copy_checked(result, &retained_result))
+        return 0;
+    *formula_out = retained_formula;
+    *result_out = retained_result;
     return 1;
+}
+
+void m7_supervisor_publish_roots(noun formula, noun result)
+{
+    g_m7.formula = formula;
+    g_m7.result = result;
 }
 
 void m7_formula_publish(noun formula)
 {
     g_m7.formula = formula;
+}
+
+void m7_result_publish(noun result)
+{
+    g_m7.result = result;
+}
+
+void m7_restore_state_commit(uint64_t mode, noun reason,
+                             uint64_t incarnation,
+                             uint64_t manager_initialized,
+                             uint64_t last_status, uint64_t qo)
+{
+    g_m7.pending = 0;
+    g_m7.pending_command = 0;
+    g_m7.pending_object = NOUN_ZERO;
+    g_m7.mode = mode;
+    g_m7.last_restart = reason;
+    g_m7.incarnation = incarnation;
+    g_m7.manager_initialized = manager_initialized != 0;
+    g_m7.last_status = last_status;
+    g_m7.qo = qo;
+    g_m7.safe = 1;
+}
+
+void m7_restore_discard(void)
+{
+    g_m7 = (m7_state_t){0};
 }
 
 noun m7_object(uint64_t kind, uint64_t object_id)
@@ -646,13 +694,17 @@ int m7_scheduler_boundary(void)
                 g_m7.mode = M7_MODE_STOPPED;
                 evq_clear();
                 tarm_clear();
-                digital_out_force_safe();
-                g_m7.safe = 1;
+                g_m7.safe = digital_out_force_safe();
+                if (!g_m7.safe)
+                    g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
             } else if (g_m7.pending_command == 3) {
                 evq_clear();
                 tarm_clear();
-                digital_out_force_safe();
-                g_m7.safe = 1;
+                g_m7.safe = digital_out_force_safe();
+                if (!g_m7.safe) {
+                    g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+                    g_m7.qo = 0;
+                }
                 if (g_m7.incarnation == UINT64_MAX) {
                     g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
                     g_m7.qo = 0;
@@ -686,8 +738,8 @@ int m7_force_stop(void)
     g_m7.pending = 0;
     evq_clear();
     tarm_clear();
-    digital_out_force_safe();
-    g_m7.safe = 1;
+    g_m7.safe = digital_out_force_safe();
+    int safe_ok = g_m7.safe;
     if (g_m7.incarnation == UINT64_MAX || !m7_advance_incarnation()) {
         g_m7.mode = M7_MODE_STOPPED;
         g_m7.qo = 0;
@@ -696,6 +748,10 @@ int m7_force_stop(void)
     }
     g_m7.mode = M7_MODE_STOPPED;
     g_m7.qo = 0;
+    if (!safe_ok) {
+        g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+        return M7_STATUS_SYSTEM_TERMINATION;
+    }
     return 0;
 }
 
@@ -759,7 +815,10 @@ int m7_deploy_seal(void)
         return M7_DEPLOY_OFFSET;
     if (g_m7.mode != M7_MODE_IDLE && g_m7.mode != M7_MODE_STOPPED)
         return M7_DEPLOY_STATE;
-    digital_out_force_safe();
+    if (!digital_out_force_safe()) {
+        g_m7.safe = 0;
+        return M7_DEPLOY_MEDIA;
+    }
     g_m7.safe = 1;
     if (!stage_digest_matches()) return M7_DEPLOY_DIGEST;
     noun gate;
@@ -789,7 +848,10 @@ int m7_deploy_activate(void)
         || g_m7.pending
         || (g_m7.mode != M7_MODE_IDLE && g_m7.mode != M7_MODE_STOPPED))
         return M7_DEPLOY_STATE;
-    digital_out_force_safe();
+    if (!digital_out_force_safe()) {
+        g_m7.safe = 0;
+        return M7_DEPLOY_MEDIA;
+    }
     g_m7.safe = 1;
     if (!stage_digest_matches()) return M7_DEPLOY_DIGEST;
 
@@ -974,9 +1036,10 @@ int m7_boot_snapshot(void)
         || !noun_is_direct(manager_init) || !noun_is_direct(manager_status)
         || !noun_is_direct(manager_qo)
         || direct_val(manager_init) > 1 || direct_val(manager_qo) > 1
+        || direct_val(manager_status) > M7_STATUS_OVERFLOW
         || direct_val(pill_len) == 0 || direct_val(pill_len) > M7_STAGE_BYTES
         || direct_val(mode) == M7_MODE_STOPPING
-        || direct_val(mode) > M7_MODE_STOPPED
+        || direct_val(mode) > M7_MODE_STOPPED || !noun_is_atom(reason)
         || direct_val(incarnation) == 0)
         return -1;
     noun pill_atom = cold_load(direct_val(pill_hash));
@@ -1017,32 +1080,35 @@ int m7_boot_snapshot(void)
         return -1;
     }
     noun live_gate;
+    int m7_was_ready = m7_ready();
     if (!kernel_m7_gate_with_incarnation(
-            pill_gate, direct_val(incarnation), &live_gate)
-        || kernel_m7_publish(live_gate, &snapshot_identity, capability) != 0) {
+            pill_gate, direct_val(incarnation), &live_gate)) {
         if (noun_tx_active()) noun_tx_abort();
         return -1;
     }
-    noun_tx_commit();
-    if (kernel_m7_restore_checkpoint(
-            identity_noun, live_gate, queue, timer) != 0)
+    if (m7_init(live_gate) != M7_STATUS_RDY) {
+        if (noun_tx_active()) noun_tx_abort();
         return -1;
-    g_m7.ready = 0;
+    }
+    if (kernel_m7_restore_checkpoint(
+            &snapshot_identity, capability, live_gate, queue, timer,
+            manager_result) != 0) {
+        if (!m7_was_ready)
+            m7_restore_discard();
+        if (noun_tx_active()) noun_tx_abort();
+        return -1;
+    }
+    m7_restore_state_commit(
+        direct_val(mode), reason, direct_val(incarnation),
+        direct_val(manager_init), direct_val(manager_status),
+        direct_val(manager_qo));
     g_m7.active_pill_hash = direct_val(pill_hash);
     g_m7.active_pill_len = direct_val(pill_len);
     for (size_t i = 0; i < sizeof(g_m7.active_pill_digest); i++)
         g_m7.active_pill_digest[i] = expected_digest[i];
     g_m7.active_pill_valid = 1;
-    if (m7_init(live_gate) != M7_STATUS_RDY) return -1;
-    g_m7.manager_initialized = direct_val(manager_init);
-    g_m7.last_status = direct_val(manager_status);
-    g_m7.qo = direct_val(manager_qo);
-    heap_set_mode(HEAP_MODE_PERSIST);
-    if (!noun_copy_checked(manager_result, &g_m7.result)) return -1;
-    g_m7.mode = direct_val(mode);
-    g_m7.incarnation = direct_val(incarnation);
-    g_m7.last_restart = reason;
-    digital_out_force_safe();
+    /* The atomic restore installer already performed the checked safe-low
+     * transition before its single RAM publication point. */
     g_m7.safe = 1;
     return 0;
 }

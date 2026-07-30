@@ -71,14 +71,16 @@ int digital_out_restore_safe(void)
     return configure_and_clear(1);
 }
 
-void digital_out_force_safe(void)
+int digital_out_force_safe(void)
 {
     audit(DIGITAL_OUT_OP_CLEAR, DIGITAL_OUT_GPIO_MASK);
-    if (!digital_out_backend_clear_fixed_bank())
+    int ok = digital_out_backend_clear_fixed_bank();
+    if (!ok)
         g_fatal = 1;
     g_shadow = 0;
     g_inhibited = 1;
     g_reconcile_armed = 0;
+    return ok && !g_fatal;
 }
 
 void digital_out_note_external_sample(void)

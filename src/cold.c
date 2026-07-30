@@ -418,6 +418,9 @@ int cold_init(void)
 
 static int jam_bytes(noun n, const uint8_t **out, uint64_t *out_len)
 {
+    uint64_t checked_len;
+    if (jam_size_checked(n, JAM_MAX_BYTES, &checked_len) != 0)
+        return -1;
     noun a = jam(n);
     if (noun_is_direct(a)) {
         uint64_t v = direct_val(a);
@@ -443,7 +446,7 @@ static int jam_bytes(noun n, const uint8_t **out, uint64_t *out_len)
     const uint8_t *bytes = (const uint8_t *)at->limbs;
     while (nbytes > 1 && bytes[nbytes - 1] == 0)
         nbytes--;
-    if (nbytes > JAM_SCRATCH_MAX)
+    if (nbytes > JAM_SCRATCH_MAX || nbytes > checked_len)
         return -1;
     for (uint64_t i = 0; i < nbytes; i++)
         jam_scratch[i] = bytes[i];

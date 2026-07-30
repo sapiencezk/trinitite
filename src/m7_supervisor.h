@@ -78,8 +78,15 @@ noun     m7_last_result_noun(void);
  * gate so a later flip cannot overwrite the formula while it is still in
  * use. */
 noun     m7_formula_root(void);
-int      m7_formula_retain(void);
+int      m7_supervisor_retain_roots(noun *formula_out, noun *result_out);
+void     m7_supervisor_publish_roots(noun formula, noun result);
 void     m7_formula_publish(noun formula);
+void     m7_result_publish(noun result);
+void     m7_restore_state_commit(uint64_t mode, noun reason,
+                                 uint64_t incarnation,
+                                 uint64_t manager_initialized,
+                                 uint64_t last_status, uint64_t qo);
+void     m7_restore_discard(void);
 
 /* Receipt is deliberately not REQ+.  A queued request is evaluated only by
  * m7_scheduler_boundary(), called after a complete application transaction. */

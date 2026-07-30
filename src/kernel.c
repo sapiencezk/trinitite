@@ -64,6 +64,9 @@
 #define CORD_I2_TIMER           0x72656d69742d3269ULL  /* "i2-timer" host→app */
 #define CORD_I2_RX_ORIGIN_V1    0x3178723269ULL        /* "i2rx1" ABI 1.1 */
 #define CORD_I2_INTERNAL_ORIGIN_V1 0x316e693269ULL      /* "i2in1" ABI 1.1 */
+#define H62_I2_LIFECYCLE        0x13ee37098c30ee2fULL  /* "i2-lifecycle" */
+#define H62_I2_CONTROL          0x3c349df1606d200dULL  /* "i2-control" */
+#define CORD_I2_EI              0x69652d3269ULL         /* "i2-ei" */
 #define H62_I2_SERVICE          0x30cfa0e9c7ed95b9ULL  /* "i2-service" host→app */
 #define CORD_I2_CKPT            32774703826154089ULL   /* %i2-ckpt durable snap  */
 
@@ -96,6 +99,34 @@ extern uint32_t noun_pill_version;
 static int noun_take(noun n, noun *head, noun *tail);
 static int token_fields(noun token, uint64_t *gen, uint64_t *inc,
                         uint64_t *owner, uint64_t *seq);
+static int checkpoint_install_m7_candidate(
+    const runtime_identity_t *identity, uint8_t capability_profile,
+    noun gate, noun queue, noun tarms, noun manager_result);
+
+static int m7_external_event_allowed(noun event)
+{
+    noun tag, rest;
+    if (!m7_ready() || m7_mode() != M7_MODE_RUNNING
+        || !noun_take(event, &tag, &rest) || !noun_is_atom(tag)
+        || !noun_is_cell(rest))
+        return 0;
+    if (noun_is_indirect(tag)) {
+        uint64_t h = indirect_hash(tag);
+        if (h == H62_I2_LIFECYCLE || h == H62_I2_CONTROL)
+            return 0;
+    }
+    char tag_name[32];
+    size_t tag_len = cord_to_cstr(tag, tag_name, sizeof tag_name);
+    int lifecycle = tag_len == 12;
+    int control = tag_len == 10;
+    for (size_t i = 0; i < tag_len && (lifecycle || control); i++) {
+        if (lifecycle && tag_name[i] != "i2-lifecycle"[i]) lifecycle = 0;
+        if (control && tag_name[i] != "i2-control"[i]) control = 0;
+    }
+    if (lifecycle || control)
+        return 0;
+    return 1;
+}
 
 /* ── Phase 6 — live kernel + staging ─────────────────────────────────────── */
 
@@ -105,6 +136,8 @@ static uint32_t      g_live_version;
 static volatile int  g_i2_preparing;
 static noun build_slam_formula(void);
 static int build_slam_formula_checked(noun *out);
+static int i2_gate_execution_limits(
+    noun gate, noun *execution_out, uint64_t *budget);
 static int make_timer_event_checked(noun token, noun *out);
 static noun g_slam_formula;
 
@@ -112,10 +145,6 @@ static noun     g_staged_kernel;
 static int      g_staged_shape;
 static uint32_t g_staged_version;
 static int      g_hstat;   /* idle / staged / pending */
-/* M7 owns the selected checkpoint schema.  This guard is only set while the
- * M7 restore path adapts its supervisor snapshot to the existing generic
- * checkpoint installer; external/generic i2-ckpt roots cannot replace it. */
-static int      g_m7_checkpoint_restore;
 
 static void emit_swapped(uint32_t ver);
 
@@ -1017,6 +1046,11 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
     if (noun_is_cell(m7_formula)
         && !noun_copy_checked(m7_formula, &candidate_m7_formula))
         goto alloc_fail;
+    noun candidate_m7_result = NOUN_ZERO;
+    noun m7_result = m7_last_result_noun();
+    if (noun_is_cell(m7_result)
+        && !noun_copy_checked(m7_result, &candidate_m7_result))
+        goto alloc_fail;
 
     /* The one publication point: no candidate allocation follows. */
     uint64_t publication_tick = runtime_counter_now();
@@ -1028,6 +1062,7 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
     g_slam_formula = candidate_slam;
     if (noun_is_cell(candidate_m7_formula))
         m7_formula_publish(candidate_m7_formula);
+    m7_result_publish(candidate_m7_result);
     g_evq = candidate_q;
     g_evq_tail = candidate_tail;
     g_evq_n = candidate_n;
@@ -2058,6 +2093,12 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
         uint64_t slam_start = runtime_counter_now();
         if (event_admit_tick == 0)
             event_admit_tick = slam_start;
+        if (event_from_i2_rx && !m7_external_event_allowed(event)) {
+            runtime_stats_count(RT_COUNT_ABORTS, 1);
+            uart_puts("M7 FENCE\r\n");
+            reject_event_scratch();
+            continue;
+        }
         runtime_stats_count(RT_COUNT_EVENTS_ADMITTED, 1);
         if (event_from_queue
             && !(event_timing.flags & EVQ_TIMING_RESTORED)) {
@@ -2328,9 +2369,6 @@ int shrine_mode_get(void)
 }
 
 #define CKPT_VER 2ULL
-#define H62_I2_LIFECYCLE 0x13ee37098c30ee2fULL
-#define H62_I2_CONTROL   0x3c349df1606d200dULL
-#define CORD_I2_EI       0x69652d3269ULL
 
 static int noun_take(noun n, noun *head, noun *tail);
 
@@ -2342,9 +2380,11 @@ int kernel_m7_publish(noun gate, const runtime_identity_t *identity,
         || !runtime_identity_validate_gate(gate, identity, 0)
         || !build_slam_formula_checked(&candidate_formula))
         return -1;
-    if (!m7_formula_retain())
+    noun candidate_m7_formula, candidate_m7_result;
+    if (!digital_out_force_safe()
+        || !m7_supervisor_retain_roots(
+            &candidate_m7_formula, &candidate_m7_result))
         return -1;
-    digital_out_force_safe();
     evq_clear();
     tarm_clear();
     g_kernel = gate;
@@ -2354,6 +2394,8 @@ int kernel_m7_publish(noun gate, const runtime_identity_t *identity,
     noun_pill_version = 2;
     runtime_identity_set(identity);
     runtime_identity_set_capability_profile(capability_profile);
+    m7_supervisor_publish_roots(
+        candidate_m7_formula, candidate_m7_result);
     return 0;
 }
 
@@ -2446,21 +2488,13 @@ int kernel_m7_checkpoint_capture_roots(noun *gate, noun *queue,
     return 1;
 }
 
-int kernel_m7_restore_checkpoint(noun identity, noun gate, noun queue,
-                                 noun tarms)
+int kernel_m7_restore_checkpoint(const runtime_identity_t *identity,
+                                 uint8_t capability_profile,
+                                 noun gate, noun queue, noun tarms,
+                                 noun manager_result)
 {
-    noun n0, n1, n2, n3, n4, ckpt;
-    if (!alloc_cell_checked(queue, tarms, &n0)
-        || !alloc_cell_checked(gate, n0, &n1)
-        || !alloc_cell_checked(direct(1), n1, &n2)
-        || !alloc_cell_checked(identity, n2, &n3)
-        || !alloc_cell_checked(direct(CKPT_VER), n3, &n4)
-        || !alloc_cell_checked(direct(CORD_I2_CKPT), n4, &ckpt))
-        return -1;
-    g_m7_checkpoint_restore = 1;
-    int result = checkpoint_install(ckpt);
-    g_m7_checkpoint_restore = 0;
-    return result;
+    return checkpoint_install_m7_candidate(
+        identity, capability_profile, gate, queue, tarms, manager_result);
 }
 
 void checkpoint_auto_every(uint64_t n)
@@ -2736,6 +2770,212 @@ static int checkpoint_validate(noun ckpt, checkpoint_view_t *view)
     return 1;
 }
 
+/* M7 restores a candidate identity before it is live.  Reuse the exact
+ * queue/timer validation rules of generic checkpoints without comparing the
+ * candidate to the currently running identity. */
+static int checkpoint_validate_m7_roots(checkpoint_view_t *view)
+{
+    if (!view || !runtime_identity_validate_gate(
+            view->gate, &view->identity, &view->incarnation))
+        return 0;
+    noun tokens[EVQ_CAP + TARM_MAX];
+    uint64_t token_n = 0;
+    noun q = view->queue;
+    uint64_t qn = 0;
+    while (noun_is_cell(q)) {
+        if (++qn > EVQ_CAP)
+            return 0;
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(q);
+        if (!validate_queued_event(
+                c->head, view->identity.generation, view->incarnation,
+                tokens, &token_n, EVQ_CAP + TARM_MAX))
+            return 0;
+        q = c->tail;
+    }
+    if (q != NOUN_ZERO)
+        return 0;
+
+    noun ids[TARM_MAX];
+    uint64_t id_n = 0;
+    noun tl = view->tarms;
+    uint64_t tn = 0;
+    while (noun_is_cell(tl)) {
+        if (++tn > TARM_MAX)
+            return 0;
+        cell_t *le = (cell_t *)(uintptr_t)cell_ptr(tl);
+        noun id_noun, erest, period_noun, remain_noun, token;
+        uint64_t id, period, remain, gen, inc, owner, seq;
+        if (!noun_take(le->head, &id_noun, &erest)
+            || !positive_direct(id_noun, &id)
+            || !noun_take(erest, &period_noun, &erest)
+            || !positive_direct(period_noun, &period)
+            || !noun_take(erest, &remain_noun, &token)
+            || !positive_direct(remain_noun, &remain)
+            || !token_fields(token, &gen, &inc, &owner, &seq)
+            || gen != view->identity.generation
+            || inc != view->incarnation || owner != id
+            || !token_unique(token, tokens, &token_n, EVQ_CAP + TARM_MAX))
+            return 0;
+        for (uint64_t i = 0; i < id_n; i++)
+            if (direct_val(ids[i]) == id)
+                return 0;
+        ids[id_n++] = id_noun;
+        tl = le->tail;
+    }
+    if (tl != NOUN_ZERO)
+        return 0;
+    view->queue_n = qn;
+    view->timer_n = tn;
+    return 1;
+}
+
+/* Construct the complete inactive M7 restore candidate.  Nothing in this
+ * function changes a live root until all gate, queue, timer, formula, result,
+ * and identity checks/copies have succeeded. */
+static int checkpoint_install_m7_candidate(
+    const runtime_identity_t *identity, uint8_t capability_profile,
+    noun gate, noun queue, noun tarms, noun manager_result)
+{
+    if (!identity || !m7_ready() || !noun_is_cell(gate)) {
+        g_checkpoint_last_result = COLD_RESULT_SHAPE;
+        return -1;
+    }
+    checkpoint_view_t view = {
+        .gate = gate, .queue = queue, .tarms = tarms,
+        .identity = *identity,
+        .incarnation = 0, .queue_n = 0, .timer_n = 0
+    };
+    uint64_t incarnation;
+    if (!runtime_identity_validate_gate(gate, identity, &incarnation)
+        || incarnation == 0) {
+        g_checkpoint_last_result = COLD_RESULT_SHAPE;
+        return -1;
+    }
+    view.incarnation = incarnation;
+    if (!checkpoint_validate_m7_roots(&view)
+        || !digital_out_restore_safe()) {
+        g_checkpoint_last_result = COLD_RESULT_SHAPE;
+        return -1;
+    }
+
+    uint64_t candidate_budget, live_budget;
+    noun candidate_limits, live_limits;
+    if (!i2_gate_execution_limits(
+            view.gate, &candidate_limits, &candidate_budget)) {
+        g_checkpoint_last_result = COLD_RESULT_SHAPE;
+        return -1;
+    }
+    if (runtime_origin_v1()
+        && identity->runtime_abi[1] == 1
+        && (!i2_gate_execution_limits(
+                g_checkpoint_limit_anchor, &live_limits, &live_budget)
+            || !noun_eq(candidate_limits, live_limits))) {
+        g_checkpoint_last_result = COLD_RESULT_IDENTITY;
+        return -1;
+    }
+
+    tarm_t candidate_tarms[TARM_MAX] = {0};
+    noun candidate_gate, candidate_q = NOUN_ZERO, candidate_tail = NOUN_ZERO;
+    noun candidate_slam, candidate_m7_formula = NOUN_ZERO;
+    noun candidate_m7_result = NOUN_ZERO;
+    uint64_t candidate_n = 0;
+    uint64_t now = cntvct();
+    heap_persist_begin_tx();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    if (!noun_copy_checked(view.gate, &candidate_gate))
+        goto m7_alloc_fail;
+
+    noun q = view.queue;
+    while (noun_is_cell(q)) {
+        cell_t *old = (cell_t *)(uintptr_t)cell_ptr(q);
+        noun event, node;
+        if (!noun_copy_checked(old->head, &event)
+            || !alloc_cell_checked(event, NOUN_ZERO, &node))
+            goto m7_alloc_fail;
+        if (!noun_is_cell(candidate_q))
+            candidate_q = candidate_tail = node;
+        else {
+            ((cell_t *)(uintptr_t)cell_ptr(candidate_tail))->tail = node;
+            candidate_tail = node;
+        }
+        g_evq_timing_candidate[candidate_n].admitted_tick = now;
+        g_evq_timing_candidate[candidate_n].timer_due_tick = 0;
+        g_evq_timing_candidate[candidate_n].flags = EVQ_TIMING_RESTORED;
+        candidate_n++;
+        q = old->tail;
+    }
+
+    noun tl = view.tarms;
+    int ti = 0;
+    while (noun_is_cell(tl)) {
+        cell_t *le = (cell_t *)(uintptr_t)cell_ptr(tl);
+        noun id_noun, erest, period_noun, remain_noun, token;
+        noun copied_token, event_cell;
+        if (!noun_take(le->head, &id_noun, &erest)
+            || !noun_take(erest, &period_noun, &erest)
+            || !noun_take(erest, &remain_noun, &token)
+            || !noun_is_direct(id_noun) || !noun_is_direct(period_noun)
+            || !noun_is_direct(remain_noun) || ti >= TARM_MAX)
+            goto m7_alloc_fail;
+        uint64_t remain = direct_val(remain_noun);
+        if (UINT64_MAX - now < remain
+            || !noun_copy_checked(token, &copied_token)
+            || !make_timer_event_checked(copied_token, &event_cell))
+            goto m7_alloc_fail;
+        candidate_tarms[ti].active = 1;
+        candidate_tarms[ti].id = direct_val(id_noun);
+        candidate_tarms[ti].period = direct_val(period_noun);
+        candidate_tarms[ti].next = now + remain;
+        candidate_tarms[ti].i2_token = copied_token;
+        candidate_tarms[ti].i2_event_cell = event_cell;
+        ti++;
+        tl = le->tail;
+    }
+    if (!build_slam_formula_checked(&candidate_slam))
+        goto m7_alloc_fail;
+    if (noun_is_cell(m7_formula_root())
+        && !noun_copy_checked(m7_formula_root(), &candidate_m7_formula))
+        goto m7_alloc_fail;
+    if (noun_is_cell(manager_result)
+        && !noun_copy_checked(manager_result, &candidate_m7_result))
+        goto m7_alloc_fail;
+
+    g_kernel = candidate_gate;
+    g_slam_formula = candidate_slam;
+    g_slam_budget = candidate_budget;
+    g_shrine_mode = 1;
+    noun_pill_shape = 1;
+    noun_pill_version = 2;
+    runtime_identity_set(identity);
+    runtime_identity_set_capability_profile(capability_profile);
+    if (noun_is_cell(candidate_m7_formula))
+        m7_formula_publish(candidate_m7_formula);
+    m7_result_publish(candidate_m7_result);
+    g_evq = candidate_q;
+    g_evq_tail = candidate_tail;
+    g_evq_n = candidate_n;
+    g_evq_timing_head = 0;
+    for (uint64_t i = 0; i < candidate_n; i++)
+        g_evq_timing[i] = g_evq_timing_candidate[i];
+    if (g_evq_n > g_evq_hwm)
+        g_evq_hwm = g_evq_n;
+    for (int i = 0; i < TARM_MAX; i++)
+        g_tarms[i] = candidate_tarms[i];
+    heap_persist_commit_tx();
+    if (noun_tx_active())
+        noun_tx_commit();
+    g_checkpoint_last_result = COLD_RESULT_VALID;
+    g_checkpoint_selected_generation = cold_selected_generation();
+    return 0;
+
+m7_alloc_fail:
+    heap_persist_abort_tx();
+    if (noun_tx_active())
+        noun_tx_abort();
+    g_checkpoint_last_result = COLD_RESULT_ALLOC;
+    return -1;
+}
+
 static int checkpoint_identity_matches(noun ckpt, int *identity_represented)
 {
     noun tag, rest, version, identity_noun;
@@ -2925,7 +3165,7 @@ int checkpoint_install(noun ckpt)
     /* A checkpoint is logical state only: never replay an energized bank. */
     if (runtime_identity_live()
         && runtime_identity_get()->runtime_abi[1] == 2
-        && m7_ready() && !g_m7_checkpoint_restore) {
+        && m7_ready()) {
         g_checkpoint_last_result = COLD_RESULT_SHAPE;
         if (noun_tx_active())
             noun_tx_abort();

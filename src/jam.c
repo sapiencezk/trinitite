@@ -157,6 +157,68 @@ static void do_jam(noun n) {
     }
 }
 
+/* Length-only companion to do_jam().  Keep this deliberately adjacent to the
+ * encoder: a deployment/checkpoint bound is only useful if it follows the
+ * exact back-reference and atom-shortening decisions of jam(). */
+static uint64_t g_jam_len;
+static uint64_t g_jam_max_bits;
+static int g_jam_len_ok;
+
+static void jam_len_add(uint64_t bits)
+{
+    if (!g_jam_len_ok || bits > g_jam_max_bits - g_jam_len) {
+        g_jam_len_ok = 0;
+        return;
+    }
+    g_jam_len += bits;
+}
+
+static void do_jam_len(noun n)
+{
+    if (!g_jam_len_ok)
+        return;
+    uint64_t cached_pos;
+    int found = jcache_get(n, &cached_pos);
+    if (noun_is_cell(n)) {
+        if (found) {
+            jam_len_add(2 + mat_len(direct(cached_pos)));
+        } else {
+            jcache_put(n, g_jam_len);
+            jam_len_add(2);
+            cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
+            do_jam_len(c->head);
+            do_jam_len(c->tail);
+        }
+        return;
+    }
+    if (!found) {
+        jcache_put(n, g_jam_len);
+        jam_len_add(1 + mat_len(n));
+        return;
+    }
+    uint64_t atom_bits = 1 + mat_len(n);
+    uint64_t ref_bits = 2 + mat_len(direct(cached_pos));
+    jam_len_add(atom_bits <= ref_bits ? atom_bits : ref_bits);
+}
+
+int jam_size_checked(noun n, uint64_t max_bytes, uint64_t *out_bytes)
+{
+    if (!out_bytes || max_bytes == 0
+        || max_bytes > UINT64_MAX / 8)
+        return -1;
+    g_jam_len = 0;
+    g_jam_max_bits = max_bytes * 8;
+    g_jam_len_ok = 1;
+    jcache_init();
+    do_jam_len(n);
+    if (!g_jam_len_ok)
+        return -1;
+    *out_bytes = (g_jam_len + 7) / 8;
+    if (*out_bytes == 0)
+        *out_bytes = 1;
+    return *out_bytes <= max_bytes ? 0 : -1;
+}
+
 noun jam(noun n) {
     jb_init(&g_jambuf);
     jcache_init();

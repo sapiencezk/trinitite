@@ -15,7 +15,10 @@ enum digital_out_operation {
 int  digital_out_boot_safe(void);
 int  digital_out_prepare_clean_pill(void);
 int  digital_out_restore_safe(void);
-void digital_out_force_safe(void);
+/* Return non-zero only when the backend clear completed and the output bank
+ * is therefore safe to claim.  The inhibit/shadow transition is performed
+ * even on failure, but a failed clear remains latched unsafe. */
+int digital_out_force_safe(void);
 void digital_out_note_external_sample(void);
 
 /* Post-commit activation of one complete logical [P1 P2 ALARM] bank. */
