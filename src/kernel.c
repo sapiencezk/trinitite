@@ -94,6 +94,8 @@ extern jmp_buf nock_abort;
 extern int noun_pill_shape;
 extern uint32_t noun_pill_version;
 static int noun_take(noun n, noun *head, noun *tail);
+static int token_fields(noun token, uint64_t *gen, uint64_t *inc,
+                        uint64_t *owner, uint64_t *seq);
 
 /* ── Phase 6 — live kernel + staging ─────────────────────────────────────── */
 
@@ -110,6 +112,10 @@ static noun     g_staged_kernel;
 static int      g_staged_shape;
 static uint32_t g_staged_version;
 static int      g_hstat;   /* idle / staged / pending */
+/* M7 owns the selected checkpoint schema.  This guard is only set while the
+ * M7 restore path adapts its supervisor snapshot to the existing generic
+ * checkpoint installer; external/generic i2-ckpt roots cannot replace it. */
+static int      g_m7_checkpoint_restore;
 
 static void emit_swapped(uint32_t ver);
 
@@ -2202,6 +2208,9 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                     activated >= event_admit_tick
                         ? activated - event_admit_tick : 0);
                 runtime_stats_count(RT_COUNT_COMMITS, 1);
+                if (runtime_identity_live()
+                    && runtime_identity_get()->runtime_abi[1] == 2)
+                    uart_puts("M7 COMMIT\r\n");
                 completed++;
                 heap_set_mode(HEAP_MODE_PERSIST);
                 heap_scratch_reset();
@@ -2318,6 +2327,13 @@ int shrine_mode_get(void)
     return g_shrine_mode;
 }
 
+#define CKPT_VER 2ULL
+#define H62_I2_LIFECYCLE 0x13ee37098c30ee2fULL
+#define H62_I2_CONTROL   0x3c349df1606d200dULL
+#define CORD_I2_EI       0x69652d3269ULL
+
+static int noun_take(noun n, noun *head, noun *tail);
+
 int kernel_m7_publish(noun gate, const runtime_identity_t *identity,
                       uint8_t capability_profile)
 {
@@ -2341,6 +2357,112 @@ int kernel_m7_publish(noun gate, const runtime_identity_t *identity,
     return 0;
 }
 
+int kernel_m7_replace_gate(noun gate)
+{
+    const runtime_identity_t *identity = runtime_identity_get();
+    uint64_t incarnation;
+    if (!identity || !noun_is_cell(gate)
+        || !runtime_identity_validate_gate(gate, identity, &incarnation))
+        return -1;
+    g_kernel = gate;
+    return 0;
+}
+
+int kernel_m7_gate_with_incarnation(noun source, uint64_t incarnation,
+                                    noun *out)
+{
+    const runtime_identity_t *identity = runtime_identity_get();
+    noun candidate, battery, sample, zero, state, tag, state_rest;
+    noun header, state_tail, program, dynamic;
+    noun versions, rest, resource_id, generation, old_incarnation;
+    noun battery_hash, program_hash, limits;
+    noun incarnation_node;
+    if (!out || incarnation == 0 || !identity) return 0;
+    if (!noun_copy_checked(source, &candidate)) return 0;
+    if (!noun_take(candidate, &battery, &sample)
+        || !noun_take(sample, &zero, &state) || !noun_is_direct(zero)
+        || direct_val(zero) != 0) return 0;
+    if (!noun_take(state, &tag, &state_rest)
+        || !noun_take(state_rest, &header, &state_tail)
+        || !noun_take(state_tail, &program, &dynamic)) return 0;
+    if (!noun_take(header, &versions, &rest)
+        || !noun_take(rest, &resource_id, &rest)
+        || !noun_take(rest, &generation, &rest)) return 0;
+    incarnation_node = rest;
+    if (!noun_take(rest, &old_incarnation, &rest)
+        || !noun_take(rest, &battery_hash, &rest)
+        || !noun_take(rest, &program_hash, &limits)
+        || !noun_is_direct(generation) || !noun_is_direct(old_incarnation)) return 0;
+    (void)versions;
+    (void)resource_id;
+    (void)generation;
+    (void)battery_hash;
+    (void)program_hash;
+    (void)limits;
+    if (!noun_is_cell(incarnation_node)) return 0;
+    ((cell_t *)(uintptr_t)cell_ptr(incarnation_node))->head = direct(incarnation);
+    *out = candidate;
+    if (!runtime_identity_validate_gate(
+            *out, identity, &old_incarnation)) return 0;
+    if (old_incarnation != incarnation) return 0;
+    return old_incarnation == incarnation;
+}
+
+int kernel_m7_checkpoint_capture_roots(noun *gate, noun *queue,
+                                       noun *tarms)
+{
+    const runtime_identity_t *identity = runtime_identity_get();
+    uint64_t incarnation;
+    uint64_t now = cntvct();
+    noun timer_root = NOUN_ZERO;
+    if (!gate || !queue || !tarms || g_activation_completion_n != 0
+        || !identity || !noun_is_cell(g_kernel) || !g_shrine_mode
+        || !runtime_identity_validate_gate(
+            g_kernel, identity, &incarnation)
+        || !noun_copy_checked(g_kernel, gate)
+        || !noun_copy_checked(g_evq, queue))
+        return 0;
+    for (int i = TARM_MAX - 1; i >= 0; i--) {
+        if (!g_tarms[i].active)
+            continue;
+        uint64_t generation, token_inc, owner, sequence;
+        noun token, n0, n1, entry, next;
+        if (!token_fields(g_tarms[i].i2_token, &generation, &token_inc,
+                          &owner, &sequence)
+            || generation != identity->generation
+            || token_inc != incarnation || owner != g_tarms[i].id
+            || g_tarms[i].period == 0
+            || !noun_copy_checked(g_tarms[i].i2_token, &token)
+            || !alloc_cell_checked(
+                direct(g_tarms[i].next > now
+                    ? g_tarms[i].next - now : 1), token, &n0)
+            || !alloc_cell_checked(direct(g_tarms[i].period), n0, &n1)
+            || !alloc_cell_checked(direct(g_tarms[i].id), n1, &entry)
+            || !alloc_cell_checked(entry, timer_root, &next))
+            return 0;
+        timer_root = next;
+    }
+    *tarms = timer_root;
+    return 1;
+}
+
+int kernel_m7_restore_checkpoint(noun identity, noun gate, noun queue,
+                                 noun tarms)
+{
+    noun n0, n1, n2, n3, n4, ckpt;
+    if (!alloc_cell_checked(queue, tarms, &n0)
+        || !alloc_cell_checked(gate, n0, &n1)
+        || !alloc_cell_checked(direct(1), n1, &n2)
+        || !alloc_cell_checked(identity, n2, &n3)
+        || !alloc_cell_checked(direct(CKPT_VER), n3, &n4)
+        || !alloc_cell_checked(direct(CORD_I2_CKPT), n4, &ckpt))
+        return -1;
+    g_m7_checkpoint_restore = 1;
+    int result = checkpoint_install(ckpt);
+    g_m7_checkpoint_restore = 0;
+    return result;
+}
+
 void checkpoint_auto_every(uint64_t n)
 {
     g_ckpt_every   = n;
@@ -2351,11 +2473,6 @@ uint64_t checkpoint_auto_get(void)
 {
     return g_ckpt_every;
 }
-
-#define CKPT_VER 2ULL
-#define H62_I2_LIFECYCLE 0x13ee37098c30ee2fULL
-#define H62_I2_CONTROL   0x3c349df1606d200dULL
-#define CORD_I2_EI       0x69652d3269ULL
 
 typedef struct {
     noun gate;
@@ -2806,6 +2923,14 @@ noun checkpoint_capture(void)
 int checkpoint_install(noun ckpt)
 {
     /* A checkpoint is logical state only: never replay an energized bank. */
+    if (runtime_identity_live()
+        && runtime_identity_get()->runtime_abi[1] == 2
+        && m7_ready() && !g_m7_checkpoint_restore) {
+        g_checkpoint_last_result = COLD_RESULT_SHAPE;
+        if (noun_tx_active())
+            noun_tx_abort();
+        return -1;
+    }
     if (!digital_out_restore_safe()) {
         g_checkpoint_last_result = COLD_RESULT_ALLOC;
         if (noun_tx_active())
@@ -2944,6 +3069,30 @@ int checkpoint_save(void)
         runtime_stats_count(RT_COUNT_CHECKPOINT_FAILURES, 1);
         return -1;
     }
+    if (runtime_identity_get()->runtime_abi[1] == 2 && m7_ready()) {
+        int result = m7_checkpoint_save();
+        if (result == 0 && cold_nv_enabled()) {
+            uint64_t flush_start = runtime_counter_now();
+            result = cold_nv_flush();
+            uint64_t flush_end = runtime_counter_now();
+            runtime_stats_record(
+                RT_PHASE_CHECKPOINT_MEDIA_FLUSH,
+                flush_end >= flush_start ? flush_end - flush_start : 0);
+        }
+        if (result == 0) {
+            runtime_stats_count(RT_COUNT_CHECKPOINTS, 1);
+            runtime_stats_set(
+                RT_COUNT_CHECKPOINT_GENERATION, cold_selected_generation());
+            runtime_stats_set(RT_COUNT_COLD_DATA_HEAD, cold_data_head());
+        } else {
+            runtime_stats_count(RT_COUNT_CHECKPOINT_FAILURES, 1);
+        }
+        uint64_t capture_end = runtime_counter_now();
+        runtime_stats_record(
+            RT_PHASE_CHECKPOINT_CAPTURE,
+            capture_end >= capture_start ? capture_end - capture_start : 0);
+        return result;
+    }
     heap_scratch_reset();
     if (!noun_tx_begin(HEAP_MODE_SCRATCH)) {
         runtime_stats_count(RT_COUNT_CHECKPOINT_FAILURES, 1);
@@ -2991,11 +3140,25 @@ int checkpoint_save(void)
 
 int checkpoint_load(void)
 {
-    noun ck;
     if (!runtime_identity_live()) {
         g_checkpoint_last_result = COLD_RESULT_IDENTITY;
         return -1;
     }
+    if (runtime_identity_get()->runtime_abi[1] == 2 && m7_ready()) {
+        /* M7 snapshots contain the outer supervisor root and active PILL
+         * reference; do not decode or install a generic i2-ckpt in their
+         * place.  CKLOAD uses the same selected M7 restore path as KERNEL. */
+        int m7_result = m7_boot_snapshot();
+        if (m7_result == 0) {
+            runtime_stats_count(RT_COUNT_RESTARTS, 1);
+            runtime_stats_note_memory();
+            return 0;
+        }
+        g_checkpoint_last_result = m7_result < 0
+            ? COLD_RESULT_SHAPE : COLD_RESULT_EMPTY;
+        return -1;
+    }
+    noun ck;
     heap_scratch_reset();
     if (cold_snap_decode(&ck) != 0) {
         g_checkpoint_last_result = cold_last_result();

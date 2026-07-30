@@ -100,6 +100,7 @@ int      m7_deploy_activate(void);
 int      m7_deploy_query(void);
 int      m7_deploy_abort(void);
 noun     m7_current_pill_digest(void);
+int      m7_checkpoint_save(void);
 
 /* Boot selected M7 supervisor snapshot.  0 = selected M7 snapshot loaded,
  * 1 = no M7 snapshot, negative = selected snapshot rejected closed. */

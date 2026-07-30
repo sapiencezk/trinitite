@@ -15,7 +15,12 @@
 /* One volatile stage.  It intentionally reuses the existing bounded PILL
  * scratch window; no staged bytes or decoded standby gate enter the live root. */
 #define M7_STAGE_BASE PILL_SCRATCH_BASE
-#define M7_STAGE_BYTES PILL_SCRATCH_SIZE
+/* The jam writer has a 131072-byte output buffer.  A raw PILL atom of N
+ * bytes needs 1 + 2*bitlen(bitlen(N*8)) + N*8 bits, so 131066 is the exact
+ * conservative byte ceiling that cannot overflow that writer.  This is the
+ * one end-to-end M7 deployment ceiling; larger PILL2 containers remain
+ * admissible to the generic loader but not to TRI_DEPLOY. */
+#define M7_STAGE_BYTES 131066u
 #define M7_MAX_CHUNK 4096u
 #define M7_MAX_CHUNKS 256u
 
@@ -64,6 +69,10 @@ typedef struct {
     int stage_sealed;
     runtime_identity_t stage_identity;
     uint8_t stage_capability;
+    uint64_t active_pill_hash;
+    uint64_t active_pill_len;
+    uint8_t active_pill_digest[32];
+    int active_pill_valid;
     noun result;
 } m7_state_t;
 
@@ -238,6 +247,104 @@ static noun stage_digest_noun(void)
     for (size_t i = 0; i < sizeof(g_m7.stage_digest); i++)
         ((uint8_t *)limbs)[i] = g_m7.stage_digest[i];
     return make_atom(limbs, 4);
+}
+
+static noun active_digest_noun(void)
+{
+    uint64_t limbs[4] = {0, 0, 0, 0};
+    for (size_t i = 0; i < sizeof(g_m7.active_pill_digest); i++)
+        ((uint8_t *)limbs)[i] = g_m7.active_pill_digest[i];
+    return make_atom(limbs, 4);
+}
+
+static int m7_manager_snapshot_root(noun *out)
+{
+    noun result = NOUN_ZERO;
+    noun n0, n1, n2;
+    if (!out || !noun_copy_checked(g_m7.result, &result)
+        || !alloc_cell_checked(direct(g_m7.qo), result, &n0)
+        || !alloc_cell_checked(direct(g_m7.last_status), n0, &n1)
+        || !alloc_cell_checked(direct(g_m7.manager_initialized != 0), n1, &n2))
+        return 0;
+    *out = n2;
+    return 1;
+}
+
+static int m7_snapshot_build(uint64_t pill_hash, uint64_t pill_len,
+                             noun pill_digest, noun identity, uint64_t mode,
+                             noun reason, uint64_t incarnation, noun gate,
+                             noun queue, noun tarms, noun *out)
+{
+    noun manager, rest, snapshot;
+    if (!out || pill_hash == 0 || pill_len == 0
+        || !noun_is_atom(pill_digest) || !noun_is_cell(identity)
+        || !noun_is_cell(gate) || !m7_manager_snapshot_root(&manager))
+        return 0;
+    rest = pair(queue, tarms);
+    rest = pair(manager, rest);
+    rest = pair(gate, rest);
+    rest = pair(direct(incarnation), rest);
+    rest = pair(reason, rest);
+    rest = pair(direct(mode), rest);
+    rest = pair(identity, rest);
+    rest = pair(pill_digest, rest);
+    rest = pair(direct(pill_len), rest);
+    rest = pair(direct(pill_hash), rest);
+    snapshot = pair(cord_from_bytes("M7-SUPERVISOR", 14), rest);
+    if (!noun_is_cell(snapshot))
+        return 0;
+    *out = snapshot;
+    return 1;
+}
+
+static int m7_advance_incarnation(void)
+{
+    if (g_m7.incarnation == UINT64_MAX)
+        return 0;
+    uint64_t next = g_m7.incarnation + 1;
+    noun next_gate;
+    heap_persist_begin_tx();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    if (!kernel_m7_gate_with_incarnation(
+            shrine_gate_get(), next, &next_gate)
+        || kernel_m7_replace_gate(next_gate) != 0) {
+        heap_persist_abort_tx();
+        heap_set_mode(HEAP_MODE_PERSIST);
+        return 0;
+    }
+    heap_persist_commit_tx();
+    g_m7.incarnation = next;
+    return 1;
+}
+
+static int m7_capture_active_pill(void)
+{
+    const uint8_t *base = (const uint8_t *)(uintptr_t)PILL_BASE;
+    uint64_t payload_len = 0;
+    for (int i = 0; i < 8; i++)
+        payload_len |= (uint64_t)base[16 + i] << (i * 8);
+    if (payload_len == 0 || payload_len > M7_STAGE_BYTES - 256)
+        return 0;
+    uint64_t total = 256 + payload_len;
+    uint64_t aligned = (total + 7) & ~7ULL;
+    for (uint64_t i = 0; i < total; i++)
+        ((uint8_t *)(uintptr_t)M7_STAGE_BASE)[i] = base[i];
+    for (uint64_t i = total; i < aligned; i++)
+        ((uint8_t *)(uintptr_t)M7_STAGE_BASE)[i] = 0;
+    noun pill_atom;
+    if (!make_atom_checked(
+            (const uint64_t *)(uintptr_t)M7_STAGE_BASE,
+            (total + 7) / 8, &pill_atom))
+        return 0;
+    uint64_t hash = cold_store(pill_atom);
+    if (hash == 0)
+        return 0;
+    blake3_hash((const uint8_t *)(uintptr_t)M7_STAGE_BASE,
+                (size_t)total, g_m7.active_pill_digest);
+    g_m7.active_pill_hash = hash;
+    g_m7.active_pill_len = total;
+    g_m7.active_pill_valid = 1;
+    return 1;
 }
 
 int m7_init(noun gate)
@@ -550,8 +657,12 @@ int m7_scheduler_boundary(void)
                     g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
                     g_m7.qo = 0;
                 } else {
-                    g_m7.incarnation++;
-                    g_m7.mode = M7_MODE_STOPPED;
+                    if (!m7_advance_incarnation()) {
+                        g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+                        g_m7.qo = 0;
+                    } else {
+                        g_m7.mode = M7_MODE_STOPPED;
+                    }
                 }
             } else {
                 g_m7.safe = 0;
@@ -577,13 +688,12 @@ int m7_force_stop(void)
     tarm_clear();
     digital_out_force_safe();
     g_m7.safe = 1;
-    if (g_m7.incarnation == UINT64_MAX) {
+    if (g_m7.incarnation == UINT64_MAX || !m7_advance_incarnation()) {
         g_m7.mode = M7_MODE_STOPPED;
         g_m7.qo = 0;
         g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
         return M7_STATUS_SYSTEM_TERMINATION;
     }
-    g_m7.incarnation++;
     g_m7.mode = M7_MODE_STOPPED;
     g_m7.qo = 0;
     return 0;
@@ -717,17 +827,20 @@ int m7_deploy_activate(void)
         return M7_DEPLOY_STORAGE;
     }
     uint64_t new_incarnation = g_m7.incarnation + 1;
-    noun rest = pair(direct(0), direct(0));
-    rest = pair(candidate_gate, rest);
-    rest = pair(direct(new_incarnation), rest);
-    rest = pair(direct(CORD_COLD), rest);
-    rest = pair(direct(M7_MODE_IDLE), rest);
-    rest = pair(identity_noun, rest);
-    rest = pair(pill_digest_noun, rest);
-    rest = pair(direct(g_m7.stage_total), rest);
-    rest = pair(direct(pill_hash), rest);
-    noun snapshot = pair(cord_from_bytes("M7-SUPERVISOR", 14), rest);
-    if (!noun_is_cell(snapshot) || cold_snap_save(snapshot) != 0) {
+    noun published_gate;
+    if (!kernel_m7_gate_with_incarnation(
+            candidate_gate, new_incarnation, &published_gate)) {
+        noun_tx_abort();
+        heap_persist_abort_tx();
+        return M7_DEPLOY_CANDIDATE;
+    }
+    candidate_gate = published_gate;
+    noun snapshot;
+    if (!m7_snapshot_build(
+            pill_hash, g_m7.stage_total, pill_digest_noun, identity_noun,
+            M7_MODE_IDLE, direct(CORD_COLD), new_incarnation,
+            candidate_gate, NOUN_ZERO, NOUN_ZERO, &snapshot)
+        || cold_snap_save(snapshot) != 0) {
         noun_tx_abort();
         heap_persist_abort_tx();
         return M7_DEPLOY_MEDIA;
@@ -742,6 +855,11 @@ int m7_deploy_activate(void)
     g_m7.mode = M7_MODE_IDLE;
     g_m7.incarnation = new_incarnation;
     g_m7.last_restart = g_m7.lifecycle_cold;
+    g_m7.active_pill_hash = pill_hash;
+    g_m7.active_pill_len = g_m7.stage_total;
+    for (size_t i = 0; i < sizeof(g_m7.active_pill_digest); i++)
+        g_m7.active_pill_digest[i] = g_m7.stage_digest[i];
+    g_m7.active_pill_valid = 1;
     g_m7.stage_open = 0;
     g_m7.stage_sealed = 0;
     return 0;
@@ -795,12 +913,45 @@ int m7_deploy_demo(void)
     return status;
 }
 
+int m7_checkpoint_save(void)
+{
+    if (!g_m7.ready || g_m7.pending || g_m7.stage_open
+        || g_m7.incarnation == 0)
+        return -1;
+    if (!g_m7.active_pill_valid && !m7_capture_active_pill())
+        return -1;
+
+    heap_scratch_reset();
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return -1;
+    noun gate, queue, tarms, identity, digest, snapshot;
+    if (!kernel_m7_checkpoint_capture_roots(&gate, &queue, &tarms)
+        || !runtime_identity_to_noun(runtime_identity_get(), &identity)
+        || !noun_copy_checked(active_digest_noun(), &digest)
+        || !m7_snapshot_build(
+            g_m7.active_pill_hash, g_m7.active_pill_len, digest, identity,
+            g_m7.mode, g_m7.last_restart, g_m7.incarnation,
+            gate, queue, tarms, &snapshot)) {
+        noun_tx_abort();
+        heap_set_mode(HEAP_MODE_PERSIST);
+        heap_scratch_reset();
+        return -1;
+    }
+    int result = cold_snap_save(snapshot);
+    noun_tx_abort();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return result;
+}
+
 int m7_boot_snapshot(void)
 {
     noun root = cold_snap_load();
     if (!noun_is_cell(root)) return 1;
     noun schema, rest, pill_hash, pill_len, pill_digest_noun, identity_noun;
-    noun mode, reason, incarnation, gate, queue, timer;
+    noun mode, reason, incarnation, gate, manager, queue, timer;
+    noun manager_init, manager_rest, manager_status, manager_qo;
+    noun manager_result;
     if (!take(root, &schema, &rest))
         return -1;
     if (!noun_eq(schema, cord_from_bytes("M7-SUPERVISOR", 14)))
@@ -813,12 +964,20 @@ int m7_boot_snapshot(void)
         || !take(rest, &reason, &rest)
         || !take(rest, &incarnation, &rest)
         || !take(rest, &gate, &rest)
+        || !take(rest, &manager, &rest)
         || !take(rest, &queue, &timer)
         || !noun_is_direct(pill_hash) || !noun_is_direct(pill_len)
         || !noun_is_direct(mode) || !noun_is_direct(incarnation)
+        || !take(manager, &manager_init, &manager_rest)
+        || !take(manager_rest, &manager_status, &manager_rest)
+        || !take(manager_rest, &manager_qo, &manager_result)
+        || !noun_is_direct(manager_init) || !noun_is_direct(manager_status)
+        || !noun_is_direct(manager_qo)
+        || direct_val(manager_init) > 1 || direct_val(manager_qo) > 1
         || direct_val(pill_len) == 0 || direct_val(pill_len) > M7_STAGE_BYTES
-        || direct_val(mode) != M7_MODE_IDLE
-        || direct_val(incarnation) == 0 || queue != NOUN_ZERO || timer != NOUN_ZERO)
+        || direct_val(mode) == M7_MODE_STOPPING
+        || direct_val(mode) > M7_MODE_STOPPED
+        || direct_val(incarnation) == 0)
         return -1;
     noun pill_atom = cold_load(direct_val(pill_hash));
     if (!noun_is_atom(pill_atom)
@@ -835,14 +994,14 @@ int m7_boot_snapshot(void)
         return -1;
     for (size_t i = 0; i < sizeof expected_digest; i++)
         if (expected_digest[i] != digest[i]) return -1;
-    uint64_t hash62 = 0;
-    for (int i = 0; i < 8; i++) hash62 |= (uint64_t)digest[i] << (i * 8);
-    hash62 &= 0x3FFFFFFFFFFFFFFFULL;
-    if (hash62 != direct_val(pill_hash)) return -1;
+    if (cold_jam_hash(pill_atom) != direct_val(pill_hash)) return -1;
     runtime_identity_t snapshot_identity;
+    uint64_t snapshot_gate_incarnation;
     if (!runtime_identity_from_noun(identity_noun, &snapshot_identity)
         || !m7_is_identity(&snapshot_identity)
-        || !runtime_identity_validate_gate(gate, &snapshot_identity, 0))
+        || !runtime_identity_validate_gate(
+            gate, &snapshot_identity, &snapshot_gate_incarnation)
+        || snapshot_gate_incarnation != direct_val(incarnation))
         return -1;
     noun pill_gate;
     runtime_identity_t pill_identity;
@@ -857,13 +1016,29 @@ int m7_boot_snapshot(void)
         if (noun_tx_active()) noun_tx_abort();
         return -1;
     }
-    if (kernel_m7_publish(gate, &snapshot_identity, capability) != 0) {
+    noun live_gate;
+    if (!kernel_m7_gate_with_incarnation(
+            pill_gate, direct_val(incarnation), &live_gate)
+        || kernel_m7_publish(live_gate, &snapshot_identity, capability) != 0) {
         if (noun_tx_active()) noun_tx_abort();
         return -1;
     }
     noun_tx_commit();
+    if (kernel_m7_restore_checkpoint(
+            identity_noun, live_gate, queue, timer) != 0)
+        return -1;
     g_m7.ready = 0;
-    if (m7_init(gate) != M7_STATUS_RDY) return -1;
+    g_m7.active_pill_hash = direct_val(pill_hash);
+    g_m7.active_pill_len = direct_val(pill_len);
+    for (size_t i = 0; i < sizeof(g_m7.active_pill_digest); i++)
+        g_m7.active_pill_digest[i] = expected_digest[i];
+    g_m7.active_pill_valid = 1;
+    if (m7_init(live_gate) != M7_STATUS_RDY) return -1;
+    g_m7.manager_initialized = direct_val(manager_init);
+    g_m7.last_status = direct_val(manager_status);
+    g_m7.qo = direct_val(manager_qo);
+    heap_set_mode(HEAP_MODE_PERSIST);
+    if (!noun_copy_checked(manager_result, &g_m7.result)) return -1;
     g_m7.mode = direct_val(mode);
     g_m7.incarnation = direct_val(incarnation);
     g_m7.last_restart = reason;

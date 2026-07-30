@@ -577,6 +577,17 @@ uint64_t cold_store(noun n)
     return hash62_of(h.payload_digest);
 }
 
+uint64_t cold_jam_hash(noun n)
+{
+    const uint8_t *bytes;
+    uint64_t len;
+    uint8_t digest[32];
+    if (jam_bytes(n, &bytes, &len) != 0)
+        return 0;
+    blake3_hash(bytes, (size_t)len, digest);
+    return hash62_of(digest);
+}
+
 noun cold_load(uint64_t hash62)
 {
     cold_super_t s;

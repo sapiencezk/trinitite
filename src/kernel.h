@@ -157,6 +157,13 @@ int      kernel_boot(noun pill_gate);
 /* M7 publication after durable candidate selection. */
 int      kernel_m7_publish(noun gate, const runtime_identity_t *identity,
                            uint8_t capability_profile);
+int      kernel_m7_replace_gate(noun gate);
+int      kernel_m7_gate_with_incarnation(noun source, uint64_t incarnation,
+                                          noun *out);
+int      kernel_m7_checkpoint_capture_roots(noun *gate, noun *queue,
+                                             noun *tarms);
+int      kernel_m7_restore_checkpoint(noun identity, noun gate, noun queue,
+                                      noun tarms);
 /* Strict PILL2 bounded/identity load, with isolated legacy I1 fallback. */
 noun     kernel_pill_load(void);
 /* Lab/test preparation: admit PILL2 and install its clean roots without

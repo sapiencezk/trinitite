@@ -43,6 +43,10 @@ uint64_t cold_selected_generation(void);
 uint64_t cold_data_head(void);
 
 uint64_t cold_store(noun n);
+/* Return the exact 62-bit identity of the canonical jam payload without
+ * appending a blob.  M7 uses this to compare a restored blob in the same
+ * hash domain used by cold_store(). */
+uint64_t cold_jam_hash(noun n);
 noun cold_load(uint64_t hash62);
 int cold_log(noun event);
 uint64_t cold_log_len(void);
