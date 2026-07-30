@@ -52,9 +52,20 @@ int runtime_identity_live(void);
 const runtime_identity_t *runtime_identity_get(void);
 uint8_t runtime_identity_capability_profile(void);
 void runtime_identity_set(const runtime_identity_t *identity);
+void runtime_identity_set_capability_profile(uint8_t profile);
 void runtime_identity_clear(void);
 
 /* Strict PILL2 load. Success returns a decoded, identity-validated gate.
  * Only NOT_I2/ABSENT may reach the isolated I1 compatibility probe. */
 pill_i2_status_t pill_i2_load(noun *gate_out);
+/* Validate a PILL2 byte buffer without changing the live RuntimeIdentity or
+ * PILL globals.  Successful cue leaves the noun transaction active; the
+ * caller must commit only when the enclosing candidate is accepted, or
+ * abort it after a side-effect-free seal probe. */
+pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
+                                         uint64_t available,
+                                         int heap_mode,
+                                         noun *gate_out,
+                                         runtime_identity_t *identity_out,
+                                         uint8_t *capability_out);
 const char *pill_i2_status_name(pill_i2_status_t status);

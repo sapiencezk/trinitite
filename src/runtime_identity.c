@@ -118,8 +118,6 @@ int runtime_identity_supported(const runtime_identity_t *id)
     int m7_host = id->host_abi[0] == 1 && id->host_abi[1] == 2
         && id->deployment_schema[0] == 1
         && id->deployment_schema[1] == 2;
-    if (!baseline_host && !digital_host && !m7_host)
-        return 0;
     int legacy = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 0
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 0;
     int origin_v1 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 1
@@ -128,6 +126,15 @@ int runtime_identity_supported(const runtime_identity_t *id)
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 2;
     if (!legacy && !origin_v1 && !m7)
         return 0;
+    /* ABI families are paired products. Do not admit a valid runtime with a
+     * host/deployment family from another product cut. M7's supervisor then
+     * has one exact (1,2) identity rather than relying on a second validator
+     * to reject mixed combinations later. */
+    if (m7) {
+        if (!m7_host) return 0;
+    } else if (!baseline_host && !digital_host) {
+        return 0;
+    }
     if (id->kernel_kver[0] != 2 || id->kernel_kver[1] != 0)
         return 0;
     return bytes_nonzero(id->package_hash, 32)
@@ -330,6 +337,12 @@ void runtime_identity_set(const runtime_identity_t *identity)
     g_live_capability_profile = RUNTIME_CAPABILITY_PROFILE_NONE;
 }
 
+void runtime_identity_set_capability_profile(uint8_t profile)
+{
+    if (g_live_identity_valid)
+        g_live_capability_profile = profile;
+}
+
 void runtime_identity_clear(void)
 {
     g_live_identity_valid = 0;
@@ -355,10 +368,13 @@ static const volatile uint8_t *pill_base(uint64_t *available)
     return (const volatile uint8_t *)_pill_embed_start;
 }
 
-pill_i2_status_t pill_i2_load(noun *gate_out)
+pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
+                                         uint64_t available,
+                                         int heap_mode,
+                                         noun *gate_out,
+                                         runtime_identity_t *identity_out,
+                                         uint8_t *capability_out)
 {
-    uint64_t available;
-    const volatile uint8_t *base = pill_base(&available);
     if (!gate_out || !base || available < 8)
         return PILL_I2_ABSENT;
     uint8_t magic[8];
@@ -430,7 +446,7 @@ pill_i2_status_t pill_i2_load(noun *gate_out)
 
     noun gate;
     cue_bounded_status_t cue_status = cue_bounded_bytes(
-        payload, len, &cue_i2_limits, HEAP_MODE_PERSIST, &gate);
+        payload, len, &cue_i2_limits, heap_mode, &gate);
     if (cue_status != CUE_BOUNDED_OK)
         return cue_status == CUE_BOUNDED_ALLOC
             ? PILL_I2_ALLOC : PILL_I2_CUE;
@@ -438,12 +454,28 @@ pill_i2_status_t pill_i2_load(noun *gate_out)
         noun_tx_abort();
         return PILL_I2_GATE;
     }
+    *gate_out = gate;
+    if (identity_out)
+        *identity_out = identity;
+    if (capability_out)
+        *capability_out = capability_profile;
+    return PILL_I2_OK;
+}
+
+pill_i2_status_t pill_i2_load(noun *gate_out)
+{
+    uint64_t available;
+    const volatile uint8_t *base = pill_base(&available);
+    pill_i2_status_t status = pill_i2_validate_buffer(
+        (const uint8_t *)(uintptr_t)base, available,
+        HEAP_MODE_PERSIST, gate_out, &g_live_identity,
+        &g_live_capability_profile);
+    if (status != PILL_I2_OK)
+        return status;
     noun_tx_commit();
-    runtime_identity_set(&identity);
-    g_live_capability_profile = capability_profile;
+    g_live_identity_valid = 1;
     noun_pill_shape = 1;
     noun_pill_version = 2;
-    *gate_out = gate;
     return PILL_I2_OK;
 }
 

@@ -14,6 +14,7 @@
 #include "i2_ingress.h"
 #include "runtime_stats.h"
 #include "digital_out.h"
+#include "m7_supervisor.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
 #define CORD_OUT     7632239ULL              /* %out      */
@@ -2200,6 +2201,11 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                     if (g_ckpt_commits % g_ckpt_every == 0)
                         checkpoint_save();
                 }
+                /* M7's fixed management mailbox is observed only after the
+                 * complete slam/preflight/promote/activate/cleanup unit. */
+                if (runtime_identity_live()
+                    && runtime_identity_get()->runtime_abi[1] == 2)
+                    (void)m7_scheduler_boundary();
                 if (max_commits && completed >= max_commits)
                     return;
                 continue;
@@ -2299,6 +2305,27 @@ noun shrine_gate_get(void)
 int shrine_mode_get(void)
 {
     return g_shrine_mode;
+}
+
+int kernel_m7_publish(noun gate, const runtime_identity_t *identity,
+                      uint8_t capability_profile)
+{
+    noun candidate_formula;
+    if (!noun_is_cell(gate) || !identity
+        || !runtime_identity_validate_gate(gate, identity, 0)
+        || !build_slam_formula_checked(&candidate_formula))
+        return -1;
+    digital_out_force_safe();
+    evq_clear();
+    tarm_clear();
+    g_kernel = gate;
+    g_slam_formula = candidate_formula;
+    g_shrine_mode = 1;
+    noun_pill_shape = 1;
+    noun_pill_version = 2;
+    runtime_identity_set(identity);
+    runtime_identity_set_capability_profile(capability_profile);
+    return 0;
 }
 
 void checkpoint_auto_every(uint64_t n)
@@ -3325,6 +3352,10 @@ static int install_clean_pill(noun pill_gate)
     for (int i = 0; i < TARM_MAX; i++)
         g_tarms[i] = empty_tarms[i];
     heap_persist_commit_tx();
+    if (runtime_identity_live()
+        && runtime_identity_get()->runtime_abi[1] == 2
+        && m7_init(g_kernel) != M7_STATUS_RDY)
+        return -1;
     return 0;
 }
 
@@ -3336,6 +3367,19 @@ int kernel_prepare_pill(void)
 
 int kernel_boot(noun pill_gate)
 {
+    if (runtime_identity_live()
+        && runtime_identity_get()->runtime_abi[1] == 2) {
+        int m7_snap = m7_boot_snapshot();
+        if (m7_snap == 0) {
+            uart_puts("boot: m7-snap\r\n");
+            shrine_loop(g_kernel);
+            return -1;
+        }
+        if (m7_snap < 0 && g_boot_policy == BOOT_SNAP) {
+            uart_puts("boot: m7-snap reject\r\n");
+            return -1;
+        }
+    }
     int want_snap = (g_boot_policy == BOOT_SNAP ||
                      g_boot_policy == BOOT_SNAP_ELSE_PILL);
 

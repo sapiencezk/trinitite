@@ -1,0 +1,852 @@
+#include <stddef.h>
+#include <stdint.h>
+#include "m7_supervisor.h"
+#include "runtime_identity.h"
+#include "bounded_cue.h"
+#include "blake3.h"
+#include "cold.h"
+#include "digital_out.h"
+#include "kernel.h"
+#include "jam.h"
+#include "memory.h"
+#include "nock.h"
+#include "uart.h"
+
+/* One volatile stage.  It intentionally reuses the existing bounded PILL
+ * scratch window; no staged bytes or decoded standby gate enter the live root. */
+#define M7_STAGE_BASE PILL_SCRATCH_BASE
+#define M7_STAGE_BYTES PILL_SCRATCH_SIZE
+#define M7_MAX_CHUNK 4096u
+#define M7_MAX_CHUNKS 256u
+
+#define CORD_COLD 0x646c6f63ULL
+#define CORD_WARM 0x6d726177ULL
+#define CORD_STOP 0x706f7473ULL
+
+/* TRI_DEPLOY never returns IEC Table-7 values. */
+enum {
+    M7_DEPLOY_BUSY = -20,
+    M7_DEPLOY_BOUNDS = -21,
+    M7_DEPLOY_OFFSET = -22,
+    M7_DEPLOY_DIGEST = -23,
+    M7_DEPLOY_CANDIDATE = -24,
+    M7_DEPLOY_STATE = -25,
+    M7_DEPLOY_STORAGE = -26,
+    M7_DEPLOY_MEDIA = -27
+};
+
+typedef struct {
+    int ready;
+    int manager_initialized;
+    int pending;
+    uint64_t pending_command;
+    noun pending_object;
+    uint64_t mode;
+    uint64_t incarnation;
+    uint64_t req_plus;
+    uint64_t confirmations;
+    uint64_t last_status;
+    uint64_t last_restart;
+    uint64_t qo;
+    noun formula;
+    noun tag[8];
+    noun table8_tag[18];
+    noun lifecycle_cold;
+    noun lifecycle_warm;
+    noun lifecycle_stop;
+    int safe;
+    uint8_t stage_digest[32];
+    uint64_t stage_id;
+    uint64_t stage_total;
+    uint64_t stage_received;
+    uint64_t stage_chunks;
+    int stage_open;
+    int stage_sealed;
+    runtime_identity_t stage_identity;
+    uint8_t stage_capability;
+    noun result;
+} m7_state_t;
+
+static m7_state_t g_m7;
+
+static int m7_reject(uint64_t status)
+{
+    g_m7.result = NOUN_ZERO;
+    g_m7.last_status = status;
+    g_m7.qo = 0;
+    return (int)status;
+}
+
+static noun pair(noun a, noun b)
+{
+    noun out = NOUN_ZERO;
+    return alloc_cell_checked(a, b, &out) ? out : NOUN_ZERO;
+}
+
+static noun f_lit(noun value) { return pair(direct(1), value); }
+static noun f_slot(uint64_t axis) { return pair(direct(0), direct(axis)); }
+static noun f_op(uint64_t op, noun args) { return pair(direct(op), args); }
+static noun f_unary(uint64_t op, noun a) { return f_op(op, a); }
+static noun f_binary(uint64_t op, noun a, noun b)
+{
+    return f_op(op, pair(a, b));
+}
+static noun f_head(noun f) { return f_binary(7, f, f_slot(2)); }
+static noun f_tail(noun f) { return f_binary(7, f, f_slot(3)); }
+static noun f_eq(noun a, noun b) { return f_binary(5, a, b); }
+static noun f_wut(noun a) { return f_unary(3, a); }
+static noun f_iff(noun cond, noun yes, noun no)
+{
+    return f_op(6, pair(cond, pair(yes, no)));
+}
+
+static noun f_any_eq(noun value, const noun *values, size_t count)
+{
+    noun out = f_lit(direct(1));
+    while (count != 0) {
+        count--;
+        out = f_iff(f_eq(value, f_lit(values[count])),
+                    f_lit(direct(0)), out);
+    }
+    return out;
+}
+
+static noun f_result(noun status, noun next_mode, noun reason)
+{
+    return pair(f_lit(status), pair(next_mode, reason));
+}
+
+static noun manager_formula(void)
+{
+    noun mode = f_slot(2);
+    noun rest = f_slot(3);
+    noun pending = f_head(rest);
+    noun request = f_tail(rest);
+    noun command = f_head(request);
+    noun object = f_tail(request);
+    noun object_cell = f_wut(object);
+    noun object_tag = f_head(object);
+    noun object_id = f_tail(object);
+    noun known[26];
+    noun aggregates[3];
+    noun queries[5];
+    for (size_t i = 0; i < 8; i++) known[i] = g_m7.tag[i];
+    for (size_t i = 0; i < 18; i++) known[8 + i] = g_m7.table8_tag[i];
+    aggregates[0] = g_m7.tag[0];
+    aggregates[1] = g_m7.tag[1];
+    aggregates[2] = g_m7.tag[2];
+    queries[0] = g_m7.tag[3];
+    queries[1] = g_m7.tag[4];
+    queries[2] = g_m7.tag[5];
+    queries[3] = g_m7.tag[6];
+    queries[4] = g_m7.tag[7];
+
+    noun command_values[9];
+    for (uint64_t i = 0; i < 9; i++) command_values[i] = direct(i);
+    noun start_stop[2] = { direct(2), direct(3) };
+    noun start_modes[2] = { direct(M7_MODE_IDLE), direct(M7_MODE_STOPPED) };
+    noun operation_queries = f_any_eq(object_tag, queries, 5);
+    noun aggregate = f_any_eq(object_tag, aggregates, 3);
+    noun known_tag = f_any_eq(object_tag, known, 26);
+    noun command_known = f_any_eq(command, command_values, 9);
+    noun start_stop_ok = f_any_eq(command, start_stop, 2);
+    noun valid_id = f_iff(f_wut(object_id), f_lit(direct(1)),
+                          f_iff(f_eq(object_id, f_lit(direct(0))),
+                                f_lit(direct(1)), f_lit(direct(0))));
+    noun object_shape_ok = f_iff(object_cell, valid_id, f_lit(direct(1)));
+    noun object_kind_ok = f_iff(known_tag, f_lit(direct(0)), f_lit(direct(1)));
+    noun object_exists = f_iff(f_eq(object_id, f_lit(direct(1))),
+                               f_lit(direct(0)), f_lit(direct(1)));
+    noun operation_ok = f_iff(
+        f_eq(command, f_lit(direct(7))), operation_queries,
+        f_iff(start_stop_ok, aggregate, f_lit(direct(1))));
+    noun start_state_ok = f_any_eq(mode, start_modes, 2);
+    noun stop_state_ok = f_eq(mode, f_lit(direct(M7_MODE_RUNNING)));
+    noun state_ok = f_iff(
+        f_eq(command, f_lit(direct(2))), start_state_ok,
+        f_iff(f_eq(command, f_lit(direct(3))), stop_state_ok,
+              f_lit(direct(0))));
+    noun next_mode = f_iff(f_eq(command, f_lit(direct(2))),
+                           f_lit(direct(M7_MODE_RUNNING)),
+                           f_lit(direct(M7_MODE_STOPPED)));
+    noun start_reason = f_iff(
+        f_eq(mode, f_lit(direct(M7_MODE_IDLE))),
+        f_lit(g_m7.lifecycle_cold), f_lit(g_m7.lifecycle_warm));
+    noun lifecycle_reason = f_iff(
+        f_eq(command, f_lit(direct(2))), start_reason,
+        f_iff(f_eq(command, f_lit(direct(3))),
+              f_lit(g_m7.lifecycle_stop), f_lit(direct(0))));
+    noun state_result = f_iff(
+        state_ok,
+        f_result(direct(M7_STATUS_RDY), next_mode, lifecycle_reason),
+        f_result(direct(M7_STATUS_INVALID_STATE), mode, f_lit(direct(0))));
+    noun operation_result = f_iff(
+        f_eq(command, f_lit(direct(7))),
+        f_result(direct(M7_STATUS_RDY), mode, f_lit(direct(0))),
+        state_result);
+    noun existence_result = f_iff(
+        operation_ok, operation_result,
+        f_result(direct(M7_STATUS_INVALID_OPERATION), mode, f_lit(direct(0))));
+    noun type_result = f_iff(
+        object_exists, existence_result,
+        f_result(direct(M7_STATUS_NO_SUCH_OBJECT), mode, f_lit(direct(0))));
+    noun shape_result = f_iff(
+        object_kind_ok, type_result,
+        f_result(direct(M7_STATUS_UNSUPPORTED_TYPE), mode, f_lit(direct(0))));
+    noun command_result = f_iff(
+        object_shape_ok, shape_result,
+        f_result(direct(M7_STATUS_INVALID_OBJECT), mode, f_lit(0)));
+    return f_iff(
+        f_eq(pending, f_lit(direct(1))),
+        f_result(direct(M7_STATUS_OVERFLOW), mode, f_lit(direct(0))),
+        f_iff(command_known, command_result,
+              f_result(direct(M7_STATUS_UNSUPPORTED_CMD), mode,
+                       f_lit(direct(0)))));
+}
+
+static int take(noun n, noun *head, noun *tail)
+{
+    if (!noun_is_cell(n)) return 0;
+    cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
+    *head = c->head;
+    *tail = c->tail;
+    return 1;
+}
+
+static int m7_is_identity(const runtime_identity_t *id)
+{
+    return id && id->runtime_abi[0] == 1 && id->runtime_abi[1] == 2
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 2
+        && id->host_abi[0] == 1 && id->host_abi[1] == 2
+        && id->deployment_schema[0] == 1
+        && id->deployment_schema[1] == 2;
+}
+
+static int stage_digest_matches(void)
+{
+    uint8_t digest[32];
+    blake3_hash((const void *)(uintptr_t)M7_STAGE_BASE,
+                (size_t)g_m7.stage_total, digest);
+    for (size_t i = 0; i < sizeof digest; i++)
+        if (digest[i] != g_m7.stage_digest[i]) return 0;
+    return 1;
+}
+
+static noun stage_digest_noun(void)
+{
+    uint64_t limbs[4] = {0, 0, 0, 0};
+    for (size_t i = 0; i < sizeof(g_m7.stage_digest); i++)
+        ((uint8_t *)limbs)[i] = g_m7.stage_digest[i];
+    return make_atom(limbs, 4);
+}
+
+int m7_init(noun gate)
+{
+    const runtime_identity_t *id = runtime_identity_get();
+    if (!m7_is_identity(id) || !runtime_identity_validate_gate(gate, id, 0)) {
+        g_m7.ready = 0;
+        return M7_STATUS_NOT_READY;
+    }
+    if (!g_m7.ready) {
+        g_m7.tag[0] = cord_from_bytes("MANAGER", 7);
+        g_m7.tag[1] = cord_from_bytes("RESOURCE", 8);
+        g_m7.tag[2] = cord_from_bytes("APPLICATION", 11);
+        g_m7.tag[3] = cord_from_bytes("INVENTORY", 9);
+        g_m7.tag[4] = cord_from_bytes("IDENTITY", 8);
+        g_m7.tag[5] = cord_from_bytes("STATE", 5);
+        g_m7.tag[6] = cord_from_bytes("FB_INVENTORY", 12);
+        g_m7.tag[7] = cord_from_bytes("FB_STATUS", 9);
+        const char *table8[] = {
+            "TYPE_DECLARATION", "FB_TYPE_DECLARATION",
+            "FB_INSTANCE_DEFINITION", "CONNECTION_DEFINITION",
+            "DATA_TYPE_NAME", "FB_TYPE_NAME", "FB_INSTANCE_REFERENCE",
+            "CONNECTION_START_POINT", "APPLICATION_NAME", "ALL_DATA_TYPES",
+            "ALL_FB_TYPES", "EVENT_INPUT", "EVENT_OUTPUT", "DATA_INPUT",
+            "DATA_OUTPUT", "PARAMETER_REFERENCE", "REFERENCED_PARAMETER",
+            "PARAMETER"
+        };
+        const size_t table8_len[] = {
+            16, 19, 22, 21, 14, 12, 21, 22, 16, 14, 12, 11, 12, 10,
+            11, 19, 20, 9
+        };
+        for (size_t i = 0; i < 18; i++)
+            g_m7.table8_tag[i] = cord_from_bytes(table8[i], table8_len[i]);
+        g_m7.lifecycle_cold = cord_from_bytes("cold", 4);
+        g_m7.lifecycle_warm = cord_from_bytes("warm", 4);
+        g_m7.lifecycle_stop = cord_from_bytes("stop", 4);
+        g_m7.formula = manager_formula();
+        if (!noun_is_cell(g_m7.formula)) {
+            g_m7.ready = 0;
+            return M7_STATUS_SYSTEM_TERMINATION;
+        }
+        g_m7.mode = M7_MODE_IDLE;
+        g_m7.incarnation = 1;
+        g_m7.last_status = M7_STATUS_RDY;
+        g_m7.qo = 1;
+        g_m7.result = NOUN_ZERO;
+        g_m7.safe = 1;
+        g_m7.manager_initialized = 1;
+        g_m7.ready = 1;
+    }
+    return M7_STATUS_RDY;
+}
+
+int m7_manager_init(int qi)
+{
+    if (!g_m7.ready) {
+        return m7_reject(M7_STATUS_NOT_READY);
+    }
+    g_m7.manager_initialized = qi != 0;
+    g_m7.pending = 0;
+    g_m7.result = NOUN_ZERO;
+    g_m7.qo = g_m7.manager_initialized;
+    g_m7.last_status = g_m7.manager_initialized
+        ? M7_STATUS_RDY : M7_STATUS_NOT_READY;
+    return (int)g_m7.last_status;
+}
+
+int m7_ready(void) { return g_m7.ready; }
+uint64_t m7_mode(void) { return g_m7.mode; }
+uint64_t m7_incarnation(void) { return g_m7.incarnation; }
+uint64_t m7_req_plus(void) { return g_m7.req_plus; }
+uint64_t m7_confirmations(void) { return g_m7.confirmations; }
+uint64_t m7_qo(void) { return g_m7.qo; }
+uint64_t m7_last_status(void) { return g_m7.last_status; }
+uint64_t m7_last_restart(void) { return g_m7.last_restart; }
+noun m7_last_result_noun(void) { return g_m7.result; }
+
+noun m7_object(uint64_t kind, uint64_t object_id)
+{
+    if (kind == 0 || kind > M7_OBJECT_COUNT || object_id == 0)
+        return NOUN_ZERO;
+    noun tag = kind <= 8 ? g_m7.tag[kind - 1]
+                         : g_m7.table8_tag[kind - 9];
+    return pair(tag, direct(object_id));
+}
+
+int m7_manager_request(uint64_t command, noun object)
+{
+    if (!g_m7.ready || !g_m7.manager_initialized) {
+        return m7_reject(M7_STATUS_NOT_READY);
+    }
+    g_m7.result = NOUN_ZERO;
+    if (g_m7.pending) {
+        return m7_reject(M7_STATUS_OVERFLOW);
+    }
+    if (!noun_is_cell(object)) {
+        return m7_reject(M7_STATUS_INVALID_OBJECT);
+    }
+    g_m7.pending = 1;
+    g_m7.pending_command = command;
+    g_m7.pending_object = object;
+    g_m7.last_status = M7_STATUS_RDY; /* receipt, not REQ+ */
+    g_m7.qo = 1;
+    return M7_STATUS_RDY;
+}
+
+int m7_manager_request_bytes(uint64_t command, const uint8_t *object,
+                             uint64_t object_len)
+{
+    if (!g_m7.ready || !g_m7.manager_initialized)
+        return m7_reject(M7_STATUS_NOT_READY);
+    if (g_m7.pending) {
+        return m7_reject(M7_STATUS_OVERFLOW);
+    }
+    if (command > 8)
+        return m7_reject(M7_STATUS_UNSUPPORTED_CMD);
+    if (!object || object_len == 0 || object_len > 512)
+        return m7_reject(M7_STATUS_INVALID_OBJECT);
+    noun decoded;
+    cue_bounded_limits_t limits = cue_i2_limits;
+    limits.max_input_bytes = 512;
+    limits.max_depth = 64;
+    limits.max_cells = 64;
+    limits.max_atom_bytes = 256;
+    cue_bounded_status_t status = cue_bounded_bytes(
+        object, object_len, &limits, HEAP_MODE_PERSIST, &decoded);
+    uint8_t canonical[512];
+    noun canonical_atom = status == CUE_BOUNDED_OK ? jam(decoded) : NOUN_ZERO;
+    int canonical_ok = status == CUE_BOUNDED_OK
+        && noun_atom_read_fixed(canonical_atom, canonical, object_len);
+    if (canonical_ok) {
+        for (uint64_t i = 0; i < object_len; i++)
+            if (canonical[i] != object[i]) { canonical_ok = 0; break; }
+    }
+    if (!canonical_ok) {
+        if (noun_tx_active()) noun_tx_abort();
+        return m7_reject(M7_STATUS_INVALID_OBJECT);
+    }
+    noun_tx_commit();
+    return m7_manager_request(command, decoded);
+}
+
+static int m7_deliver_restart(noun reason)
+{
+    if (evq_len() >= evq_cap()) return 0;
+    heap_set_mode(HEAP_MODE_PERSIST);
+    noun event = pair(cord_from_bytes("i2-lifecycle", 12), reason);
+    if (!noun_is_cell(event)) return 0;
+    evq_enq(event);
+    /* The target executor runs the closed lifecycle intent through the same
+     * admitted Nock transaction path. The M7 boundary itself remains after
+     * the caller's complete transaction; this nested unit is bounded to one
+     * lifecycle commit and has no ordinary ingress opportunity. */
+    return kernel_run_bounded(1) == 0;
+}
+
+/* QUERY results are built from the admitted live root at REQ+; no package
+ * bytes or decoded standby root are consulted. The result vocabulary is
+ * intentionally small but truthful for the static profile. */
+static int m7_inventory_result(noun tag, int status, noun *out)
+{
+    noun gate = shrine_gate_get();
+    noun battery, sample, axis, state, state_tag, rest;
+    noun header, program, dynamic, states, formula;
+    (void)battery; (void)axis; (void)state_tag;
+    (void)header; (void)program; (void)formula;
+    if (!out || !take(gate, &battery, &sample)
+        || !take(sample, &axis, &state)
+        || !take(state, &state_tag, &rest)
+        || !take(rest, &header, &rest)
+        || !take(rest, &program, &dynamic)
+        || !take(dynamic, &states, &formula))
+        return 0;
+    noun entries[64];
+    uint64_t count = 0;
+    while (noun_is_cell(states) && count < 64) {
+        noun entry, tail, id, body, kind;
+        if (!take(states, &entry, &tail) || !take(entry, &id, &body)
+            || !noun_is_direct(id) || direct_val(id) == 0
+            || !take(body, &kind, &rest))
+            return 0;
+        entries[count] = status
+            ? pair(id, cord_from_bytes("MANAGED", 7))
+            : pair(id, kind);
+        if (!noun_is_cell(entries[count])) return 0;
+        count++;
+        states = tail;
+    }
+    if (states != NOUN_ZERO) return 0;
+    noun list = NOUN_ZERO;
+    while (count != 0) {
+        noun next;
+        if (!alloc_cell_checked(entries[--count], list, &next)) return 0;
+        list = next;
+    }
+    return alloc_cell_checked(tag, list, out);
+}
+
+static int m7_query_result(noun object, noun *out)
+{
+    noun tag, id;
+    if (!out || !take(object, &tag, &id)
+        || !noun_is_direct(id) || direct_val(id) != 1)
+        return 0;
+    if (noun_eq(tag, g_m7.tag[3])) {
+        noun app = pair(g_m7.tag[2], direct(1));
+        noun list = pair(app, NOUN_ZERO);
+        return noun_is_cell(app) && noun_is_cell(list)
+            && alloc_cell_checked(tag, list, out);
+    }
+    if (noun_eq(tag, g_m7.tag[4])) {
+        noun identity;
+        return runtime_identity_to_noun(runtime_identity_get(), &identity)
+            && alloc_cell_checked(tag, identity, out);
+    }
+    if (noun_eq(tag, g_m7.tag[5])) {
+        noun state = pair(direct(g_m7.mode), direct(g_m7.incarnation));
+        return noun_is_cell(state) && alloc_cell_checked(tag, state, out);
+    }
+    if (noun_eq(tag, g_m7.tag[6]))
+        return m7_inventory_result(tag, 0, out);
+    if (noun_eq(tag, g_m7.tag[7]))
+        return m7_inventory_result(tag, 1, out);
+    return 0;
+}
+
+int m7_scheduler_boundary(void)
+{
+    if (!g_m7.ready || !g_m7.pending)
+        return 0;
+    noun subject = pair(
+        direct(g_m7.mode),
+        /* The mailbox was pending at receipt, but is no longer pending at
+         * REQ+.  OVERFLOW is decided by the receipt path, not self-applied
+         * to the request being dequeued. */
+        pair(direct(0), pair(direct(g_m7.pending_command),
+                             g_m7.pending_object)));
+    g_m7.pending = 0;
+    g_m7.result = NOUN_ZERO;
+    g_m7.req_plus++;
+    heap_scratch_reset();
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    noun result = nock(subject, g_m7.formula);
+    noun status, rest, next_mode, reason;
+    if (!take(result, &status, &rest) || !take(rest, &next_mode, &reason)
+        || !noun_is_direct(status) || !noun_is_direct(next_mode)) {
+        g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+        g_m7.qo = 0;
+        g_m7.confirmations++;
+        heap_set_mode(HEAP_MODE_PERSIST);
+        return (int)g_m7.last_status;
+    }
+    g_m7.last_status = direct_val(status);
+    g_m7.last_restart = noun_is_atom(reason) ? reason : NOUN_ZERO;
+    g_m7.qo = g_m7.last_status == M7_STATUS_RDY;
+    if (g_m7.last_status == M7_STATUS_RDY) {
+        if (g_m7.pending_command == 7) {
+            heap_set_mode(HEAP_MODE_PERSIST);
+            int query_ok = noun_tx_begin(HEAP_MODE_PERSIST)
+                && m7_query_result(g_m7.pending_object, &g_m7.result);
+            if (query_ok) noun_tx_commit();
+            else if (noun_tx_active()) noun_tx_abort();
+            heap_set_mode(HEAP_MODE_SCRATCH);
+            if (!query_ok) {
+                g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+                g_m7.qo = 0;
+            }
+        }
+        if (g_m7.pending_command == 2 || g_m7.pending_command == 3) {
+            g_m7.mode = direct_val(next_mode);
+            if (g_m7.pending_command == 3) {
+                g_m7.mode = M7_MODE_STOPPING;
+            }
+            int delivered = m7_deliver_restart(g_m7.last_restart);
+            if (!delivered) {
+                g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+                g_m7.qo = 0;
+                g_m7.mode = M7_MODE_STOPPED;
+                evq_clear();
+                tarm_clear();
+                digital_out_force_safe();
+                g_m7.safe = 1;
+            } else if (g_m7.pending_command == 3) {
+                evq_clear();
+                tarm_clear();
+                digital_out_force_safe();
+                g_m7.safe = 1;
+                if (g_m7.incarnation == UINT64_MAX) {
+                    g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+                    g_m7.qo = 0;
+                } else {
+                    g_m7.incarnation++;
+                    g_m7.mode = M7_MODE_STOPPED;
+                }
+            } else {
+                g_m7.safe = 0;
+            }
+            uart_puts("M7 RESTART ");
+            if (g_m7.pending_command == 2)
+                uart_puts(g_m7.last_restart == g_m7.lifecycle_cold ? "COLD\r\n" : "WARM\r\n");
+            else
+                uart_puts("STOP\r\n");
+        }
+    }
+    g_m7.confirmations++;
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return (int)g_m7.last_status;
+}
+
+int m7_force_stop(void)
+{
+    if (!g_m7.ready) return M7_STATUS_NOT_READY;
+    g_m7.pending = 0;
+    evq_clear();
+    tarm_clear();
+    digital_out_force_safe();
+    g_m7.safe = 1;
+    if (g_m7.incarnation == UINT64_MAX) {
+        g_m7.mode = M7_MODE_STOPPED;
+        g_m7.qo = 0;
+        g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+        return M7_STATUS_SYSTEM_TERMINATION;
+    }
+    g_m7.incarnation++;
+    g_m7.mode = M7_MODE_STOPPED;
+    g_m7.qo = 0;
+    return 0;
+}
+
+int m7_reset(void)
+{
+    int status = m7_force_stop();
+    if (status != 0 && status != M7_STATUS_SYSTEM_TERMINATION) return status;
+    if (status == M7_STATUS_SYSTEM_TERMINATION) {
+        g_m7.last_status = status;
+        g_m7.qo = 0;
+        return status;
+    }
+    g_m7.mode = M7_MODE_IDLE;
+    g_m7.last_status = M7_STATUS_RDY;
+    g_m7.qo = 1;
+    return status;
+}
+
+int m7_deploy_begin(uint64_t stage_id, uint64_t total, noun digest)
+{
+    if (!g_m7.ready) return M7_STATUS_NOT_READY;
+    if (g_m7.stage_open) return M7_DEPLOY_BUSY;
+    if (stage_id == 0 || total == 0 || total > M7_STAGE_BYTES
+        || !noun_atom_read_fixed(digest, g_m7.stage_digest, 32))
+        return M7_DEPLOY_BOUNDS;
+    g_m7.stage_id = stage_id;
+    g_m7.stage_total = total;
+    g_m7.stage_received = 0;
+    g_m7.stage_chunks = 0;
+    g_m7.stage_open = 1;
+    g_m7.stage_sealed = 0;
+    /* make_atom_checked consumes complete limbs; clear the unused tail of
+     * the final limb so the cold blob represents exactly `total` bytes. */
+    uint64_t aligned = (total + 7) & ~7ULL;
+    for (uint64_t i = total; i < aligned; i++)
+        ((uint8_t *)(uintptr_t)M7_STAGE_BASE)[i] = 0;
+    return 0;
+}
+
+int m7_deploy_chunk(uint64_t stage_id, uint64_t offset,
+                    const uint8_t *bytes, uint64_t len)
+{
+    if (!g_m7.stage_open || g_m7.stage_sealed || stage_id != g_m7.stage_id)
+        return M7_DEPLOY_BUSY;
+    if (!bytes || len == 0 || len > M7_MAX_CHUNK
+        || offset != g_m7.stage_received
+        || g_m7.stage_chunks >= M7_MAX_CHUNKS
+        || len > g_m7.stage_total - g_m7.stage_received)
+        return M7_DEPLOY_OFFSET;
+    uint8_t *dst = (uint8_t *)(uintptr_t)(M7_STAGE_BASE + offset);
+    for (uint64_t i = 0; i < len; i++) dst[i] = bytes[i];
+    g_m7.stage_received += len;
+    g_m7.stage_chunks++;
+    return 0;
+}
+
+int m7_deploy_seal(void)
+{
+    if (!g_m7.stage_open || g_m7.stage_sealed
+        || g_m7.stage_received != g_m7.stage_total || g_m7.pending)
+        return M7_DEPLOY_OFFSET;
+    if (g_m7.mode != M7_MODE_IDLE && g_m7.mode != M7_MODE_STOPPED)
+        return M7_DEPLOY_STATE;
+    digital_out_force_safe();
+    g_m7.safe = 1;
+    if (!stage_digest_matches()) return M7_DEPLOY_DIGEST;
+    noun gate;
+    runtime_identity_t identity;
+    uint8_t capability;
+    pill_i2_status_t status = pill_i2_validate_buffer(
+        (const uint8_t *)(uintptr_t)M7_STAGE_BASE, g_m7.stage_total,
+        HEAP_MODE_SCRATCH, &gate, &identity, &capability);
+    if (status != PILL_I2_OK) return M7_DEPLOY_CANDIDATE;
+    noun_tx_abort(); /* seal is a pure validation probe */
+    if (!m7_is_identity(&identity)) return M7_DEPLOY_CANDIDATE;
+    g_m7.stage_identity = identity;
+    g_m7.stage_capability = capability;
+    g_m7.stage_sealed = 1;
+    return 0;
+}
+
+static noun m7_identity_noun(const runtime_identity_t *identity)
+{
+    noun out = NOUN_ZERO;
+    return runtime_identity_to_noun(identity, &out) ? out : NOUN_ZERO;
+}
+
+int m7_deploy_activate(void)
+{
+    if (!g_m7.stage_open || !g_m7.stage_sealed
+        || g_m7.pending
+        || (g_m7.mode != M7_MODE_IDLE && g_m7.mode != M7_MODE_STOPPED))
+        return M7_DEPLOY_STATE;
+    digital_out_force_safe();
+    g_m7.safe = 1;
+    if (!stage_digest_matches()) return M7_DEPLOY_DIGEST;
+
+    /* Candidate decode and all new persistent cells live in the inactive
+     * semispace until the cold snapshot has selected the complete pair. */
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_persist_begin_tx();
+    noun candidate_gate;
+    runtime_identity_t identity;
+    uint8_t capability;
+    pill_i2_status_t status = pill_i2_validate_buffer(
+        (const uint8_t *)(uintptr_t)M7_STAGE_BASE, g_m7.stage_total,
+        HEAP_MODE_PERSIST, &candidate_gate, &identity, &capability);
+    if (status != PILL_I2_OK || !m7_is_identity(&identity)) {
+        if (noun_tx_active()) noun_tx_abort();
+        heap_persist_abort_tx();
+        return M7_DEPLOY_CANDIDATE;
+    }
+    noun pill_atom;
+    if (!make_atom_checked(
+            (const uint64_t *)(uintptr_t)M7_STAGE_BASE,
+            (g_m7.stage_total + 7) / 8, &pill_atom)) {
+        noun_tx_abort();
+        heap_persist_abort_tx();
+        return M7_DEPLOY_STORAGE;
+    }
+    uint64_t pill_hash = cold_store(pill_atom);
+    noun identity_noun = m7_identity_noun(&identity);
+    noun pill_digest_noun = stage_digest_noun();
+    if (pill_hash == 0 || !noun_is_cell(identity_noun)
+        || !noun_is_atom(pill_digest_noun)
+        || g_m7.incarnation == UINT64_MAX) {
+        noun_tx_abort();
+        heap_persist_abort_tx();
+        return M7_DEPLOY_STORAGE;
+    }
+    uint64_t new_incarnation = g_m7.incarnation + 1;
+    noun rest = pair(direct(0), direct(0));
+    rest = pair(candidate_gate, rest);
+    rest = pair(direct(new_incarnation), rest);
+    rest = pair(direct(CORD_COLD), rest);
+    rest = pair(direct(M7_MODE_IDLE), rest);
+    rest = pair(identity_noun, rest);
+    rest = pair(pill_digest_noun, rest);
+    rest = pair(direct(g_m7.stage_total), rest);
+    rest = pair(direct(pill_hash), rest);
+    noun snapshot = pair(cord_from_bytes("M7-SUPERVISOR", 14), rest);
+    if (!noun_is_cell(snapshot) || cold_snap_save(snapshot) != 0) {
+        noun_tx_abort();
+        heap_persist_abort_tx();
+        return M7_DEPLOY_MEDIA;
+    }
+    if (kernel_m7_publish(candidate_gate, &identity, capability) != 0) {
+        noun_tx_abort();
+        heap_persist_abort_tx();
+        return M7_DEPLOY_STORAGE;
+    }
+    noun_tx_commit();
+    heap_persist_commit_tx();
+    g_m7.mode = M7_MODE_IDLE;
+    g_m7.incarnation = new_incarnation;
+    g_m7.last_restart = g_m7.lifecycle_cold;
+    g_m7.stage_open = 0;
+    g_m7.stage_sealed = 0;
+    return 0;
+}
+
+int m7_deploy_query(void)
+{
+    return g_m7.stage_open ? (g_m7.stage_sealed ? 2 : 1) : 0;
+}
+
+int m7_deploy_abort(void)
+{
+    g_m7.stage_open = 0;
+    g_m7.stage_sealed = 0;
+    g_m7.stage_received = 0;
+    g_m7.stage_chunks = 0;
+    return 0;
+}
+
+noun m7_current_pill_digest(void)
+{
+    const uint8_t *base = (const uint8_t *)(uintptr_t)PILL_BASE;
+    uint64_t len = 0;
+    for (int i = 0; i < 8; i++) len |= (uint64_t)base[16 + i] << (i * 8);
+    if (len == 0 || len > M7_STAGE_BYTES) return NOUN_ZERO;
+    uint8_t digest[32];
+    uint64_t limbs[4] = {0, 0, 0, 0};
+    blake3_hash(base, (size_t)(256 + len), digest);
+    for (size_t i = 0; i < 32; i++) ((uint8_t *)limbs)[i] = digest[i];
+    return make_atom(limbs, 4);
+}
+
+int m7_deploy_demo(void)
+{
+    const uint8_t *base = (const uint8_t *)(uintptr_t)PILL_BASE;
+    uint64_t len = 0;
+    for (int i = 0; i < 8; i++) len |= (uint64_t)base[16 + i] << (i * 8);
+    noun digest = m7_current_pill_digest();
+    if (len == 0 || 256 + len > M7_STAGE_BYTES || digest == NOUN_ZERO)
+        return M7_DEPLOY_BOUNDS;
+    uint64_t total = 256 + len;
+    int status = m7_deploy_begin(1, total, digest);
+    for (uint64_t offset = 0; status == 0 && offset < total; ) {
+        uint64_t chunk = total - offset;
+        if (chunk > M7_MAX_CHUNK) chunk = M7_MAX_CHUNK;
+        status = m7_deploy_chunk(1, offset, base + offset, chunk);
+        offset += chunk;
+    }
+    if (status == 0) status = m7_deploy_seal();
+    if (status == 0) status = m7_deploy_activate();
+    return status;
+}
+
+int m7_boot_snapshot(void)
+{
+    noun root = cold_snap_load();
+    if (!noun_is_cell(root)) return 1;
+    noun schema, rest, pill_hash, pill_len, pill_digest_noun, identity_noun;
+    noun mode, reason, incarnation, gate, queue, timer;
+    if (!take(root, &schema, &rest))
+        return -1;
+    if (!noun_eq(schema, cord_from_bytes("M7-SUPERVISOR", 14)))
+        return 1;
+    if (!take(rest, &pill_hash, &rest)
+        || !take(rest, &pill_len, &rest)
+        || !take(rest, &pill_digest_noun, &rest)
+        || !take(rest, &identity_noun, &rest)
+        || !take(rest, &mode, &rest)
+        || !take(rest, &reason, &rest)
+        || !take(rest, &incarnation, &rest)
+        || !take(rest, &gate, &rest)
+        || !take(rest, &queue, &timer)
+        || !noun_is_direct(pill_hash) || !noun_is_direct(pill_len)
+        || !noun_is_direct(mode) || !noun_is_direct(incarnation)
+        || direct_val(pill_len) == 0 || direct_val(pill_len) > M7_STAGE_BYTES
+        || direct_val(mode) != M7_MODE_IDLE
+        || direct_val(incarnation) == 0 || queue != NOUN_ZERO || timer != NOUN_ZERO)
+        return -1;
+    noun pill_atom = cold_load(direct_val(pill_hash));
+    if (!noun_is_atom(pill_atom)
+        || !noun_atom_read_fixed(pill_atom,
+                                 (uint8_t *)(uintptr_t)M7_STAGE_BASE,
+                                 direct_val(pill_len)))
+        return -1;
+    uint8_t digest[32];
+    blake3_hash((const void *)(uintptr_t)M7_STAGE_BASE,
+                (size_t)direct_val(pill_len), digest);
+    uint8_t expected_digest[32];
+    if (!noun_atom_read_fixed(pill_digest_noun, expected_digest,
+                              sizeof expected_digest))
+        return -1;
+    for (size_t i = 0; i < sizeof expected_digest; i++)
+        if (expected_digest[i] != digest[i]) return -1;
+    uint64_t hash62 = 0;
+    for (int i = 0; i < 8; i++) hash62 |= (uint64_t)digest[i] << (i * 8);
+    hash62 &= 0x3FFFFFFFFFFFFFFFULL;
+    if (hash62 != direct_val(pill_hash)) return -1;
+    runtime_identity_t snapshot_identity;
+    if (!runtime_identity_from_noun(identity_noun, &snapshot_identity)
+        || !m7_is_identity(&snapshot_identity)
+        || !runtime_identity_validate_gate(gate, &snapshot_identity, 0))
+        return -1;
+    noun pill_gate;
+    runtime_identity_t pill_identity;
+    uint8_t capability;
+    pill_i2_status_t status = pill_i2_validate_buffer(
+        (const uint8_t *)(uintptr_t)M7_STAGE_BASE,
+        direct_val(pill_len), HEAP_MODE_PERSIST,
+        &pill_gate, &pill_identity, &capability);
+    if (status != PILL_I2_OK
+        || !runtime_identity_equal(&pill_identity, &snapshot_identity)
+        || !runtime_identity_validate_gate(pill_gate, &snapshot_identity, 0)) {
+        if (noun_tx_active()) noun_tx_abort();
+        return -1;
+    }
+    if (kernel_m7_publish(gate, &snapshot_identity, capability) != 0) {
+        if (noun_tx_active()) noun_tx_abort();
+        return -1;
+    }
+    noun_tx_commit();
+    g_m7.ready = 0;
+    if (m7_init(gate) != M7_STATUS_RDY) return -1;
+    g_m7.mode = direct_val(mode);
+    g_m7.incarnation = direct_val(incarnation);
+    g_m7.last_restart = reason;
+    digital_out_force_safe();
+    g_m7.safe = 1;
+    return 0;
+}

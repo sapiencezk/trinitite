@@ -2806,6 +2806,173 @@ defcode "M2PREP", 6, m2_prepare_pill, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// ── M7 pure resource supervisor / trusted lab bridge ─────────────────────
+// M7INIT ( -- st )        validate the live M7 identity/gate and install the
+//                         persistent pure-Nock MANAGER formula.
+// M7OBJ  ( id kind -- noun )  make one static manager object noun.
+// M7REQ  ( object cmd -- st ) receipt only; M7STEP is the REQ+ boundary.
+defcode "M7INIT", 6, m7_init_word, 0
+    bl      shrine_gate_get
+    bl      m7_init
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M7MI ( qi -- status )  Annex-F QI/INITO bridge (0 disables service).
+defcode "M7MI", 4, m7_manager_init_word, 0
+    ldr     x0, [DSP]
+    bl      m7_manager_init
+    sxtw    x0, w0
+    str     x0, [DSP]
+    NEXT
+
+defcode "M7OBJ", 5, m7_object_word, 0
+    ldr     x0, [DSP], #8       // kind
+    ldr     x1, [DSP], #8       // object id
+    bl      m7_object
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7REQ", 5, m7_request_word, 0
+    ldr     x0, [DSP], #8       // command
+    ldr     x1, [DSP], #8       // object
+    bl      m7_manager_request
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M7REQB ( address length command -- status )
+// The address is a trusted-lab pointer to the canonical <=512-byte OBJECT.
+defcode "M7REQB", 6, m7_request_bytes_word, 0
+    ldr     x2, [DSP], #8       // command
+    ldr     x1, [DSP], #8       // length
+    ldr     x0, [DSP], #8       // address
+    // C ABI: command, bytes, length.
+    mov     x3, x1
+    mov     x1, x0
+    mov     x0, x2
+    mov     x2, x3
+    bl      m7_manager_request_bytes
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7STEP", 6, m7_step_word, 0
+    bl      m7_scheduler_boundary
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7MODE", 6, m7_mode_word, 0
+    bl      m7_mode
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7INC@", 6, m7_inc_word, 0
+    bl      m7_incarnation
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7REQ@", 6, m7_req_fetch_word, 0
+    bl      m7_req_plus
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7CNF@", 6, m7_cnf_fetch_word, 0
+    bl      m7_confirmations
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7QO?", 5, m7_qo_word, 0
+    bl      m7_qo
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7STAT", 6, m7_status_word, 0
+    bl      m7_last_status
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M7RES ( -- noun )  last successful QUERY RESULT noun. It is cleared at
+// every receipt/REQ+ boundary, so an error cannot expose a prior result.
+defcode "M7RES", 5, m7_result_word, 0
+    bl      m7_last_result_noun
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7RST@", 6, m7_restart_word, 0
+    bl      m7_last_restart
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7FORCE", 7, m7_force_word, 0
+    bl      m7_force_stop
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7RESET", 7, m7_reset_word, 0
+    bl      m7_reset
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// TRI_DEPLOY bridge: ( stage-id total digest -- st )
+defcode "M7DBEG", 6, m7_deploy_begin_word, 0
+    ldr     x2, [DSP], #8       // digest noun
+    ldr     x1, [DSP], #8       // total
+    ldr     x0, [DSP], #8       // stage id
+    bl      m7_deploy_begin
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M7DCH ( stage-id offset address len -- st )
+defcode "M7DCH", 5, m7_deploy_chunk_word, 0
+    ldr     x3, [DSP], #8       // len
+    ldr     x2, [DSP], #8       // source address
+    ldr     x1, [DSP], #8       // offset
+    ldr     x0, [DSP], #8       // stage id
+    bl      m7_deploy_chunk
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7DSEAL", 7, m7_deploy_seal_word, 0
+    bl      m7_deploy_seal
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7DACT", 6, m7_deploy_activate_word, 0
+    bl      m7_deploy_activate
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7DQ", 4, m7_deploy_query_word, 0
+    bl      m7_deploy_query
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7DABT", 6, m7_deploy_abort_word, 0
+    bl      m7_deploy_abort
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7DIG", 5, m7_pill_digest_word, 0
+    bl      m7_current_pill_digest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7DEMO", 6, m7_deploy_demo_word, 0
+    bl      m7_deploy_demo
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // M6 fixed-bank read-only diagnostics. DOUT@ is the backend shadow,
 // GPIOLEV@ is the independently read BCM2838 GPLEV0 value masked to 17/27/22.
 defcode "DOUT@", 5, digital_out_shadow_word, 0

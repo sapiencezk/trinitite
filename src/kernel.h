@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include "noun.h"
+#include "runtime_identity.h"
 
 /*
  * Kernel loop + industrial Phases 1–8 + multi-arm timers.
@@ -153,6 +154,9 @@ int      boot_policy_get(void);
 /* Apply policy and enter arvo/shrine loop. pill_gate may be 0.
  * Never returns on success; returns -1 to fall back to REPL. */
 int      kernel_boot(noun pill_gate);
+/* M7 publication after durable candidate selection. */
+int      kernel_m7_publish(noun gate, const runtime_identity_t *identity,
+                           uint8_t capability_profile);
 /* Strict PILL2 bounded/identity load, with isolated legacy I1 fallback. */
 noun     kernel_pill_load(void);
 /* Lab/test preparation: admit PILL2 and install its clean roots without

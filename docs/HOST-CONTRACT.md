@@ -360,28 +360,34 @@ Key sources: `src/kernel.c`, `src/kernel.h`, `src/nock.c`, `src/uart.c`, `src/me
 
 *Host industrial base + EP8 payload/field-demo contract. Prefer 1499kernel OUT product changes over host C unless print path is insufficient.*
 
-## M7 reference ABI boundary — not target acceptance
+## M7 ABI boundary — bounded target implementation
 
-The M7 reference host ABI is `(1,2)` and is selected by the exact M7
-RuntimeIdentity. This section documents the proposed boundary; it does not
-mean that Trinitite currently contains the target-side MANAGER or `TRI_DEPLOY`
-services required for M7 acceptance. Trinitite remains the bounded executor
-of framed transport, storage, timer / service completion, checkpoint, UART,
-and the fixed safe-low digital-output effect. The proposed pure-Nock M7 layer
-would own MANAGER command/object validation, IEC Table-6/7 status, lifecycle
-mode/incarnation, restart-event choice, and the closed deployment intent.
+The M7 host ABI is `(1,2)` and is selected by the exact M7 RuntimeIdentity.
+Trinitite exposes a bounded target MANAGER seam in `m7_supervisor.c`:
+`m7_manager_init` implements QI/QO initialization, and
+`m7_manager_request_bytes` accepts only canonical jammed OBJECT bytes up to
+512 bytes with the exact M7 cue/depth/cell ceilings. A one-entry mailbox is
+accepted by receipt and evaluated by the pure-Nock manager formula at
+`m7_scheduler_boundary`, after a complete application transaction. `M7REQB`
+and the related `M7*` Forth words are trusted-lab diagnostics; application
+events cannot forge these forms.
 
-M7 adds no C-side lifecycle authority or generic effect registry. The host
+The Nock formula owns command shape, object validity, IEC status, and the
+closed lifecycle intent. The host executes only that fixed intent vocabulary,
 checks generation+incarnation on timer/service/cause dequeue and again before
-activation. A standard STOP has one attempted `E_RESTART.STOP`; a failed or
-emergency path records non-delivery and forces safe-low. `TRI_RESOURCE.FORCE_STOP/RESET`
-and `TRI_DEPLOY` are vendor-namespaced, not IEC FB-level KILL/RESET or
+activation, and performs bounded safe-low/deployment effects. A standard STOP
+has one attempted `E_RESTART.STOP`; a failed or emergency path records
+non-delivery and forces safe-low. `TRI_RESOURCE.FORCE_STOP/RESET` and
+`TRI_DEPLOY` are vendor-namespaced, not IEC FB-level KILL/RESET or
 CREATE/DELETE.
 
-The proposed M7 application FIFO is 256 entries; management is an independent
+The M7 application FIFO is 256 entries; management is an independent
 one-entry priority mailbox. The target RuntimeIdentity work admits M7
 host/deployment `(1,2)` and M7 digital-output profile 2 using the fixed
 `I2M7CAPv1` selector. PILL2, framed ingress, checkpoint, and cold-store
-container layouts remain unchanged. See the parent `docs/I2-M7-CONTRACT.md`
-for the proposed bounded transport and evidence contract, and the parent
-`docs/I2-M7-VERDICT.md` for the current acceptance status.
+container layouts remain unchanged. Candidate PILL bytes occupy the fixed
+volatile stage at `PILL_SCRATCH_BASE` until `SEAL`; activation stores the full
+candidate as a cold blob, records its full digest plus identity in the M7
+supervisor snapshot, and publishes RAM only after cold selection. See the
+parent `docs/I2-M7-CONTRACT.md` and `docs/I2-M7-VERDICT.md` for the exact
+profile and nonclaims.
