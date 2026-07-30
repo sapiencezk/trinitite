@@ -315,6 +315,27 @@ uint64_t m7_last_status(void) { return g_m7.last_status; }
 uint64_t m7_last_restart(void) { return g_m7.last_restart; }
 noun m7_last_result_noun(void) { return g_m7.result; }
 
+noun m7_formula_root(void)
+{
+    return g_m7.formula;
+}
+
+int m7_formula_retain(void)
+{
+    if (!noun_is_cell(g_m7.formula))
+        return 1;
+    noun retained;
+    if (!noun_copy_checked(g_m7.formula, &retained))
+        return 0;
+    g_m7.formula = retained;
+    return 1;
+}
+
+void m7_formula_publish(noun formula)
+{
+    g_m7.formula = formula;
+}
+
 noun m7_object(uint64_t kind, uint64_t object_id)
 {
     if (kind == 0 || kind > M7_OBJECT_COUNT || object_id == 0)

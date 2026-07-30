@@ -73,6 +73,14 @@ uint64_t m7_last_restart(void);
 noun     m7_object(uint64_t kind, uint64_t object_id);
 noun     m7_last_result_noun(void);
 
+/* The pure MANAGER formula is a persistent live root.  Kernel semispace
+ * promotion and deployment publication retain it alongside the application
+ * gate so a later flip cannot overwrite the formula while it is still in
+ * use. */
+noun     m7_formula_root(void);
+int      m7_formula_retain(void);
+void     m7_formula_publish(noun formula);
+
 /* Receipt is deliberately not REQ+.  A queued request is evaluated only by
  * m7_scheduler_boundary(), called after a complete application transaction. */
 int      m7_manager_request(uint64_t command, noun object);

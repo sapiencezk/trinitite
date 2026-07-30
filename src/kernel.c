@@ -1003,6 +1003,15 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
     if (!build_slam_formula_checked(&candidate_slam))
         goto alloc_fail;
 
+    /* M7's pure MANAGER formula is also a persistent root.  It is independent
+     * of the application gate, but its cells still live in the active
+     * semispace and must cross the same publication boundary. */
+    noun candidate_m7_formula = NOUN_ZERO;
+    noun m7_formula = m7_formula_root();
+    if (noun_is_cell(m7_formula)
+        && !noun_copy_checked(m7_formula, &candidate_m7_formula))
+        goto alloc_fail;
+
     /* The one publication point: no candidate allocation follows. */
     uint64_t publication_tick = runtime_counter_now();
     for (uint64_t i = 0; i < candidate_n; i++) {
@@ -1011,6 +1020,8 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
     }
     g_kernel = candidate_gate;
     g_slam_formula = candidate_slam;
+    if (noun_is_cell(candidate_m7_formula))
+        m7_formula_publish(candidate_m7_formula);
     g_evq = candidate_q;
     g_evq_tail = candidate_tail;
     g_evq_n = candidate_n;
@@ -2314,6 +2325,8 @@ int kernel_m7_publish(noun gate, const runtime_identity_t *identity,
     if (!noun_is_cell(gate) || !identity
         || !runtime_identity_validate_gate(gate, identity, 0)
         || !build_slam_formula_checked(&candidate_formula))
+        return -1;
+    if (!m7_formula_retain())
         return -1;
     digital_out_force_safe();
     evq_clear();
