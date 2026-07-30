@@ -23,9 +23,13 @@ static const uint8_t g_identity_magic[8] = {
 static const uint8_t g_identity_domain[8] = {
     'I', '2', 'R', 'I', 'D', 'v', '1', 0
 };
+static const uint8_t g_digital_out_request_grant_fingerprint[8] = {
+    0x26, 0x48, 0x2a, 0xff, 0xfc, 0x96, 0x3f, 0x59
+};
 
 static runtime_identity_t g_live_identity;
 static int g_live_identity_valid;
+static uint8_t g_live_capability_profile;
 static void identity_record(const runtime_identity_t *id,
                             uint8_t record[RUNTIME_IDENTITY_RECORD_SIZE]);
 
@@ -95,13 +99,21 @@ int runtime_identity_supported(const runtime_identity_t *id)
 {
     if (!id || id->pill_container_version != 2 || id->generation == 0)
         return 0;
-    const uint16_t *pairs[] = {
-        id->package_schema, id->host_abi, id->program_schema,
-        id->algorithm_abi, id->deployment_schema
+    const uint16_t *baseline_pairs[] = {
+        id->package_schema, id->program_schema, id->algorithm_abi
     };
-    for (size_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++)
-        if (pairs[i][0] != 1 || pairs[i][1] != 0)
+    for (size_t i = 0;
+         i < sizeof(baseline_pairs) / sizeof(baseline_pairs[0]); i++)
+        if (baseline_pairs[i][0] != 1 || baseline_pairs[i][1] != 0)
             return 0;
+    int baseline_host = id->host_abi[0] == 1 && id->host_abi[1] == 0
+        && id->deployment_schema[0] == 1
+        && id->deployment_schema[1] == 0;
+    int digital_host = id->host_abi[0] == 1 && id->host_abi[1] == 1
+        && id->deployment_schema[0] == 1
+        && id->deployment_schema[1] == 1;
+    if (!baseline_host && !digital_host)
+        return 0;
     int legacy = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 0
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 0;
     int origin_v1 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 1
@@ -293,17 +305,27 @@ const runtime_identity_t *runtime_identity_get(void)
     return g_live_identity_valid ? &g_live_identity : 0;
 }
 
+uint8_t runtime_identity_capability_profile(void)
+{
+    return g_live_identity_valid
+        ? g_live_capability_profile : RUNTIME_CAPABILITY_PROFILE_NONE;
+}
+
 void runtime_identity_set(const runtime_identity_t *identity)
 {
     if (!identity)
         return;
     g_live_identity = *identity;
     g_live_identity_valid = 1;
+    /* A raw identity record never carries capability authorization. PILL2
+     * admission sets the exact profile only after gate validation succeeds. */
+    g_live_capability_profile = RUNTIME_CAPABILITY_PROFILE_NONE;
 }
 
 void runtime_identity_clear(void)
 {
     g_live_identity_valid = 0;
+    g_live_capability_profile = RUNTIME_CAPABILITY_PROFILE_NONE;
 }
 
 static const volatile uint8_t *pill_base(uint64_t *available)
@@ -346,10 +368,7 @@ pill_i2_status_t pill_i2_load(noun *gate_out)
         return PILL_I2_VERSION;
     if (le32(header + 12) != PILL_I2_HEADER_SIZE || header[24] != 1)
         return PILL_I2_HEADER;
-    for (int i = 25; i < 32; i++)
-        if (header[i] != 0)
-            return PILL_I2_HEADER;
-    for (int i = 248; i < 256; i++)
+    for (int i = 26; i < 32; i++)
         if (header[i] != 0)
             return PILL_I2_HEADER;
     uint64_t len = le64(header + 16);
@@ -377,6 +396,22 @@ pill_i2_status_t pill_i2_load(noun *gate_out)
     if (!runtime_identity_parse(header + 64, &identity)
         || !runtime_identity_supported(&identity))
         return PILL_I2_IDENTITY;
+    int digital_identity =
+        identity.host_abi[0] == 1 && identity.host_abi[1] == 1
+        && identity.deployment_schema[0] == 1
+        && identity.deployment_schema[1] == 1;
+    uint8_t capability_profile = header[25];
+    if (digital_identity) {
+        if (capability_profile != RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
+            || !bytes_eq(
+                header + 248,
+                g_digital_out_request_grant_fingerprint,
+                8))
+            return PILL_I2_IDENTITY;
+    } else if (capability_profile != RUNTIME_CAPABILITY_PROFILE_NONE
+               || bytes_nonzero(header + 248, 8)) {
+        return PILL_I2_IDENTITY;
+    }
 
     noun gate;
     cue_bounded_status_t cue_status = cue_bounded_bytes(
@@ -390,6 +425,7 @@ pill_i2_status_t pill_i2_load(noun *gate_out)
     }
     noun_tx_commit();
     runtime_identity_set(&identity);
+    g_live_capability_profile = capability_profile;
     noun_pill_shape = 1;
     noun_pill_version = 2;
     *gate_out = gate;

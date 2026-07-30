@@ -41,6 +41,8 @@
  * "unkfx" once/session. Crash: hard clears tarms (default); soft keeps them.
  *
  * Full host contract for IEC authors: docs/HOST-CONTRACT.md
+ * M6 adds one closed capability-selected digital bank. It does not expose
+ * addresses and does not make the retained legacy %mmio effect public I2 API.
  *
  * Phase 6 hot-swap: STAGE + HSWAP at cooperative safe points (empty evq).
  * Phase 7: trace ring + soft WDT + canary (see trace.h).

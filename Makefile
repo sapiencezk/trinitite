@@ -16,6 +16,7 @@ CFLAGS  = -Wall -O2 -ffreestanding -nostdlib -nostartfiles \
 LDFLAGS = -T $(SRCDIR)/linker.ld -nostdlib -no-pie
 
 COLD_MEDIA ?= ram
+DIGITAL_OUT_BACKEND ?= bcm2838
 
 ifeq ($(COLD_MEDIA),ram)
 MEDIA_OBJS = cold_media.o cold_nv_none.o
@@ -31,7 +32,16 @@ else
 $(error unsupported COLD_MEDIA='$(COLD_MEDIA)' (ram, semihost, fake, rpi4-sd))
 endif
 
-OBJS    = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_ingress.o kernel.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
+ifeq ($(DIGITAL_OUT_BACKEND),bcm2838)
+DIGITAL_OUT_OBJS = digital_out.o digital_out_bcm2838.o
+else ifeq ($(DIGITAL_OUT_BACKEND),fake)
+CFLAGS += -DDIGITAL_OUT_FAKE=1
+DIGITAL_OUT_OBJS = digital_out.o digital_out_fake.o
+else
+$(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake))
+endif
+
+OBJS    = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_ingress.o $(DIGITAL_OUT_OBJS) kernel.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
 
 all: $(TARGET).img
 
@@ -119,8 +129,13 @@ test-media-rpi4-build:
 	$(MAKE) clean
 	$(MAKE) COLD_MEDIA=rpi4-sd all
 
+test-digital-out-fake:
+	$(MAKE) clean
+	$(MAKE) DIGITAL_OUT_BACKEND=fake all
+	python3 tests/digital_out_fake_qemu.py
+
 clean:
 	rm -f *.o *.elf *.img
 FORCE:
 .PHONY: all run run-pill run-kernel debug deploy test test-media-fake \
-	test-media-rpi4-build clean FORCE
+	test-media-rpi4-build test-digital-out-fake clean FORCE

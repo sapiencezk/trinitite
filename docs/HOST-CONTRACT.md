@@ -1,6 +1,6 @@
 # Trinitite host contract (IEC consumers)
 
-**Status:** as built through I2 Hybrid v1 Milestone 3
+**Status:** as built through I2 Hybrid v1 Milestone 6
 **Audience:** IEC 61499 Nock kernels / pills on this substrate  
 **Normative product freeze:** `1499kernel/docs/I1.md` (do not reopen without user)  
 **Epic log:** `1499kernel/docs/HOST-INDUSTRIAL.md`
@@ -42,7 +42,7 @@ Walk `[[tag data] rest]`. Known tags (cords, LSB-first ASCII):
 | `%tset` / `%tcan` | `[id period]` / `id` | Multi-arm **IEC periods** (CNTVCT ticks; period 0 cancels) |
 | `i2-timer-set` / `i2ts` | `[token delay-ns]` | One-shot I2 timer arm; full token → fire `[%i2-timer token fired-at]` then release the arm; bare atom owner is a test/legacy alias; ns→CNTVCT |
 | `i2-timer-cancel` / `i2tc` | `token` | Cancel arm for token owner |
-| `i2-service-request` / `i2sr` | service-req | Bounded UART TX of STRING payload; activate exactly one pre-reserved `[%i2-service token [status detail] 0]` completion (`status=0` success, `6` TX deadline) |
+| `i2-service-request` / `i2sr` | service-req | Identity-authorized UART TX (`cap=1`) or fixed M6 digital bank (`cap=2`); exactly one pre-reserved completion (`status=0` success, `6` post-commit activation failure) |
 | `i2-service-cancel` / `i2sc` | token | Strict unknown-cancel rejection: the current UART service completes synchronously and has no deferred driver entry to cancel |
 
 Long I2 names (`i2-timer-set`, …) are **indirect atoms** (BLAKE3-62 identity). Dispatch matches them by precomputed hash62 (not only `cord_to_cstr`), so recognition does not depend on atom-store residency after long slam sessions.
@@ -63,7 +63,7 @@ Long I2 names (`i2-timer-set`, …) are **indirect atoms** (BLAKE3-62 identity).
 abort permitted before promote. Preflight/reservation requires a proper effect
 list and proper complete causes list; known I2 tags only; full lifecycle tokens
 `[generation incarnation owner sequence]`; timer delay &gt; 0; timer count ≤ 16;
-service shape + UART cap; deadline &gt; 0; and complete FIFO capacity for existing
+service shape + authorized exact cap/op/payload; deadline &gt; 0; and complete FIFO capacity for existing
 backlog, every cause, and every instant service completion. Fail → keep gate,
 FIFO, timer roots and effects unchanged; UART `preflight` once/session, no
 effects. The queue's ordinary drop-newest policy is never applied to a
@@ -76,8 +76,52 @@ depth-bounded copier. Over-depth, sharing-map, or semispace exhaustion rolls the
 selector/pointer back to the old roots. The FIFO owns the exact reserved
 completion noun whose status activation mutates. Promotion installs the
 prepared timer roots and completions; post-publish activation is executed under
-a no-allocation guard and only emits UART bytes. Generic asynchronous driver
-transactions are not claimed here.
+a no-allocation guard and only performs bounded UART emission and authorized
+fixed-bank digital-output backend operations. It performs no allocation.
+Generic asynchronous driver transactions are not claimed here.
+
+### 2.0b M6 fixed digital-output bank
+
+Host ABI/Deployment Schema `1.1` authorizes exactly cap `2`, op `1`, payload
+`[P1_CMD [P2_CMD ALARM]]`, with three canonical BOOL atoms. ABI/schema `1.0`
+does not authorize it. The PILL2 admission header additionally requires
+capability profile byte `1` at offset 25 and the fixed 8-byte fingerprint
+`26 48 2a ff fc 96 3f 59` at offsets 248–255. That fingerprint is
+BLAKE3-64 over the domain `I2M6CAPv1\0` and canonical jam of the exact
+package-request/deployment-grant pair. Baseline PILL2 keeps those bytes zero.
+The target publishes this authorization only after the PILL gate and
+RuntimeIdentity validate. The application supplies no pin, mask, or address.
+
+The target-private mapping is active-high/safe-low:
+
+| Logical channel | BCM GPIO |
+|---|---:|
+| `P1_CMD` | 17 |
+| `P2_CMD` | 27 |
+| `ALARM` | 22 |
+
+These ordinary-output selections do not overlap the deployed UART0 GPIO14/15
+or EMMC2/SD1 GPIO34–39 groups. GPIO22/27 do have unused SD alternate-function
+choices in the BCM2711 table; selecting ordinary output is therefore part of
+the fixed deployment contract, not a promise that arbitrary firmware pinmux
+can coexist.
+
+After promote, a changed bank writes `GPCLR0` for the full fixed mask, then
+`GPSET0` for the desired-high subset. An identical enabled shadow is a no-op.
+The production backend uses BCM2838 base `0xFE200000`; the fake backend has
+bounded audit/failure injection. `%mmio` remains a retained legacy effect and
+is not the M6 application API.
+
+BCM2838 MMIO writes are ordered with an AArch64 `DSB SY` after each register
+write. The backend can confirm only that the MMIO instruction completed; it
+cannot diagnose electrical state or a device-side write failure. Injected
+post-commit failure evidence therefore uses the deterministic fake backend.
+
+Boot, pill refusal/install, checkpoint restore, crash recovery, and backend
+failure request safe-low. Checkpoint restore leaves output inhibited: restored
+logical high state or queued work cannot energize it. Only a later accepted
+framed external process sample arms one reconciliation request. This is a
+QEMU-functional register claim, not physical/electrical/safety evidence.
 
 **Unknown tags:** not silent — `trace_rec(T_UFX)` + one-shot UART `unkfx` per session. Apps should not rely on unknown tags.
 
@@ -141,8 +185,8 @@ Multi-arm `%tset` → host enqueues `[%ei id %TICK 0]` while idle (**no second U
 
 | Path | Queue / IRQ | Timers | Gate |
 |------|-------------|--------|------|
-| `nock_crash` (hard, default) | clear | **clear all** | last good `g_kernel` kept |
-| `nock_crash` (soft, `SOFT!`) | clear | **keep** | last good kept |
+| `nock_crash` (hard, default) | clear | **clear all** | last good `g_kernel` kept; M6 bank safe-low/inhibited |
+| `nock_crash` (soft, `SOFT!`) | clear | **keep** | last good kept; M6 bank safe-low/inhibited |
 | Budget / mid-eval wall | unchanged | **keep** | no product commit |
 | Post-hoc `%tmrarm` after slam | — | — | product discarded |
 | Heap / atom-store exhaustion | via `nock_crash` | per crash policy | last good kept |

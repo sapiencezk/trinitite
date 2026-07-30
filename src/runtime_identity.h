@@ -4,6 +4,8 @@
 #include "noun.h"
 
 #define RUNTIME_IDENTITY_RECORD_SIZE 152u
+#define RUNTIME_CAPABILITY_PROFILE_NONE        0u
+#define RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT 1u
 
 typedef struct {
     uint32_t pill_container_version;
@@ -47,6 +49,7 @@ int runtime_identity_from_noun(noun n, runtime_identity_t *out);
 
 int runtime_identity_live(void);
 const runtime_identity_t *runtime_identity_get(void);
+uint8_t runtime_identity_capability_profile(void);
 void runtime_identity_set(const runtime_identity_t *identity);
 void runtime_identity_clear(void);
 

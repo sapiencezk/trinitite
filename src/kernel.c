@@ -13,6 +13,7 @@
 #include "runtime_identity.h"
 #include "i2_ingress.h"
 #include "runtime_stats.h"
+#include "digital_out.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
 #define CORD_OUT     7632239ULL              /* %out      */
@@ -71,6 +72,10 @@
 #define I2_MAX_CAUSES_PER_EVENT   2
 #define I2_MAX_EFFECTS_PER_EVENT  1
 #define I2_UART_TX_MAX_NS  1000000000ULL
+#define I2_CAP_UART_OUTPUT       1u
+#define I2_CAP_DIGITAL_OUT       2u
+#define I2_OP_UART_TX            1u
+#define I2_OP_DIGITAL_BANK_WRITE 1u
 
 /* Auto-checkpoint: save live roots to cold store every N successful commits */
 static uint64_t g_ckpt_every;
@@ -1202,6 +1207,52 @@ static uint64_t atom_u64(noun a)
     return 0;
 }
 
+static int digital_output_identity_authorized(void)
+{
+    const runtime_identity_t *identity = runtime_identity_get();
+    return identity
+        && runtime_identity_capability_profile()
+            == RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
+        && identity->host_abi[0] == 1 && identity->host_abi[1] == 1
+        && identity->deployment_schema[0] == 1
+        && identity->deployment_schema[1] == 1;
+}
+
+static int i2_service_fields(noun data, noun *token_out,
+                             uint64_t *cap_out, uint64_t *op_out,
+                             uint64_t *deadline_out, noun *payload_out)
+{
+    noun token, rest, cap, op, deadline, payload;
+    if (!noun_take(data, &token, &rest)
+        || !noun_take(rest, &cap, &rest)
+        || !noun_take(rest, &op, &rest)
+        || !noun_take(rest, &deadline, &payload)
+        || !noun_is_direct(cap) || !noun_is_direct(op)
+        || !noun_is_direct(deadline))
+        return 0;
+    *token_out = token;
+    *cap_out = direct_val(cap);
+    *op_out = direct_val(op);
+    *deadline_out = direct_val(deadline);
+    *payload_out = payload;
+    return 1;
+}
+
+static int i2_digital_bank(noun payload, uint64_t *p1,
+                           uint64_t *p2, uint64_t *alarm)
+{
+    noun p1_n, rest, p2_n, alarm_n;
+    if (!noun_take(payload, &p1_n, &rest)
+        || !noun_take(rest, &p2_n, &alarm_n)
+        || !noun_is_direct(p1_n) || !noun_is_direct(p2_n)
+        || !noun_is_direct(alarm_n))
+        return 0;
+    *p1 = direct_val(p1_n);
+    *p2 = direct_val(p2_n);
+    *alarm = direct_val(alarm_n);
+    return *p1 <= 1 && *p2 <= 1 && *alarm <= 1;
+}
+
 /* I2 service-request payload → UART bytes.  Completion admission is handled
  * separately by the transaction candidate builder. */
 static int atom_byte(noun atom, uint64_t offset, uint8_t *out)
@@ -1224,22 +1275,14 @@ static int atom_byte(noun atom, uint64_t offset, uint8_t *out)
 static int i2_service_uart_print_bounded(noun data)
 {
     /* service-request ::= [token [cap [op [deadline payload]]]] */
-    if (!noun_is_cell(data))
+    noun token, payload;
+    uint64_t cap, op, deadline_ns;
+    if (!i2_service_fields(
+            data, &token, &cap, &op, &deadline_ns, &payload)
+        || cap != I2_CAP_UART_OUTPUT || op != I2_OP_UART_TX)
         return 0;
-    cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(data);
-    if (!noun_is_cell(c0->tail))
-        return 0;
-    cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
-    if (!noun_is_cell(c1->tail))
-        return 0;
-    cell_t *c2 = (cell_t *)(uintptr_t)cell_ptr(c1->tail);
-    if (!noun_is_cell(c2->tail))
-        return 0;
-    cell_t *c3 = (cell_t *)(uintptr_t)cell_ptr(c2->tail);
-    uint64_t deadline_ns = atom_u64(c3->head);
     if (deadline_ns == 0 || deadline_ns > I2_UART_TX_MAX_NS)
         return 0;
-    noun payload = c3->tail;
     /* typed STRING: [tid [len bytes-atom]] */
     if (!noun_is_cell(payload))
         return 0;
@@ -1303,7 +1346,18 @@ static void dispatch_i2_activate(noun effects)
         noun data = fx->tail;
         uint64_t t = noun_is_direct(tag) ? direct_val(tag) : 0;
         if (tag_is_i2_service_request(tag, t)) {
-            int ok = i2_service_uart_print_bounded(data);
+            noun token, payload;
+            uint64_t cap, op, deadline, p1, p2, alarm;
+            int fields = i2_service_fields(
+                data, &token, &cap, &op, &deadline, &payload);
+            int ok = 0;
+            if (fields && cap == I2_CAP_UART_OUTPUT)
+                ok = i2_service_uart_print_bounded(data);
+            else if (fields && cap == I2_CAP_DIGITAL_OUT
+                     && op == I2_OP_DIGITAL_BANK_WRITE
+                     && digital_output_identity_authorized()
+                     && i2_digital_bank(payload, &p1, &p2, &alarm))
+                ok = digital_out_apply(p1, p2, alarm);
             runtime_stats_count(
                 ok ? RT_COUNT_SERVICE_SUCCESS : RT_COUNT_SERVICE_FAILURE, 1);
             if (completion_i < g_activation_completion_n)
@@ -1475,41 +1529,40 @@ static int i2_preflight_effects(noun effects, noun causes,
                 return 0; /* strict unknown-cancel */
             live_tarms--;
         } else if (tag_is_i2_service_request(tag, t)) {
-            if (!noun_is_cell(data))
-                return 0;
-            cell_t *c0 = (cell_t *)(uintptr_t)cell_ptr(data);
-            if (!i2_token_valid(c0->head))
+            noun token, payload;
+            uint64_t cap, op, deadline, p1, p2, alarm;
+            if (!i2_service_fields(
+                    data, &token, &cap, &op, &deadline, &payload)
+                || !i2_token_valid(token))
                 return 0;
             for (int i = 0; i < seen_n; i++)
-                if (noun_eq(seen[i], c0->head)) return 0;
+                if (noun_eq(seen[i], token)) return 0;
             if (seen_n >= (int)(sizeof seen / sizeof seen[0])) return 0;
-            seen[seen_n++] = c0->head;
-            if (!noun_is_cell(c0->tail))
-                return 0;
-            cell_t *c1 = (cell_t *)(uintptr_t)cell_ptr(c0->tail);
-            uint64_t cap = atom_u64(c1->head);
-            if (cap != 1)   /* CAP_UART_OUTPUT */
-                return 0;
-            if (!noun_is_cell(c1->tail))
-                return 0;
-            cell_t *c2 = (cell_t *)(uintptr_t)cell_ptr(c1->tail);
-            if (!noun_is_cell(c2->tail))
-                return 0;
-            cell_t *c3 = (cell_t *)(uintptr_t)cell_ptr(c2->tail);
-            uint64_t deadline = atom_u64(c3->head);
+            seen[seen_n++] = token;
             if (deadline == 0 || deadline > I2_UART_TX_MAX_NS)
                 return 0;
-            noun payload = c3->tail;
-            if (!noun_is_cell(payload))
+            if (cap == I2_CAP_UART_OUTPUT) {
+                if (op != I2_OP_UART_TX || !noun_is_cell(payload))
+                    return 0;
+                cell_t *pv = (cell_t *)(uintptr_t)cell_ptr(payload);
+                if (!noun_is_direct(pv->head)
+                    || direct_val(pv->head) == 0
+                    || !noun_is_cell(pv->tail))
+                    return 0;
+                cell_t *sv = (cell_t *)(uintptr_t)cell_ptr(pv->tail);
+                if (!noun_is_direct(sv->head)
+                    || direct_val(sv->head) > 256
+                    || !noun_is_atom(sv->tail))
+                    return 0;
+            } else if (
+                cap == I2_CAP_DIGITAL_OUT
+                && op == I2_OP_DIGITAL_BANK_WRITE
+                && digital_output_identity_authorized()
+                && i2_digital_bank(payload, &p1, &p2, &alarm)) {
+                /* Exact fixed grant is represented by ABI/schema 1.1. */
+            } else {
                 return 0;
-            cell_t *pv = (cell_t *)(uintptr_t)cell_ptr(payload);
-            if (!noun_is_direct(pv->head) || direct_val(pv->head) == 0
-                || !noun_is_cell(pv->tail))
-                return 0;
-            cell_t *sv = (cell_t *)(uintptr_t)cell_ptr(pv->tail);
-            if (!noun_is_direct(sv->head) || direct_val(sv->head) > 256
-                || !noun_is_atom(sv->tail))
-                return 0;
+            }
             new_svcs++;
             if (new_svcs > I2_MAX_PENDING_SERVICES)
                 return 0;
@@ -1791,6 +1844,7 @@ int crash_soft_get(void)
 /* Shared host recovery (kernel_loop longjmp + CREC for tests). */
 void crash_recover_host(void)
 {
+    digital_out_force_safe();
     evq_clear();
     irq_ring_clear();
     if (!g_soft_crash)
@@ -2118,6 +2172,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 }
                 uint64_t activate_start = runtime_counter_now();
                 dispatch_i2_activate(effects);
+                if (event_from_i2_rx)
+                    digital_out_note_external_sample();
                 uint64_t activated = runtime_counter_now();
                 runtime_stats_record(
                     RT_PHASE_ACTIVATE,
@@ -2221,6 +2277,7 @@ int kernel_run_bounded(uint64_t max_commits)
 
 void shrine_gate_set(noun gate)
 {
+    digital_out_force_safe();
     heap_set_mode(HEAP_MODE_PERSIST);
     g_kernel = noun_persist(gate);
     g_shrine_mode = 1;
@@ -2702,6 +2759,13 @@ noun checkpoint_capture(void)
 
 int checkpoint_install(noun ckpt)
 {
+    /* A checkpoint is logical state only: never replay an energized bank. */
+    if (!digital_out_restore_safe()) {
+        g_checkpoint_last_result = COLD_RESULT_ALLOC;
+        if (noun_tx_active())
+            noun_tx_abort();
+        return -1;
+    }
     checkpoint_view_t view = {0};
     int identity_represented = 0;
     if (!checkpoint_identity_matches(ckpt, &identity_represented)) {
@@ -3221,6 +3285,7 @@ static void uart_hex64_kernel(uint64_t value)
 
 static int install_clean_pill(noun pill_gate)
 {
+    digital_out_force_safe();
     if (!noun_is_cell(pill_gate))
         return -1;
     if (runtime_identity_live()
@@ -3236,6 +3301,10 @@ static int install_clean_pill(noun pill_gate)
     noun candidate_gate, candidate_slam;
     if (!noun_copy_checked(pill_gate, &candidate_gate)
         || !build_slam_formula_checked(&candidate_slam)) {
+        heap_persist_abort_tx();
+        return -1;
+    }
+    if (!digital_out_prepare_clean_pill()) {
         heap_persist_abort_tx();
         return -1;
     }
@@ -3318,6 +3387,7 @@ int kernel_boot(noun pill_gate)
 
 noun kernel_pill_load(void)
 {
+    digital_out_force_safe();
     noun gate = NOUN_ZERO;
     pill_i2_status_t status = pill_i2_load(&gate);
     if (status == PILL_I2_OK)
@@ -3334,5 +3404,6 @@ noun kernel_pill_load(void)
     uart_puts("pill: reject ");
     uart_puts(pill_i2_status_name(status));
     uart_puts("\r\n");
+    digital_out_force_safe();
     return NOUN_ZERO;
 }

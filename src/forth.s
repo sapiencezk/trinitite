@@ -2806,6 +2806,30 @@ defcode "M2PREP", 6, m2_prepare_pill, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// M6 fixed-bank read-only diagnostics. DOUT@ is the backend shadow,
+// GPIOLEV@ is the independently read BCM2838 GPLEV0 value masked to 17/27/22.
+defcode "DOUT@", 5, digital_out_shadow_word, 0
+    bl      digital_out_shadow
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "GPIOLEV@", 8, digital_out_level_word, 0
+    bl      digital_out_gpio_level
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "DOUTOPS", 7, digital_out_operations_word, 0
+    bl      digital_out_operation_count
+    str     x0, [DSP, #-8]!
+    NEXT
+
+#ifdef DIGITAL_OUT_FAKE
+defcode "M6DO", 4, digital_out_fake_test_word, 0
+    bl      digital_out_fake_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
 // CKM2 ( -- failures ) requires M2PREP; transactional restore matrix.
 defcode "CKM2", 4, ckpt_m2_test, 0
     bl      checkpoint_m2_selftest
