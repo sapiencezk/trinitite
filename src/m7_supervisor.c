@@ -57,6 +57,7 @@ typedef struct {
     noun formula;
     noun tag[8];
     noun table8_tag[18];
+    noun lifecycle_event_tag;
     noun lifecycle_cold;
     noun lifecycle_warm;
     noun lifecycle_stop;
@@ -126,7 +127,7 @@ static noun f_result(noun status, noun next_mode, noun reason)
     return pair(f_lit(status), pair(next_mode, reason));
 }
 
-static noun manager_formula(void)
+static noun manager_formula(const m7_state_t *state)
 {
     noun mode = f_slot(2);
     noun rest = f_slot(3);
@@ -140,16 +141,16 @@ static noun manager_formula(void)
     noun known[26];
     noun aggregates[3];
     noun queries[5];
-    for (size_t i = 0; i < 8; i++) known[i] = g_m7.tag[i];
-    for (size_t i = 0; i < 18; i++) known[8 + i] = g_m7.table8_tag[i];
-    aggregates[0] = g_m7.tag[0];
-    aggregates[1] = g_m7.tag[1];
-    aggregates[2] = g_m7.tag[2];
-    queries[0] = g_m7.tag[3];
-    queries[1] = g_m7.tag[4];
-    queries[2] = g_m7.tag[5];
-    queries[3] = g_m7.tag[6];
-    queries[4] = g_m7.tag[7];
+    for (size_t i = 0; i < 8; i++) known[i] = state->tag[i];
+    for (size_t i = 0; i < 18; i++) known[8 + i] = state->table8_tag[i];
+    aggregates[0] = state->tag[0];
+    aggregates[1] = state->tag[1];
+    aggregates[2] = state->tag[2];
+    queries[0] = state->tag[3];
+    queries[1] = state->tag[4];
+    queries[2] = state->tag[5];
+    queries[3] = state->tag[6];
+    queries[4] = state->tag[7];
 
     noun command_values[9];
     for (uint64_t i = 0; i < 9; i++) command_values[i] = direct(i);
@@ -181,11 +182,11 @@ static noun manager_formula(void)
                            f_lit(direct(M7_MODE_STOPPED)));
     noun start_reason = f_iff(
         f_eq(mode, f_lit(direct(M7_MODE_IDLE))),
-        f_lit(g_m7.lifecycle_cold), f_lit(g_m7.lifecycle_warm));
+        f_lit(state->lifecycle_cold), f_lit(state->lifecycle_warm));
     noun lifecycle_reason = f_iff(
         f_eq(command, f_lit(direct(2))), start_reason,
         f_iff(f_eq(command, f_lit(direct(3))),
-              f_lit(g_m7.lifecycle_stop), f_lit(direct(0))));
+              f_lit(state->lifecycle_stop), f_lit(direct(0))));
     noun state_result = f_iff(
         state_ok,
         f_result(direct(M7_STATUS_RDY), next_mode, lifecycle_reason),
@@ -230,6 +231,11 @@ static int m7_is_identity(const runtime_identity_t *id)
         && id->host_abi[0] == 1 && id->host_abi[1] == 2
         && id->deployment_schema[0] == 1
         && id->deployment_schema[1] == 2;
+}
+
+int m7_identity_active(void)
+{
+    return m7_is_identity(runtime_identity_get());
 }
 
 static int stage_digest_matches(void)
@@ -354,53 +360,81 @@ static int m7_capture_active_pill(void)
     return 1;
 }
 
+static int m7_initial_state(m7_state_t *out)
+{
+    if (!out) return 0;
+    m7_state_t candidate = {0};
+    candidate.tag[0] = cord_from_bytes("MANAGER", 7);
+    candidate.tag[1] = cord_from_bytes("RESOURCE", 8);
+    candidate.tag[2] = cord_from_bytes("APPLICATION", 11);
+    candidate.tag[3] = cord_from_bytes("INVENTORY", 9);
+    candidate.tag[4] = cord_from_bytes("IDENTITY", 8);
+    candidate.tag[5] = cord_from_bytes("STATE", 5);
+    candidate.tag[6] = cord_from_bytes("FB_INVENTORY", 12);
+    candidate.tag[7] = cord_from_bytes("FB_STATUS", 9);
+    const char *table8[] = {
+        "TYPE_DECLARATION", "FB_TYPE_DECLARATION",
+        "FB_INSTANCE_DEFINITION", "CONNECTION_DEFINITION",
+        "DATA_TYPE_NAME", "FB_TYPE_NAME", "FB_INSTANCE_REFERENCE",
+        "CONNECTION_START_POINT", "APPLICATION_NAME", "ALL_DATA_TYPES",
+        "ALL_FB_TYPES", "EVENT_INPUT", "EVENT_OUTPUT", "DATA_INPUT",
+        "DATA_OUTPUT", "PARAMETER_REFERENCE", "REFERENCED_PARAMETER",
+        "PARAMETER"
+    };
+    const size_t table8_len[] = {
+        16, 19, 22, 21, 14, 12, 21, 22, 16, 14, 12, 11, 12, 10,
+        11, 19, 20, 9
+    };
+    for (size_t i = 0; i < 18; i++)
+        candidate.table8_tag[i] = cord_from_bytes(table8[i], table8_len[i]);
+    candidate.lifecycle_event_tag = cord_from_bytes("i2-lifecycle", 12);
+    candidate.lifecycle_cold = cord_from_bytes("cold", 4);
+    candidate.lifecycle_warm = cord_from_bytes("warm", 4);
+    candidate.lifecycle_stop = cord_from_bytes("stop", 4);
+    for (size_t i = 0; i < 8; i++)
+        if (candidate.tag[i] == NOUN_ZERO) return 0;
+    for (size_t i = 0; i < 18; i++)
+        if (candidate.table8_tag[i] == NOUN_ZERO) return 0;
+    if (candidate.lifecycle_event_tag == NOUN_ZERO
+        || candidate.lifecycle_cold == NOUN_ZERO
+        || candidate.lifecycle_warm == NOUN_ZERO
+        || candidate.lifecycle_stop == NOUN_ZERO)
+        return 0;
+    candidate.formula = manager_formula(&candidate);
+    if (!noun_is_cell(candidate.formula)) return 0;
+    candidate.mode = M7_MODE_IDLE;
+    candidate.incarnation = 1;
+    candidate.last_status = M7_STATUS_RDY;
+    candidate.qo = 1;
+    candidate.safe = 1;
+    candidate.manager_initialized = 1;
+    candidate.ready = 1;
+    *out = candidate;
+    return 1;
+}
+
 int m7_init(noun gate)
 {
     const runtime_identity_t *id = runtime_identity_get();
-    if (!m7_is_identity(id) || !runtime_identity_validate_gate(gate, id, 0)) {
-        g_m7.ready = 0;
+    if (!m7_is_identity(id) || !runtime_identity_validate_gate(gate, id, 0))
         return M7_STATUS_NOT_READY;
-    }
     if (!g_m7.ready) {
-        g_m7.tag[0] = cord_from_bytes("MANAGER", 7);
-        g_m7.tag[1] = cord_from_bytes("RESOURCE", 8);
-        g_m7.tag[2] = cord_from_bytes("APPLICATION", 11);
-        g_m7.tag[3] = cord_from_bytes("INVENTORY", 9);
-        g_m7.tag[4] = cord_from_bytes("IDENTITY", 8);
-        g_m7.tag[5] = cord_from_bytes("STATE", 5);
-        g_m7.tag[6] = cord_from_bytes("FB_INVENTORY", 12);
-        g_m7.tag[7] = cord_from_bytes("FB_STATUS", 9);
-        const char *table8[] = {
-            "TYPE_DECLARATION", "FB_TYPE_DECLARATION",
-            "FB_INSTANCE_DEFINITION", "CONNECTION_DEFINITION",
-            "DATA_TYPE_NAME", "FB_TYPE_NAME", "FB_INSTANCE_REFERENCE",
-            "CONNECTION_START_POINT", "APPLICATION_NAME", "ALL_DATA_TYPES",
-            "ALL_FB_TYPES", "EVENT_INPUT", "EVENT_OUTPUT", "DATA_INPUT",
-            "DATA_OUTPUT", "PARAMETER_REFERENCE", "REFERENCED_PARAMETER",
-            "PARAMETER"
-        };
-        const size_t table8_len[] = {
-            16, 19, 22, 21, 14, 12, 21, 22, 16, 14, 12, 11, 12, 10,
-            11, 19, 20, 9
-        };
-        for (size_t i = 0; i < 18; i++)
-            g_m7.table8_tag[i] = cord_from_bytes(table8[i], table8_len[i]);
-        g_m7.lifecycle_cold = cord_from_bytes("cold", 4);
-        g_m7.lifecycle_warm = cord_from_bytes("warm", 4);
-        g_m7.lifecycle_stop = cord_from_bytes("stop", 4);
-        g_m7.formula = manager_formula();
-        if (!noun_is_cell(g_m7.formula)) {
-            g_m7.ready = 0;
+        m7_state_t candidate;
+        int owns_transaction = !noun_tx_active();
+        if (owns_transaction && !noun_tx_begin(HEAP_MODE_PERSIST))
+            return M7_STATUS_SYSTEM_TERMINATION;
+        if (!m7_initial_state(&candidate)) {
+            /* Snapshot validation can deliberately hold the encompassing
+             * candidate transaction.  Its caller owns that rollback. */
+            if (owns_transaction)
+                noun_tx_abort();
             return M7_STATUS_SYSTEM_TERMINATION;
         }
-        g_m7.mode = M7_MODE_IDLE;
-        g_m7.incarnation = 1;
-        g_m7.last_status = M7_STATUS_RDY;
-        g_m7.qo = 1;
-        g_m7.result = NOUN_ZERO;
-        g_m7.safe = 1;
-        g_m7.manager_initialized = 1;
-        g_m7.ready = 1;
+        if (owns_transaction)
+            noun_tx_commit();
+        /* No fallible operation follows this assignment.  Callers construct
+         * and retain the full candidate before publishing their live root. */
+        g_m7 = candidate;
     }
     return M7_STATUS_RDY;
 }
@@ -558,16 +592,15 @@ int m7_manager_request_bytes(uint64_t command, const uint8_t *object,
 
 static int m7_deliver_restart(noun reason)
 {
-    if (evq_len() >= evq_cap()) return 0;
+    if (!g_m7.ready || !noun_is_atom(reason)) return 0;
     heap_set_mode(HEAP_MODE_PERSIST);
-    noun event = pair(cord_from_bytes("i2-lifecycle", 12), reason);
+    noun event = pair(g_m7.lifecycle_event_tag, reason);
     if (!noun_is_cell(event)) return 0;
-    evq_enq(event);
-    /* The target executor runs the closed lifecycle intent through the same
-     * admitted Nock transaction path. The M7 boundary itself remains after
-     * the caller's complete transaction; this nested unit is bounded to one
-     * lifecycle commit and has no ordinary ingress opportunity. */
-    return kernel_run_bounded(1) == 0;
+    /* One closed supervisor slot runs before the drop-newest application FIFO.
+     * Completion is reported only when this exact event commits; every other
+     * terminal outcome is returned as non-delivery. */
+    return kernel_m7_execute_lifecycle(
+        event, reason == g_m7.lifecycle_stop) == 0;
 }
 
 /* QUERY results are built from the admitted live root at REQ+; no package
@@ -683,7 +716,6 @@ int m7_scheduler_boundary(void)
             }
         }
         if (g_m7.pending_command == 2 || g_m7.pending_command == 3) {
-            g_m7.mode = direct_val(next_mode);
             if (g_m7.pending_command == 3) {
                 g_m7.mode = M7_MODE_STOPPING;
             }
@@ -697,6 +729,7 @@ int m7_scheduler_boundary(void)
                 g_m7.safe = digital_out_force_safe();
                 if (!g_m7.safe)
                     g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+                uart_puts("M7 LIFECYCLE FAIL ");
             } else if (g_m7.pending_command == 3) {
                 evq_clear();
                 tarm_clear();
@@ -717,13 +750,24 @@ int m7_scheduler_boundary(void)
                     }
                 }
             } else {
+                /* Ordinary ingress stays fenced until the exact COLD/WARM
+                 * lifecycle event has committed. */
+                g_m7.mode = direct_val(next_mode);
                 g_m7.safe = 0;
             }
-            uart_puts("M7 RESTART ");
+            if (delivered)
+                uart_puts("M7 LIFECYCLE COMMIT ");
             if (g_m7.pending_command == 2)
                 uart_puts(g_m7.last_restart == g_m7.lifecycle_cold ? "COLD\r\n" : "WARM\r\n");
             else
                 uart_puts("STOP\r\n");
+            if (delivered && g_m7.last_status == M7_STATUS_RDY) {
+                uart_puts("M7 RESTART ");
+                if (g_m7.pending_command == 2)
+                    uart_puts(g_m7.last_restart == g_m7.lifecycle_cold ? "COLD\r\n" : "WARM\r\n");
+                else
+                    uart_puts("STOP\r\n");
+            }
         }
     }
     g_m7.confirmations++;
@@ -768,6 +812,12 @@ int m7_reset(void)
     g_m7.last_status = M7_STATUS_RDY;
     g_m7.qo = 1;
     return status;
+}
+
+int m7_test_copy_fail_after(uint64_t cells)
+{
+    noun_test_copy_fail_after(cells == UINT64_MAX ? -1 : (int64_t)cells);
+    return 0;
 }
 
 int m7_deploy_begin(uint64_t stage_id, uint64_t total, noun digest)

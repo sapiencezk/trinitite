@@ -368,13 +368,16 @@ Trinitite exposes a bounded target MANAGER seam in `m7_supervisor.c`:
 `m7_manager_request_bytes` accepts only canonical jammed OBJECT bytes up to
 512 bytes with the exact M7 cue/depth/cell ceilings. A one-entry mailbox is
 accepted by receipt and evaluated by the pure-Nock manager formula at
-`m7_scheduler_boundary`, after a complete application transaction. `M7REQB`
+`m7_scheduler_boundary`, after every complete terminal application
+transaction, including abort/refusal cleanup. `M7REQB`
 and the related `M7*` Forth words are trusted-lab diagnostics; application
 events cannot forge these forms.
 
 The framed application receiver is a separate origin. It is admitted only in
-M7 RUNNING and rejects application-origin `i2-lifecycle`/`i2-control` nouns;
-the supervisor's internal restart queue is the sole lifecycle provenance.
+the exact M7 RuntimeIdentity's RUNNING mode and rejects application-origin
+`i2-lifecycle`/`i2-control` nouns; M6 is not subjected to an uninitialised-M7
+default-deny fence. One closed supervisor lifecycle slot, rather than the
+drop-newest application FIFO, is the sole lifecycle provenance.
 
 The Nock formula owns command shape, object validity, IEC status, and the
 closed lifecycle intent. The host executes only that fixed intent vocabulary,
@@ -388,7 +391,13 @@ complete; it never reports safe-low success in that case.
 CREATE/DELETE.
 
 The M7 application FIFO is 256 entries; management is an independent
-one-entry priority mailbox. The target RuntimeIdentity work admits M7
+one-entry priority mailbox. STOP's exact lifecycle slot is selected ahead of
+that FIFO, including at depth 256; its promotion retires the application
+backlog rather than copying it before the STOP cleanup. `M7 LIFECYCLE COMMIT`
+is emitted only after that exact intent commits; `M7 LIFECYCLE FAIL` is the
+audited non-delivery marker. `M7CFAIL` and `M7QFILL` are trusted-lab QEMU
+fault/priority witnesses, not services or application ingress. The target
+RuntimeIdentity work admits M7
 host/deployment `(1,2)` and M7 digital-output profile 2 using the fixed
 `I2M7CAPv1` selector. PILL2, framed ingress, checkpoint, and cold-store
 container layouts remain unchanged. Candidate PILL bytes occupy the fixed

@@ -59,6 +59,11 @@ void shrine_loop(noun kernel);
 /* M3 lab runner: execute exactly max_commits through the existing admitted
  * I2 scheduler, then return to Forth.  Requires kernel_prepare_pill(). */
 int kernel_run_bounded(uint64_t max_commits);
+/* Run one closed supervisor lifecycle intent ahead of the application FIFO.
+ * Returns 0 only when that exact intent committed; every evaluator,
+ * preflight, promotion, activation, or timeout terminal is a bounded failure.
+ * This is not a public application ingress path. */
+int kernel_m7_execute_lifecycle(noun event, int stopping);
 
 /* Phase 1 — deadline */
 void     deadline_set(uint64_t abs);

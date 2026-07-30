@@ -106,6 +106,11 @@ static int checkpoint_install_m7_candidate(
 static int m7_external_event_allowed(noun event)
 {
     noun tag, rest;
+    /* M6 is a complete, separately selected RuntimeIdentity.  The M7
+     * application-origin fence is not a default-deny compatibility shim: it
+     * exists only for the exact M7 ABI/Host-ABI/deployment-schema cut. */
+    if (!m7_identity_active())
+        return 1;
     if (!m7_ready() || m7_mode() != M7_MODE_RUNNING
         || !noun_take(event, &tag, &rest) || !noun_is_atom(tag)
         || !noun_is_cell(rest))
@@ -145,6 +150,9 @@ static noun     g_staged_kernel;
 static int      g_staged_shape;
 static uint32_t g_staged_version;
 static int      g_hstat;   /* idle / staged / pending */
+/* Set only while the supervisor's closed STOP intent is promoted. */
+static int      g_m7_lifecycle_active;
+static int      g_m7_lifecycle_discard_backlog;
 
 static void emit_swapped(uint32_t ver);
 
@@ -908,7 +916,11 @@ static int persist_compact(noun new_gate, noun new_causes, noun effects,
         return 0;
 
     /* Capture queue chain head before we rebuild (still in old half) */
-    noun old_q = g_evq;
+    /* STOP owns a closed lifecycle slot ahead of the FIFO.  Its application
+     * backlog is retired, so copying it first could consume the whole bounded
+     * candidate queue before the STOP event's own causes are reserved. */
+    noun old_q = (g_m7_lifecycle_active && g_m7_lifecycle_discard_backlog)
+        ? NOUN_ZERO : g_evq;
     uint32_t old_timing_head = g_evq_timing_head;
     if (consume_queued) {
         if (!noun_is_cell(old_q) || g_evq_n == 0)
@@ -1923,6 +1935,12 @@ void crash_recover_host(void)
 
 static uint64_t g_slam_budget = SLAM_BUDGET_DEFAULT;
 static int g_slam_event_from_queue;
+/* M7 lifecycle is a single closed supervisor intent, not an application FIFO
+ * item.  It is selected before the drop-newest FIFO even when that FIFO is
+ * full, and the bounded nested runner exits on its exact terminal outcome. */
+static noun g_m7_lifecycle_slot;
+static int  g_m7_lifecycle_slot_pending;
+static int  g_m7_boundary_active;
 /* During snap-first boot the identity-admitted PILL gate has been decoded but
  * is not yet published as g_kernel. It is still the authoritative limit
  * anchor against which an ABI 1.1 checkpoint must compare. */
@@ -1955,7 +1973,24 @@ static void reject_event_scratch(void)
     heap_scratch_reset();
 }
 
-static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
+/* Return 1 for the watched lifecycle commit, -1 for its bounded terminal
+ * failure, and 0 for ordinary scheduler progress.  Management is sampled
+ * after every terminal application transaction, not only after commits. */
+static int kernel_m7_transaction_terminal(int committed)
+{
+    if (g_m7_lifecycle_active) {
+        g_m7_lifecycle_active = 0;
+        return committed ? 1 : -1;
+    }
+    if (m7_identity_active() && !g_m7_boundary_active) {
+        g_m7_boundary_active = 1;
+        (void)m7_scheduler_boundary();
+        g_m7_boundary_active = 0;
+    }
+    return 0;
+}
+
+static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
 {
     g_kernel       = kernel_init;
     g_shrine_mode  = shrine ? 1 : 0;
@@ -1987,9 +2022,13 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 runtime_stats_count(RT_COUNT_ABORTS, 1);
                 heap_set_mode(HEAP_MODE_PERSIST);
                 heap_scratch_reset();
+                if (kernel_m7_transaction_terminal(0))
+                    return -1;
                 continue;
             }
             crash_recover_host();
+            if (kernel_m7_transaction_terminal(0))
+                return -1;
             continue;
         }
         if (jr == NOCK_ABORT_BUDGET) {
@@ -2009,6 +2048,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             evq_consume_terminal(g_slam_event_from_queue);
             g_slam_event_from_queue = 0;
             reject_event_scratch();
+            if (kernel_m7_transaction_terminal(0))
+                return -1;
             continue;
         }
 
@@ -2036,9 +2077,16 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
         noun event;
         int event_from_i2_rx = 0;
         int event_from_queue = 0;
+        int event_from_m7_lifecycle = 0;
         evq_timing_t event_timing = {0};
         uint64_t event_admit_tick = 0;
-        if ((runtime_identity_live()
+        if (g_m7_lifecycle_slot_pending) {
+            event = g_m7_lifecycle_slot;
+            g_m7_lifecycle_slot = NOUN_ZERO;
+            g_m7_lifecycle_slot_pending = 0;
+            event_from_m7_lifecycle = 1;
+            event_admit_tick = runtime_counter_now();
+        } else if ((runtime_identity_live()
              ? evq_peek_timed(&event, &event_timing)
              : evq_deq_timed(&event, &event_timing))) {
             event_from_queue = 1;
@@ -2093,10 +2141,13 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
         uint64_t slam_start = runtime_counter_now();
         if (event_admit_tick == 0)
             event_admit_tick = slam_start;
+        g_m7_lifecycle_active = event_from_m7_lifecycle;
         if (event_from_i2_rx && !m7_external_event_allowed(event)) {
             runtime_stats_count(RT_COUNT_ABORTS, 1);
             uart_puts("M7 FENCE\r\n");
             reject_event_scratch();
+            if (kernel_m7_transaction_terminal(0))
+                return -1;
             continue;
         }
         runtime_stats_count(RT_COUNT_EVENTS_ADMITTED, 1);
@@ -2127,6 +2178,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             if (!alloc_cell_checked(direct(origin), event, &carried)) {
                 runtime_stats_count(RT_COUNT_ABORTS, 1);
                 reject_event_scratch();
+                if (kernel_m7_transaction_terminal(0))
+                    return -1;
                 continue;
             }
             event = carried;
@@ -2157,6 +2210,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             deadline_set(0);
             evq_consume_terminal(event_from_queue);
             reject_event_scratch();
+            if (kernel_m7_transaction_terminal(0))
+                return -1;
             continue;
         }
 
@@ -2165,6 +2220,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             uart_puts("bad result\r\n");
             evq_consume_terminal(event_from_queue);
             reject_event_scratch();
+            if (kernel_m7_transaction_terminal(0))
+                return -1;
             continue;
         }
         cell_t *r = (cell_t *)(uintptr_t)cell_ptr(result);
@@ -2185,6 +2242,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                     uart_puts("bad result\r\n");
                     evq_consume_terminal(event_from_queue);
                     reject_event_scratch();
+                    if (kernel_m7_transaction_terminal(0))
+                        return -1;
                     continue;
                 }
                 cell_t *prod = (cell_t *)(uintptr_t)cell_ptr(r->tail);
@@ -2194,6 +2253,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                     uart_puts("bad result\r\n");
                     evq_consume_terminal(event_from_queue);
                     reject_event_scratch();
+                    if (kernel_m7_transaction_terminal(0))
+                        return -1;
                     continue;
                 }
                 cell_t *gc = (cell_t *)(uintptr_t)cell_ptr(prod->tail);
@@ -2207,6 +2268,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                         uart_puts("preflight\r\n");
                     }
                     reject_event_scratch();
+                    if (kernel_m7_transaction_terminal(0))
+                        return -1;
                     continue;
                 }
                 /*
@@ -2223,6 +2286,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                     runtime_stats_count(RT_COUNT_ABORTS, 1);
                     uart_puts("promote\r\n");
                     reject_event_scratch();
+                    if (kernel_m7_transaction_terminal(0))
+                        return -1;
                     continue;
                 }
                 g_i2_preparing = 0;
@@ -2262,13 +2327,11 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                     if (g_ckpt_commits % g_ckpt_every == 0)
                         checkpoint_save();
                 }
-                /* M7's fixed management mailbox is observed only after the
-                 * complete slam/preflight/promote/activate/cleanup unit. */
-                if (runtime_identity_live()
-                    && runtime_identity_get()->runtime_abi[1] == 2)
-                    (void)m7_scheduler_boundary();
+                int lifecycle_terminal = kernel_m7_transaction_terminal(1);
+                if (lifecycle_terminal)
+                    return lifecycle_terminal;
                 if (max_commits && completed >= max_commits)
-                    return;
+                    return 0;
                 continue;
             }
             if (rh == CORD_ABORT) {
@@ -2276,6 +2339,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 evq_consume_terminal(event_from_queue);
                 runtime_stats_count(RT_COUNT_ABORTS, 1);
                 reject_event_scratch();
+                if (kernel_m7_transaction_terminal(0))
+                    return -1;
                 continue;
             }
         }
@@ -2288,6 +2353,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             uart_puts("bad result\r\n");
             evq_consume_terminal(event_from_queue);
             reject_event_scratch();
+            if (kernel_m7_transaction_terminal(0))
+                return -1;
             continue;
         }
 
@@ -2298,6 +2365,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 runtime_stats_count(RT_COUNT_ABORTS, 1);
                 uart_puts("bad result\r\n");
                 reject_event_scratch();
+                if (kernel_m7_transaction_terminal(0))
+                    return -1;
                 continue;
             }
             cell_t *r2 = (cell_t *)(uintptr_t)cell_ptr(r->tail);
@@ -2307,6 +2376,8 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 runtime_stats_count(RT_COUNT_ABORTS, 1);
                 uart_puts("promote\r\n");
                 reject_event_scratch();
+                if (kernel_m7_transaction_terminal(0))
+                    return -1;
                 continue;
             }
         } else {
@@ -2319,19 +2390,21 @@ static void kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
         heap_set_mode(HEAP_MODE_PERSIST);
         heap_scratch_reset();
         runtime_stats_note_memory();
+        if (kernel_m7_transaction_terminal(1))
+            return 1;
         if (max_commits && completed >= max_commits)
-            return;
+            return 0;
     }
 }
 
 void arvo_loop(noun kernel_init)
 {
-    kernel_loop(kernel_init, 0, 0);
+    (void)kernel_loop(kernel_init, 0, 0);
 }
 
 void shrine_loop(noun kernel_init)
 {
-    kernel_loop(kernel_init, 1, 0);
+    (void)kernel_loop(kernel_init, 1, 0);
 }
 
 int kernel_run_bounded(uint64_t max_commits)
@@ -2340,10 +2413,26 @@ int kernel_run_bounded(uint64_t max_commits)
         || !runtime_identity_live())
         return -1;
     uint64_t start = runtime_counter_now();
-    kernel_loop(g_kernel, 1, max_commits);
+    (void)kernel_loop(g_kernel, 1, max_commits);
     uint64_t end = runtime_counter_now();
     runtime_stats_finish_run(end >= start ? end - start : 0);
     return 0;
+}
+
+int kernel_m7_execute_lifecycle(noun event, int stopping)
+{
+    if (!m7_identity_active() || !g_shrine_mode || !noun_is_cell(g_kernel)
+        || !noun_is_cell(event) || g_m7_lifecycle_slot_pending
+        || g_m7_lifecycle_active)
+        return -1;
+    g_m7_lifecycle_slot = event;
+    g_m7_lifecycle_slot_pending = 1;
+    g_m7_lifecycle_discard_backlog = stopping != 0;
+    int result = kernel_loop(g_kernel, 1, 0);
+    g_m7_lifecycle_slot = NOUN_ZERO;
+    g_m7_lifecycle_slot_pending = 0;
+    g_m7_lifecycle_discard_backlog = 0;
+    return result == 1 ? 0 : -1;
 }
 
 /* ── Durable checkpoint (live roots → cold store) ───────────────────────── */
@@ -3757,6 +3846,16 @@ static int install_clean_pill(noun pill_gate)
         heap_persist_abort_tx();
         return -1;
     }
+    /* Build the complete M7 supervisor candidate while the new semispace is
+     * still disposable.  m7_init has no partial-global failure state; after
+     * success the remaining root assignment and transaction commit cannot
+     * fail, so a clean PILL never publishes an M7 identity without its
+     * supervisor formula/tags. */
+    if (m7_identity_active()
+        && m7_init(candidate_gate) != M7_STATUS_RDY) {
+        heap_persist_abort_tx();
+        return -1;
+    }
     tarm_t empty_tarms[TARM_MAX] = {0};
     g_kernel = candidate_gate;
     g_slam_formula = candidate_slam;
@@ -3768,10 +3867,6 @@ static int install_clean_pill(noun pill_gate)
     for (int i = 0; i < TARM_MAX; i++)
         g_tarms[i] = empty_tarms[i];
     heap_persist_commit_tx();
-    if (runtime_identity_live()
-        && runtime_identity_get()->runtime_abi[1] == 2
-        && m7_init(g_kernel) != M7_STATUS_RDY)
-        return -1;
     return 0;
 }
 

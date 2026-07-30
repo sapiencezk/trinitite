@@ -2911,6 +2911,31 @@ defcode "M7FORCE", 7, m7_force_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// M7CFAIL ( cells -- status ) is a trusted-lab fault injector for the closed
+// lifecycle promotion witness.  -1 disables it.  It is not an M7 service or
+// application ingress form.
+defcode "M7CFAIL", 7, m7_copy_fail_word, 0
+    ldr     x0, [DSP], #8
+    bl      m7_test_copy_fail_after
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M7QFILL ( -- ) fills the bounded application FIFO with 256 inert test
+// events.  It is retained solely for the M7 scheduler-priority QEMU witness.
+defcode "M7QFILL", 7, m7_queue_fill_word, 0
+    sub     sp, sp, #16
+    mov     x1, #256
+    str     x1, [sp]
+1:  mov     x0, #0
+    bl      evq_enq
+    ldr     x1, [sp]
+    subs    x1, x1, #1
+    str     x1, [sp]
+    cbnz    x1, 1b
+    add     sp, sp, #16
+    NEXT
+
 defcode "M7RESET", 7, m7_reset_word, 0
     bl      m7_reset
     sxtw    x0, w0

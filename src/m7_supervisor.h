@@ -61,6 +61,10 @@ enum {
 };
 
 int      m7_init(noun gate);
+/* True only for the exact M7 RuntimeIdentity/Host ABI cut.  Kernel ingress
+ * fencing and management scheduling are deliberately scoped to this identity;
+ * M6 is not an uninitialised M7 resource. */
+int      m7_identity_active(void);
 int      m7_manager_init(int qi);
 int      m7_ready(void);
 uint64_t m7_mode(void);
@@ -96,6 +100,8 @@ int      m7_manager_request_bytes(uint64_t command, const uint8_t *object,
 int      m7_scheduler_boundary(void);
 int      m7_force_stop(void);
 int      m7_reset(void);
+/* Trusted-lab QEMU fault seam; not a MANAGER, deployment, or app surface. */
+int      m7_test_copy_fail_after(uint64_t cells);
 
 /* TRI_DEPLOY bounded protocol. Stage storage is volatile and fixed-size;
  * successful SEAL does not alter live roots. */
