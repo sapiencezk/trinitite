@@ -468,8 +468,13 @@ void tarm_poll(void)
             cell_t *body = (cell_t *)(uintptr_t)cell_ptr(outer->tail);
             body->tail = direct(now);
             uint64_t due = g_tarms[i].next;
-            (void)evq_enq_prebuilt(
-                g_tarms[i].i2_event_cell, now, due, 1);
+            /* A full FIFO is a retry boundary, not a timer cancellation.
+             * Keep the complete token/event reservation live until the
+             * queue accepts it; the next poll can then retry the same
+             * deterministic timer cause without losing E_CYCLE. */
+            if (!evq_enq_prebuilt(
+                    g_tarms[i].i2_event_cell, now, due, 1))
+                continue;
             runtime_stats_count(RT_COUNT_TIMER_FIRES, 1);
             runtime_stats_max(
                 RT_COUNT_TIMER_LATENESS_MAX, now >= due ? now - due : 0);
