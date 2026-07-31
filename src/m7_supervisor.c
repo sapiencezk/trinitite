@@ -81,9 +81,9 @@ typedef struct {
     uint64_t active_pill_len;
     uint8_t active_pill_digest[32];
     int active_pill_valid;
-    /* An attempted final cold selection had an unknown durability outcome.
-     * Keep the prepared candidate safe/IDLE in RAM, but reject START and all
-     * further persistent mutations until a reboot remounts selected media. */
+    /* Physical deployment media was touched without a verified selected
+     * result. Keep the prepared candidate safe/IDLE in RAM, but reject START
+     * and all further persistent mutations until a reboot remounts media. */
     int durability_unknown;
     /* MANAGER OBJECT/RESULT are volatile bounded byte envelopes.  Keeping
      * either decoded noun in the live semispace made serial QUERY requests
@@ -817,8 +817,8 @@ int m7_scheduler_boundary(void)
     if (g_m7.last_status == M7_STATUS_RDY) {
         if (command == 2 && g_m7.durability_unknown) {
             /* A caller that saw TRI_DEPLOY_DURABILITY_UNKNOWN must remount
-             * before ordinary operation.  Do not run a RAM-only candidate
-             * whose selected cold pair is deliberately unknown. */
+             * before ordinary operation. Do not run a RAM-only candidate
+             * when media may contain old, new, or no valid selected pair. */
             g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
             g_m7.qo = 0;
         }

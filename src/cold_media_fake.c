@@ -27,6 +27,7 @@ static int g_fake_initialized;
 static int g_fake_removed;
 static cold_media_fake_fault_t g_fault;
 static uint64_t g_fault_boundary;
+static uint64_t g_bit_flip_byte = COLD_MEDIA_SECTOR_BYTES / 2;
 static uint64_t g_transfer;
 static int g_fault_effect_fired;
 
@@ -136,7 +137,7 @@ cold_media_status_t cold_media_fake_sector_read(
     if (g_fault == COLD_MEDIA_FAKE_BIT_FLIP
         && g_transfer == g_fault_boundary) {
         fault_effect();
-        dst[COLD_MEDIA_SECTOR_BYTES / 2] ^= 1;
+        dst[g_bit_flip_byte] ^= 1;
     }
     return COLD_MEDIA_OK;
 }
@@ -185,7 +186,7 @@ cold_media_status_t cold_media_fake_sector_write(
     }
     if (fire && g_fault == COLD_MEDIA_FAKE_BIT_FLIP) {
         fault_effect();
-        dst[COLD_MEDIA_SECTOR_BYTES / 2] ^= 1;
+        dst[g_bit_flip_byte] ^= 1;
     }
     return COLD_MEDIA_OK;
 }
@@ -222,14 +223,22 @@ cold_media_status_t cold_media_fake_barrier(uint64_t deadline)
     return COLD_MEDIA_OK;
 }
 
-static void arm_fault(cold_media_fake_fault_t fault,
-                      uint64_t transfer_boundary)
+static void arm_fault_at(cold_media_fake_fault_t fault,
+                         uint64_t transfer_boundary, uint64_t bit_flip_byte)
 {
     g_fault = fault;
     g_fault_boundary = transfer_boundary ? transfer_boundary : 1;
+    g_bit_flip_byte = bit_flip_byte < COLD_MEDIA_SECTOR_BYTES
+        ? bit_flip_byte : COLD_MEDIA_SECTOR_BYTES / 2;
     g_transfer = 0;
     g_fake_removed = 0;
     g_fault_effect_fired = 0;
+}
+
+static void arm_fault(cold_media_fake_fault_t fault,
+                      uint64_t transfer_boundary)
+{
+    arm_fault_at(fault, transfer_boundary, COLD_MEDIA_SECTOR_BYTES / 2);
 }
 
 void cold_media_fake_fault_set(cold_media_fake_fault_t fault,
@@ -243,6 +252,7 @@ void cold_media_fake_fault_clear(void)
 {
     g_fault = COLD_MEDIA_FAKE_NONE;
     g_fault_boundary = 0;
+    g_bit_flip_byte = COLD_MEDIA_SECTOR_BYTES / 2;
     g_transfer = 0;
     g_fake_removed = 0;
     g_fault_effect_fired = 0;
@@ -309,13 +319,13 @@ static int prepare_old_generation(void)
     return prepare_old_generation_for_slot(0);
 }
 
-static int remount_and_select(void)
+static cold_result_t remount_probe(void)
 {
     cold_media_fake_fault_clear();
     reload_window_from_media();
     if (!activate_media())
-        return 0;
-    return cold_probe() == COLD_RESULT_VALID;
+        return COLD_RESULT_ABSENT;
+    return cold_probe();
 }
 
 static int load_expected(uint64_t expected)
@@ -336,14 +346,28 @@ static uint64_t deployment_fault_matrix(void)
 {
     uint64_t failures = 0;
     uint64_t hash = 0;
-    int bit_flip_durability_unknown = 0;
-    static const cold_media_fake_fault_t final_selection_faults[] = {
-        /* A submitted partial write, barrier fault, or acknowledged but
-         * corrupted sector must never become a false COMMITTED deployment. */
+    static const cold_media_fake_fault_t deployment_faults[] = {
+        /* Every physical deployment error class is exercised at every
+         * read/write/barrier transfer boundary. */
+        COLD_MEDIA_FAKE_TIMEOUT,
+        COLD_MEDIA_FAKE_COMMAND_CRC,
+        COLD_MEDIA_FAKE_DATA_CRC,
+        COLD_MEDIA_FAKE_READ_FAILURE,
         COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE,
         COLD_MEDIA_FAKE_BARRIER_FAILURE,
-        COLD_MEDIA_FAKE_BIT_FLIP
+        COLD_MEDIA_FAKE_REMOVAL,
+        COLD_MEDIA_FAKE_BIT_FLIP,
+        COLD_MEDIA_FAKE_RESET
     };
+    /* These hit object magic/payload digest/header digest/commit and the
+     * selecting-superblock header/checksum regions as the boundary loop
+     * reaches their sectors.  256 retains the former middle-of-sector probe. */
+    static const uint64_t corruption_bytes[] = { 0, 40, 64, 72, 104, 256 };
+    int fence_seen[sizeof deployment_faults / sizeof deployment_faults[0]] = {0};
+    int corruption_fenced[sizeof corruption_bytes / sizeof corruption_bytes[0]] = {0};
+    int saw_old_pair = 0;
+    int saw_new_pair = 0;
+    int saw_no_valid_pair = 0;
     for (unsigned slot_parity = 0; slot_parity < 2; slot_parity++) {
         if (!prepare_old_generation_for_slot(slot_parity))
             return 1;
@@ -355,51 +379,68 @@ static uint64_t deployment_fault_matrix(void)
             return 2;
         uint64_t transfer_boundaries = g_transfer;
         for (unsigned f = 0;
-             f < sizeof final_selection_faults / sizeof final_selection_faults[0];
+             f < sizeof deployment_faults / sizeof deployment_faults[0];
              f++) {
-            for (uint64_t edge = 1; edge <= transfer_boundaries; edge++) {
-                if (!prepare_old_generation_for_slot(slot_parity)) {
-                    failures |= 1ULL << 2;
-                    continue;
+            unsigned bytes = deployment_faults[f] == COLD_MEDIA_FAKE_BIT_FLIP
+                ? sizeof corruption_bytes / sizeof corruption_bytes[0] : 1;
+            for (unsigned b = 0; b < bytes; b++) {
+                for (uint64_t edge = 1; edge <= transfer_boundaries; edge++) {
+                    if (!prepare_old_generation_for_slot(slot_parity)) {
+                        failures |= 1ULL << 2;
+                        continue;
+                    }
+                    old_generation = cold_selected_generation();
+                    if (deployment_faults[f] == COLD_MEDIA_FAKE_BIT_FLIP)
+                        arm_fault_at(deployment_faults[f], edge,
+                                     corruption_bytes[b]);
+                    else
+                        arm_fault(deployment_faults[f], edge);
+                    cold_deploy_result_t result = cold_store_deployment(
+                        direct(43), direct(44), &hash);
+                    int injected = g_fault_effect_fired;
+                    cold_result_t remount = remount_probe();
+                    int old_pair = remount == COLD_RESULT_VALID
+                        && cold_selected_generation() == old_generation
+                        && load_expected(42);
+                    int new_pair = remount == COLD_RESULT_VALID
+                        && cold_selected_generation() == old_generation + 2
+                        && load_expected(44);
+                    if (old_pair)
+                        saw_old_pair = 1;
+                    if (new_pair)
+                        saw_new_pair = 1;
+                    if (remount != COLD_RESULT_VALID)
+                        saw_no_valid_pair = 1;
+                    if (result == COLD_DEPLOY_DURABILITY_UNKNOWN) {
+                        fence_seen[f] = 1;
+                        if (deployment_faults[f] == COLD_MEDIA_FAKE_BIT_FLIP)
+                            corruption_fenced[b] = 1;
+                    }
+                    /* An aligned append can share a sector with retained
+                     * data. A failed deployment may therefore remount old,
+                     * new, or no valid pair. The sole durable success claim
+                     * is stronger: COMMITTED must remount the exact new pair. */
+                    if (!injected
+                        || (result == COLD_DEPLOY_COMMITTED && !new_pair)
+                        || (result != COLD_DEPLOY_REJECTED
+                            && result != COLD_DEPLOY_COMMITTED
+                            && result != COLD_DEPLOY_DURABILITY_UNKNOWN)
+                        || !sentinels_ok())
+                        failures |= 1ULL << 4;
                 }
-                old_generation = cold_selected_generation();
-                arm_fault(final_selection_faults[f], edge);
-                cold_deploy_result_t result = cold_store_deployment(
-                    direct(43), direct(44), &hash);
-                int injected = g_fault_effect_fired;
-                if (!remount_and_select()) {
-                    failures |= 1ULL << 3;
-                    continue;
-                }
-                uint64_t selected = cold_selected_generation();
-                int old_pair = selected == old_generation && load_expected(42);
-                int new_pair = selected == old_generation + 2 && load_expected(44);
-                if (final_selection_faults[f] == COLD_MEDIA_FAKE_BIT_FLIP
-                    && result == COLD_DEPLOY_DURABILITY_UNKNOWN)
-                    bit_flip_durability_unknown = 1;
-                /* A successful-but-corrupt sector used to return COMMITTED
-                 * while remount selected the old pair.  A bit flip in an
-                 * unused portion of a read-modify-write sector may still
-                 * commit safely; every COMMITTED result must nevertheless
-                 * remount the exact new pair. */
-                if (!injected
-                    || (result == COLD_DEPLOY_REJECTED && !old_pair)
-                    || (result == COLD_DEPLOY_COMMITTED && !new_pair)
-                    || (result == COLD_DEPLOY_DURABILITY_UNKNOWN
-                        && !old_pair && !new_pair)
-                    || (result != COLD_DEPLOY_REJECTED
-                        && result != COLD_DEPLOY_COMMITTED
-                        && result != COLD_DEPLOY_DURABILITY_UNKNOWN)
-                    || !sentinels_ok())
-                    failures |= 1ULL << 4;
             }
         }
     }
-    /* At least one selected-chain corruption/readback fault must prove the
-     * post-selection fence, in addition to the all-boundary old-or-new
-     * invariant above. */
-    if (!bit_flip_durability_unknown)
-        failures |= 1ULL << 5;
+    for (unsigned f = 0;
+         f < sizeof deployment_faults / sizeof deployment_faults[0]; f++)
+        if (!fence_seen[f])
+            failures |= 1ULL << (5 + f);
+    for (unsigned b = 0;
+         b < sizeof corruption_bytes / sizeof corruption_bytes[0]; b++)
+        if (!corruption_fenced[b])
+            failures |= 1ULL << (14 + b);
+    if (!saw_old_pair || !saw_new_pair || !saw_no_valid_pair)
+        failures |= 1ULL << 20;
     return failures;
 }
 
@@ -507,7 +548,7 @@ uint64_t cold_media_fake_selftest(void)
             arm_fault(matrix[f], edge);
             (void)cold_snap_save(direct(43));
             int injected = g_fault_effect_fired;
-            if (!remount_and_select()) {
+            if (remount_probe() != COLD_RESULT_VALID) {
                 failures |= 1ULL << 19;
                 continue;
             }

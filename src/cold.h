@@ -34,9 +34,14 @@ typedef enum {
     COLD_WRITE_SUPERBLOCK = 4
 } cold_write_phase_t;
 
-/* TRI_DEPLOY has a distinct commit boundary.  Before the final superblock
- * attempt the old selected pair is definitive; after an attempted final
- * superblock write or its barrier, media may have selected either pair. */
+/* TRI_DEPLOY has one physical durability boundary. COLD_DEPLOY_COMMITTED is
+ * returned only after the exact selected object chain and selecting
+ * superblock were read back and validated from media. COLD_DEPLOY_REJECTED is
+ * reserved for validation/preflight before any deployment object is appended.
+ * Once a physical deployment append is attempted, any failure is
+ * COLD_DEPLOY_DURABILITY_UNKNOWN: an 8-byte-aligned append can share a sector
+ * with retained data, so remount may find the old pair, the new pair, or no
+ * valid pair. */
 typedef enum {
     COLD_DEPLOY_REJECTED = -1,
     COLD_DEPLOY_COMMITTED = 0,
@@ -53,11 +58,11 @@ uint64_t cold_data_head(void);
 
 uint64_t cold_store(noun n);
 /* M7 TRI_DEPLOY commit: append/verify one PILL blob and one supervisor
- * snapshot under one final superblock write. COLD_DEPLOY_REJECTED means the
- * final selection was never attempted and the old pair remains authoritative.
- * COLD_DEPLOY_DURABILITY_UNKNOWN means the final write or barrier reported an
- * error after selection became physically possible; a caller must not report
- * this as an ordinary failed activation. */
+ * snapshot under one final superblock write. COLD_DEPLOY_REJECTED means no
+ * physical deployment append was attempted. COLD_DEPLOY_DURABILITY_UNKNOWN
+ * means physical deployment media was touched but COMMITTED could not be
+ * established by readback; a caller must fence, not report an ordinary failed
+ * activation or assume that the retained old pair remains bootable. */
 cold_deploy_result_t cold_store_deployment(noun pill_blob,
                                            noun supervisor_snapshot,
                                            uint64_t *pill_hash_out);

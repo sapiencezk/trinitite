@@ -413,11 +413,13 @@ explicit unknown-durability exception publishes only the prepared safe/IDLE
 candidate. Before `COLD_DEPLOY_COMMITTED`, the target reads the full selected
 object chain and selecting superblock back from physical media, validates every
 object/digest and the superblock, and compares the selected superblock with the
-planned bytes; the RAM window is not the durability witness. A final
-superblock write, barrier, or readback error is
-`TRI_DEPLOY_DURABILITY_UNKNOWN`: the assignment-only candidate is published
-safe/IDLE, but START, checkpoint, and new deployment are rejected until
-reboot/remount selects and read-verifies media. The target prebuilds all
+planned bytes; the RAM window is not the durability witness. The 8-byte-aligned
+append can share a retained physical sector, so any physical deployment write,
+barrier, or readback error is `TRI_DEPLOY_DURABILITY_UNKNOWN`: the
+assignment-only candidate is published safe/IDLE, but START, checkpoint, and
+new deployment are rejected until reboot/remount. Remount may find the old
+pair, new pair, or no valid pair; the target makes no old-or-new recovery
+claim. The target prebuilds all
 fallible RAM roots before selection and makes
 the final gate/supervisor/identity/output-inhibition publication
 assignment-only. It preflights the complete jammed supervisor snapshot against

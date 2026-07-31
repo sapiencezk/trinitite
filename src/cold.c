@@ -709,20 +709,27 @@ cold_deploy_result_t cold_store_deployment(noun pill_blob,
     blake3_hash(bytes, (size_t)pill_len, pill_digest);
     if (append_obj_unselected(&old, KIND_BLOB, bytes, pill_len,
                               old.generation + 1, pill_off, pill_head) != 0)
-        return COLD_DEPLOY_REJECTED;
+        return cold_media_active() ? COLD_DEPLOY_DURABILITY_UNKNOWN
+                                   : COLD_DEPLOY_REJECTED;
     /* The blob is read-verified before the snapshot and selection write. */
     if (object_validate(&after_pill, pill_off, KIND_BLOB,
                         old.generation + 1, 0) != COLD_RESULT_VALID)
-        return COLD_DEPLOY_REJECTED;
+        return cold_media_active() ? COLD_DEPLOY_DURABILITY_UNKNOWN
+                                   : COLD_DEPLOY_REJECTED;
 
     if (jam_bytes(supervisor_snapshot, &bytes, &snapshot_len) != 0) {
         g_last_result = COLD_RESULT_LENGTH;
-        return COLD_DEPLOY_REJECTED;
+        /* The blob append already touched physical media. Preserve the
+         * deployment fence even though this local serialization failure is
+         * unexpected after caller preflight. */
+        return cold_media_active() ? COLD_DEPLOY_DURABILITY_UNKNOWN
+                                   : COLD_DEPLOY_REJECTED;
     }
     if (append_obj_unselected(&after_pill, KIND_SNAP, bytes, snapshot_len,
                               old.generation + 2, snapshot_off,
                               snapshot_head) != 0)
-        return COLD_DEPLOY_REJECTED;
+        return cold_media_active() ? COLD_DEPLOY_DURABILITY_UNKNOWN
+                                   : COLD_DEPLOY_REJECTED;
 
     next = after_pill;
     next.generation = old.generation + 2;
@@ -739,9 +746,9 @@ cold_deploy_result_t cold_store_deployment(noun pill_blob,
                                   media_deadline()) != COLD_MEDIA_OK)) {
         g_last_result = COLD_RESULT_WRITE_FAULT;
         /* Do not guess whether a submitted/partially submitted superblock is
-         * selected.  The caller must publish a safe candidate or fail closed;
-         * treating this as the old pair is the RAM/media split this result
-         * exists to prevent. */
+         * selected. The caller must publish a safe candidate or fail closed;
+         * an aligned append may also have damaged retained data, so neither
+         * the old nor new pair may be assumed bootable. */
         return COLD_DEPLOY_DURABILITY_UNKNOWN;
     }
     cold_result_t physical = deployment_media_read_verify(&next, next_slot);
@@ -749,7 +756,8 @@ cold_deploy_result_t cold_store_deployment(noun pill_blob,
         /* The superblock reached the media path, but a readback cannot prove
          * that the exact selecting superblock and its complete object chain
          * are present. Keep the candidate fenced until remount/boot decides
-         * old or new; never report a RAM-only COMMITTED result. */
+         * old, new, or no valid pair; never report a RAM-only COMMITTED
+         * result. */
         g_last_result = physical;
         return COLD_DEPLOY_DURABILITY_UNKNOWN;
     }
