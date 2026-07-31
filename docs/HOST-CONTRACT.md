@@ -410,11 +410,15 @@ volatile stage at `PILL_SCRATCH_BASE` until `SEAL`; activation stores the full
 candidate as a cold blob and records its full digest plus identity in the M7
 supervisor snapshot. It publishes RAM after confirmed cold selection; the
 explicit unknown-durability exception publishes only the prepared safe/IDLE
-candidate. The cold window is updated only after physical write success. A final
-superblock write or barrier error is `TRI_DEPLOY_DURABILITY_UNKNOWN`: the
-assignment-only candidate is published safe/IDLE, but START, checkpoint, and
-new deployment are rejected until reboot/remount selects and read-verifies
-media. The target prebuilds all fallible RAM roots before selection and makes
+candidate. Before `COLD_DEPLOY_COMMITTED`, the target reads the full selected
+object chain and selecting superblock back from physical media, validates every
+object/digest and the superblock, and compares the selected superblock with the
+planned bytes; the RAM window is not the durability witness. A final
+superblock write, barrier, or readback error is
+`TRI_DEPLOY_DURABILITY_UNKNOWN`: the assignment-only candidate is published
+safe/IDLE, but START, checkpoint, and new deployment are rejected until
+reboot/remount selects and read-verifies media. The target prebuilds all
+fallible RAM roots before selection and makes
 the final gate/supervisor/identity/output-inhibition publication
 assignment-only. It preflights the complete jammed supervisor snapshot against
 65,536 bytes and every cold-store jam against the 131,072-byte writer before

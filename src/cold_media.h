@@ -27,7 +27,10 @@ typedef enum {
     COLD_MEDIA_PHASE_OBJECT_COMMIT,
     COLD_MEDIA_PHASE_DATA_BARRIER,
     COLD_MEDIA_PHASE_SUPERBLOCK,
-    COLD_MEDIA_PHASE_SUPERBLOCK_BARRIER
+    COLD_MEDIA_PHASE_SUPERBLOCK_BARRIER,
+    /* Bounded read-after-write validation before TRI_DEPLOY can report
+     * COLD_DEPLOY_COMMITTED. */
+    COLD_MEDIA_PHASE_DEPLOY_VERIFY
 } cold_media_phase_t;
 
 typedef enum {

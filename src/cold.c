@@ -130,9 +130,9 @@ static int cold_write_phase(cold_write_phase_t phase, uint64_t off,
         && cold_media_write(media_phase(phase), off, src, writable,
                             media_deadline()) != COLD_MEDIA_OK)
         return 0;
-    /* The RAM window is a mirror of successfully submitted media, never a
-     * speculative write-ahead cache.  A failed device operation must leave
-     * it unchanged so later in-process selection cannot diverge silently. */
+    /* The RAM window mirrors an acknowledged submission, never a speculative
+     * write-ahead cache.  A TRI_DEPLOY commit additionally reads and
+     * validates physical media before it can report COMMITTED. */
     if (writable)
         cold_write_raw(off, src, writable);
     return completed;
@@ -646,6 +646,37 @@ static int append_obj_unselected(const cold_super_t *old, uint32_t kind,
     return 0;
 }
 
+/* Read the whole selected chain from physical media into the RAM mirror, then
+ * validate it through the same strict super/object validators used at boot.
+ * The deployment is bounded by COLD_SIZE, and this deliberately happens only
+ * on activation, never on the ordinary application transaction path. */
+static cold_result_t deployment_media_read_verify(const cold_super_t *expected,
+                                                  uint64_t selected_slot)
+{
+    if (!expected || expected->data_head <= COLD_DATA0
+        || expected->data_head > COLD_SIZE)
+        return COLD_RESULT_OFFSET;
+    if (!cold_media_active())
+        return COLD_RESULT_VALID;
+    uint64_t deadline = media_deadline();
+    if (cold_media_read(
+            COLD_MEDIA_PHASE_DEPLOY_VERIFY, COLD_DATA0,
+            (void *)(uintptr_t)(COLD_BASE + COLD_DATA0),
+            expected->data_head - COLD_DATA0, deadline) != COLD_MEDIA_OK
+        || cold_media_read(
+            COLD_MEDIA_PHASE_DEPLOY_VERIFY, selected_slot,
+            (void *)(uintptr_t)(COLD_BASE + selected_slot),
+            sizeof(cold_super_t), deadline) != COLD_MEDIA_OK)
+        return COLD_RESULT_WRITE_FAULT;
+    cold_super_t observed;
+    cold_result_t result = super_validate(selected_slot, &observed);
+    if (result != COLD_RESULT_VALID)
+        return result;
+    return bytes_eq((const uint8_t *)&observed, (const uint8_t *)expected,
+                    sizeof observed)
+        ? COLD_RESULT_VALID : COLD_RESULT_SUPERBLOCK;
+}
+
 cold_deploy_result_t cold_store_deployment(noun pill_blob,
                                            noun supervisor_snapshot,
                                            uint64_t *pill_hash_out)
@@ -711,6 +742,15 @@ cold_deploy_result_t cold_store_deployment(noun pill_blob,
          * selected.  The caller must publish a safe candidate or fail closed;
          * treating this as the old pair is the RAM/media split this result
          * exists to prevent. */
+        return COLD_DEPLOY_DURABILITY_UNKNOWN;
+    }
+    cold_result_t physical = deployment_media_read_verify(&next, next_slot);
+    if (physical != COLD_RESULT_VALID) {
+        /* The superblock reached the media path, but a readback cannot prove
+         * that the exact selecting superblock and its complete object chain
+         * are present. Keep the candidate fenced until remount/boot decides
+         * old or new; never report a RAM-only COMMITTED result. */
+        g_last_result = physical;
         return COLD_DEPLOY_DURABILITY_UNKNOWN;
     }
     g_selected_generation = next.generation;

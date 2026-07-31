@@ -290,14 +290,23 @@ static int activate_media(void)
         COLD_MEDIA_PHASE_LAYOUT, 0, &ignored, 1, 0) == COLD_MEDIA_OK;
 }
 
-static int prepare_old_generation(void)
+static int prepare_old_generation_for_slot(unsigned slot_parity)
 {
     restore_blank_media();
     reload_window_from_media();
     if (!activate_media() || cold_format() != 0
         || cold_snap_save(direct(42)) != 0)
         return 0;
+    /* A second retained snapshot flips the active A/B superblock. Both
+     * parities must exercise the deployment selecting-slot readback. */
+    if (slot_parity && cold_snap_save(direct(42)) != 0)
+        return 0;
     return 1;
+}
+
+static int prepare_old_generation(void)
+{
+    return prepare_old_generation_for_slot(0);
 }
 
 static int remount_and_select(void)
@@ -327,51 +336,60 @@ static uint64_t deployment_fault_matrix(void)
 {
     uint64_t failures = 0;
     uint64_t hash = 0;
-    if (!prepare_old_generation())
-        return 1;
-    uint64_t old_generation = cold_selected_generation();
-    arm_fault(COLD_MEDIA_FAKE_NONE, 1);
-    if (cold_store_deployment(direct(43), direct(44), &hash)
-            != COLD_DEPLOY_COMMITTED
-        || hash == 0 || g_transfer == 0)
-        return 2;
-    uint64_t transfer_boundaries = g_transfer;
     static const cold_media_fake_fault_t final_selection_faults[] = {
-        /* Submitted/partial final write and final barrier are the two
-         * ambiguous-selection cases that previously split RAM from media. */
+        /* A submitted partial write, barrier fault, or acknowledged but
+         * corrupted sector must never become a false COMMITTED deployment. */
         COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE,
-        COLD_MEDIA_FAKE_BARRIER_FAILURE
+        COLD_MEDIA_FAKE_BARRIER_FAILURE,
+        COLD_MEDIA_FAKE_BIT_FLIP
     };
-    for (unsigned f = 0;
-         f < sizeof final_selection_faults / sizeof final_selection_faults[0];
-         f++) {
-        for (uint64_t edge = 1; edge <= transfer_boundaries; edge++) {
-            if (!prepare_old_generation()) {
-                failures |= 1ULL << 2;
-                continue;
+    for (unsigned slot_parity = 0; slot_parity < 2; slot_parity++) {
+        if (!prepare_old_generation_for_slot(slot_parity))
+            return 1;
+        uint64_t old_generation = cold_selected_generation();
+        arm_fault(COLD_MEDIA_FAKE_NONE, 1);
+        if (cold_store_deployment(direct(43), direct(44), &hash)
+                != COLD_DEPLOY_COMMITTED
+            || hash == 0 || g_transfer == 0)
+            return 2;
+        uint64_t transfer_boundaries = g_transfer;
+        for (unsigned f = 0;
+             f < sizeof final_selection_faults / sizeof final_selection_faults[0];
+             f++) {
+            for (uint64_t edge = 1; edge <= transfer_boundaries; edge++) {
+                if (!prepare_old_generation_for_slot(slot_parity)) {
+                    failures |= 1ULL << 2;
+                    continue;
+                }
+                old_generation = cold_selected_generation();
+                arm_fault(final_selection_faults[f], edge);
+                cold_deploy_result_t result = cold_store_deployment(
+                    direct(43), direct(44), &hash);
+                int injected = g_fault_effect_fired;
+                if (!remount_and_select()) {
+                    failures |= 1ULL << 3;
+                    continue;
+                }
+                uint64_t selected = cold_selected_generation();
+                int old_pair = selected == old_generation && load_expected(42);
+                int new_pair = selected == old_generation + 2 && load_expected(44);
+                if (!injected
+                    /* A successful-but-corrupt sector used to return
+                     * COMMITTED because only the RAM mirror was validated.
+                     * Post-barrier physical readback makes every such
+                     * boundary explicitly uncertain. */
+                    || (final_selection_faults[f] == COLD_MEDIA_FAKE_BIT_FLIP
+                        && result != COLD_DEPLOY_DURABILITY_UNKNOWN)
+                    || (result == COLD_DEPLOY_REJECTED && !old_pair)
+                    || (result == COLD_DEPLOY_COMMITTED && !new_pair)
+                    || (result == COLD_DEPLOY_DURABILITY_UNKNOWN
+                        && !old_pair && !new_pair)
+                    || (result != COLD_DEPLOY_REJECTED
+                        && result != COLD_DEPLOY_COMMITTED
+                        && result != COLD_DEPLOY_DURABILITY_UNKNOWN)
+                    || !sentinels_ok())
+                    failures |= 1ULL << 4;
             }
-            old_generation = cold_selected_generation();
-            arm_fault(final_selection_faults[f], edge);
-            cold_deploy_result_t result = cold_store_deployment(
-                direct(43), direct(44), &hash);
-            int injected = g_fault_effect_fired;
-            if (!remount_and_select()) {
-                failures |= 1ULL << 3;
-                continue;
-            }
-            uint64_t selected = cold_selected_generation();
-            int old_pair = selected == old_generation && load_expected(42);
-            int new_pair = selected == old_generation + 2 && load_expected(44);
-            if (!injected
-                || (result == COLD_DEPLOY_REJECTED && !old_pair)
-                || (result == COLD_DEPLOY_COMMITTED && !new_pair)
-                || (result == COLD_DEPLOY_DURABILITY_UNKNOWN
-                    && !old_pair && !new_pair)
-                || (result != COLD_DEPLOY_REJECTED
-                    && result != COLD_DEPLOY_COMMITTED
-                    && result != COLD_DEPLOY_DURABILITY_UNKNOWN)
-                || !sentinels_ok())
-                failures |= 1ULL << 4;
         }
     }
     return failures;
