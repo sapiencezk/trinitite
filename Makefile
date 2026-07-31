@@ -124,6 +124,8 @@ test-media-fake:
 	$(MAKE) COLD_MEDIA=fake all
 	./tests/run_tests.sh
 	./tests/media-fake-matrix.sh
+	# Do not leave COLD_MEDIA=fake objects for a following RAM/semihost build.
+	$(MAKE) clean
 
 test-media-rpi4-build:
 	$(MAKE) clean
