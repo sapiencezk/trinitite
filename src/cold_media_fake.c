@@ -108,7 +108,7 @@ cold_media_status_t cold_media_fake_sector_read(
         return COLD_MEDIA_REMOVED;
     if (boundary()) {
         if (g_fault == COLD_MEDIA_FAKE_TIMEOUT
-            || g_fault == COLD_MEDIA_FAKE_RESET) {
+            || g_fault == COLD_MEDIA_FAKE_RESET_TIMEOUT) {
             fault_effect();
             return COLD_MEDIA_TIMEOUT;
         }
@@ -157,7 +157,7 @@ cold_media_status_t cold_media_fake_sector_write(
                  || g_fault == COLD_MEDIA_FAKE_COMMAND_CRC
                  || g_fault == COLD_MEDIA_FAKE_READ_FAILURE
                  || g_fault == COLD_MEDIA_FAKE_BARRIER_FAILURE
-                 || g_fault == COLD_MEDIA_FAKE_RESET)) {
+                 || g_fault == COLD_MEDIA_FAKE_RESET_TIMEOUT)) {
         fault_effect();
         if (g_fault == COLD_MEDIA_FAKE_COMMAND_CRC)
             return COLD_MEDIA_COMMAND_CRC;
@@ -199,7 +199,7 @@ cold_media_status_t cold_media_fake_barrier(uint64_t deadline)
     if (boundary()) {
         switch (g_fault) {
         case COLD_MEDIA_FAKE_TIMEOUT:
-        case COLD_MEDIA_FAKE_RESET:
+        case COLD_MEDIA_FAKE_RESET_TIMEOUT:
             fault_effect();
             return COLD_MEDIA_TIMEOUT;
         case COLD_MEDIA_FAKE_COMMAND_CRC:
@@ -359,7 +359,7 @@ static uint64_t deployment_fault_matrix(void)
         COLD_MEDIA_FAKE_BARRIER_FAILURE,
         COLD_MEDIA_FAKE_REMOVAL,
         COLD_MEDIA_FAKE_BIT_FLIP,
-        COLD_MEDIA_FAKE_RESET
+        COLD_MEDIA_FAKE_RESET_TIMEOUT
     };
     /* These hit object magic/payload digest/header digest/commit and the
      * selecting-superblock header/checksum regions as the boundary loop
@@ -539,7 +539,7 @@ uint64_t cold_media_fake_selftest(void)
         COLD_MEDIA_FAKE_BARRIER_FAILURE,
         COLD_MEDIA_FAKE_REMOVAL,
         COLD_MEDIA_FAKE_BIT_FLIP,
-        COLD_MEDIA_FAKE_RESET
+        COLD_MEDIA_FAKE_RESET_TIMEOUT
     };
     for (unsigned f = 0; f < sizeof matrix / sizeof matrix[0]; f++) {
         for (uint64_t edge = 1; edge <= transfer_boundaries; edge++) {

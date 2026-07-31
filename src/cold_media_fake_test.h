@@ -16,7 +16,9 @@ typedef enum {
     COLD_MEDIA_FAKE_BARRIER_FAILURE,
     COLD_MEDIA_FAKE_REMOVAL,
     COLD_MEDIA_FAKE_BIT_FLIP,
-    COLD_MEDIA_FAKE_RESET
+    /* A reset reported as a timeout; this fake does not model controller
+     * state loss or recovery. */
+    COLD_MEDIA_FAKE_RESET_TIMEOUT
 } cold_media_fake_fault_t;
 
 void cold_media_fake_fault_set(cold_media_fake_fault_t fault,

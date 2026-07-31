@@ -646,10 +646,11 @@ static int append_obj_unselected(const cold_super_t *old, uint32_t kind,
     return 0;
 }
 
-/* Read the whole selected chain from physical media into the RAM mirror, then
- * validate it through the same strict super/object validators used at boot.
- * The deployment is bounded by COLD_SIZE, and this deliberately happens only
- * on activation, never on the ordinary application transaction path. */
+/* Read the whole selected chain from active physical media into the RAM
+ * mirror, then validate it through the same strict super/object validators
+ * used at boot. The deployment is bounded by COLD_SIZE, and this deliberately
+ * happens only on activation, never on the ordinary application transaction
+ * path. Inactive RAM/semihost media has no physical readback witness. */
 static cold_result_t deployment_media_read_verify(const cold_super_t *expected,
                                                   uint64_t selected_slot)
 {
@@ -657,6 +658,7 @@ static cold_result_t deployment_media_read_verify(const cold_super_t *expected,
         || expected->data_head > COLD_SIZE)
         return COLD_RESULT_OFFSET;
     if (!cold_media_active())
+        /* RAM/semihost uses the same logical validators, but is volatile. */
         return COLD_RESULT_VALID;
     uint64_t deadline = media_deadline();
     if (cold_media_read(

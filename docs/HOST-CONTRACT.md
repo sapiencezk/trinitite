@@ -410,11 +410,14 @@ volatile stage at `PILL_SCRATCH_BASE` until `SEAL`; activation stores the full
 candidate as a cold blob and records its full digest plus identity in the M7
 supervisor snapshot. It publishes RAM after confirmed cold selection; the
 explicit unknown-durability exception publishes only the prepared safe/IDLE
-candidate. Before `COLD_DEPLOY_COMMITTED`, the target reads the full selected
-object chain and selecting superblock back from physical media, validates every
-object/digest and the superblock, and compares the selected superblock with the
-planned bytes; the RAM window is not the durability witness. The 8-byte-aligned
-append can share a retained physical sector, so any physical deployment write,
+candidate. With active fake or `rpi4-sd` media, before physically verified
+`COLD_DEPLOY_COMMITTED`, the target reads the full selected object chain and
+selecting superblock back from physical media, validates every object/digest
+and the superblock, and compares the selected superblock with the planned
+bytes; the RAM window is not the durability witness. Default RAM and
+semihost/QEMU media are inactive, so their `COMMITTED` is volatile logical
+acceptance rather than physical-media proof. The 8-byte-aligned append can
+share a retained physical sector, so any active-media deployment write,
 barrier, or readback error is `TRI_DEPLOY_DURABILITY_UNKNOWN`: the
 assignment-only candidate is published safe/IDLE, but START, checkpoint, and
 new deployment are rejected until reboot/remount. Remount may find the old
