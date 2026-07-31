@@ -339,9 +339,11 @@ static int load_expected(uint64_t expected)
 }
 
 /* M7 TRI_DEPLOY has two append-only objects and a final selecting
- * superblock.  Pre-selection failures must retain the old snapshot; an
- * attempted final superblock or barrier is deliberately reported as an
- * old-or-new durability ambiguity, never as an ordinary failed activation. */
+ * superblock.  Anything that touches physical media and does not finish the
+ * selected-chain readback is deliberately reported as durability-unknown and
+ * fenced.  Since 8-byte logical alignment can share a physical RMW sector
+ * with retained objects, remount may find the old pair, the new pair, or no
+ * valid pair; it is never reported as an ordinary failed activation. */
 static uint64_t deployment_fault_matrix(void)
 {
     uint64_t failures = 0;

@@ -80,7 +80,9 @@ uint64_t m7_last_status(void);
 uint64_t m7_last_restart(void);
 uint64_t m7_persist_cells(void); /* trusted-lab bounded-memory witness */
 uint64_t m7_atom_bytes(void); /* trusted-lab bounded-memory witness */
-uint64_t m7_durability_unknown(void); /* TRI_DEPLOY ambiguous-commit witness */
+/* TRI_DEPLOY physical-media uncertainty witness.  It fences the resource;
+ * a later remount may find the old pair, the new pair, or no valid pair. */
+uint64_t m7_durability_unknown(void);
 noun     m7_object(uint64_t kind, uint64_t object_id);
 noun     m7_last_result_noun(void);
 
