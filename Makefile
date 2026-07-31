@@ -57,8 +57,19 @@ $(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake)
 endif
 
 OBJS    = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_ingress.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
+CONFIG_STAMP = .build-config-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)
 
 all: $(TARGET).img
+
+# Object names are shared across the fixed backend/evidence configurations.
+# Retain exactly one configuration stamp so changing any selector invalidates
+# every common object, including sources whose behavior changes only via a
+# preprocessor definition.
+$(CONFIG_STAMP):
+	rm -f .build-config-* *.o *.elf *.img
+	touch $@
+
+$(OBJS): $(CONFIG_STAMP)
 
 %.o: %.s
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -162,7 +173,7 @@ test-digital-in-production-source:
 	python3 tests/digital_in_bcm_source.py
 
 clean:
-	rm -f *.o *.elf *.img
+	rm -f *.o *.elf *.img .build-config-*
 FORCE:
 .PHONY: all run run-pill run-kernel debug deploy test test-media-fake \
 	test-media-rpi4-build test-digital-out-fake test-digital-in-fake \

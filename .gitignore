@@ -2,6 +2,7 @@
 *.xcf
 *.elf
 *.img
+.build-config-*
 .DS_Store
 *.pill
 *.bin
