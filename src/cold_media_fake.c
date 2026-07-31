@@ -365,8 +365,8 @@ static uint64_t deployment_fault_matrix(void)
      * selecting-superblock header/checksum regions as the boundary loop
      * reaches their sectors.  256 retains the former middle-of-sector probe. */
     static const uint64_t corruption_bytes[] = { 0, 40, 64, 72, 104, 256 };
-    int fence_seen[sizeof deployment_faults / sizeof deployment_faults[0]] = {0};
-    int corruption_fenced[sizeof corruption_bytes / sizeof corruption_bytes[0]] = {0};
+    int allowed_seen[sizeof deployment_faults / sizeof deployment_faults[0]] = {0};
+    int bit_flip_allowed[sizeof corruption_bytes / sizeof corruption_bytes[0]] = {0};
     int saw_old_pair = 0;
     int saw_new_pair = 0;
     int saw_no_valid_pair = 0;
@@ -413,21 +413,29 @@ static uint64_t deployment_fault_matrix(void)
                         saw_new_pair = 1;
                     if (remount != COLD_RESULT_VALID)
                         saw_no_valid_pair = 1;
-                    if (result == COLD_DEPLOY_DURABILITY_UNKNOWN) {
-                        fence_seen[f] = 1;
-                        if (deployment_faults[f] == COLD_MEDIA_FAKE_BIT_FLIP)
-                            corruption_fenced[b] = 1;
+                    /* Every injected non-bit-flip boundary is a physical
+                     * deployment uncertainty.  It must never be reduced to
+                     * an ordinary rejection or a guessed committed result.
+                     * A bit flip is the sole exception: an exact verified
+                     * new pair may still be reported committed. */
+                    if (deployment_faults[f] == COLD_MEDIA_FAKE_BIT_FLIP) {
+                        if (result == COLD_DEPLOY_DURABILITY_UNKNOWN
+                            || (result == COLD_DEPLOY_COMMITTED && new_pair)) {
+                            allowed_seen[f] = 1;
+                            bit_flip_allowed[b] = 1;
+                        } else {
+                            failures |= 1ULL << 4;
+                        }
+                    } else if (result == COLD_DEPLOY_DURABILITY_UNKNOWN) {
+                        allowed_seen[f] = 1;
+                    } else {
+                        failures |= 1ULL << 4;
                     }
                     /* An aligned append can share a sector with retained
                      * data. A failed deployment may therefore remount old,
                      * new, or no valid pair. The sole durable success claim
                      * is stronger: COMMITTED must remount the exact new pair. */
-                    if (!injected
-                        || (result == COLD_DEPLOY_COMMITTED && !new_pair)
-                        || (result != COLD_DEPLOY_REJECTED
-                            && result != COLD_DEPLOY_COMMITTED
-                            && result != COLD_DEPLOY_DURABILITY_UNKNOWN)
-                        || !sentinels_ok())
+                    if (!injected || !sentinels_ok())
                         failures |= 1ULL << 4;
                 }
             }
@@ -435,11 +443,11 @@ static uint64_t deployment_fault_matrix(void)
     }
     for (unsigned f = 0;
          f < sizeof deployment_faults / sizeof deployment_faults[0]; f++)
-        if (!fence_seen[f])
+        if (!allowed_seen[f])
             failures |= 1ULL << (5 + f);
     for (unsigned b = 0;
          b < sizeof corruption_bytes / sizeof corruption_bytes[0]; b++)
-        if (!corruption_fenced[b])
+        if (!bit_flip_allowed[b])
             failures |= 1ULL << (14 + b);
     if (!saw_old_pair || !saw_new_pair || !saw_no_valid_pair)
         failures |= 1ULL << 20;

@@ -1,6 +1,7 @@
 # Trinitite host contract (IEC consumers)
 
-**Status:** as built through I2 Hybrid v1 Milestone 6
+**Status:** as built through canonical I2 Hybrid v1 Milestone 7 R&D baseline;
+M6 remains a retained historical/recovery target
 **Audience:** IEC 61499 Nock kernels / pills on this substrate  
 **Normative product freeze:** `1499kernel/docs/I1.md` (do not reopen without user)  
 **Epic log:** `1499kernel/docs/HOST-INDUSTRIAL.md`
