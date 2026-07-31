@@ -54,6 +54,7 @@ static const char *const g_counter_name[RT_COUNT_COUNT] = {
     "ingress_timeout",
     "expected_pressure_rejects",
     "unexpected_delivery_loss",
+    "stale_completions",
     "restarts",
     "run_ticks",
     "pressure_percent",
@@ -62,6 +63,9 @@ static const char *const g_counter_name[RT_COUNT_COUNT] = {
     "novel_bytes_delta",
     "novel_index_delta",
     "novel_exhaustion_at",
+    "timer_active_hwm",
+    "service_active_hwm",
+    "copy_map_entries_hwm",
 };
 
 static const char *const g_phase_name[RT_PHASE_COUNT] = {
@@ -161,6 +165,7 @@ void runtime_stats_reset(void)
     g_stats.counter[RT_COUNT_ATOM_BYTES_HWM] = atoms;
     g_stats.counter[RT_COUNT_ATOM_INDEX_OCCUPANCY] = index;
     g_stats.counter[RT_COUNT_ATOM_INDEX_START] = index;
+    noun_copy_map_hwm_reset();
     if (g_boot_load_pending) {
         histogram_add(
             &g_stats.phase[RT_PHASE_BOOT_LOAD], g_boot_load_ticks);
@@ -224,6 +229,7 @@ void runtime_stats_note_memory(void)
     runtime_stats_set(
         RT_COUNT_ATOM_INDEX_OCCUPANCY, atom_store_index_occupancy());
     runtime_stats_max(RT_COUNT_ATOM_PROBE_HWM, atom_store_probe_hwm());
+    runtime_stats_max(RT_COUNT_COPY_MAP_ENTRIES_HWM, noun_copy_map_hwm());
 }
 
 void runtime_stats_note_ingress_reject(unsigned reason)

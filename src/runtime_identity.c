@@ -29,6 +29,9 @@ static const uint8_t g_digital_out_request_grant_fingerprint[8] = {
 static const uint8_t g_m7_digital_out_request_grant_fingerprint[8] = {
     0x77, 0x3c, 0x4c, 0x79, 0xd7, 0xbb, 0x23, 0xd0
 };
+static const uint8_t g_closed_process_io_request_grant_fingerprint[8] = {
+    0x79, 0x90, 0xcd, 0xd1, 0x04, 0x7d, 0xaa, 0xc3
+};
 
 static runtime_identity_t g_live_identity;
 static int g_live_identity_valid;
@@ -430,12 +433,16 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
         && identity.deployment_schema[1] == 2;
     uint8_t capability_profile = header[25];
     if (digital_identity || m7_digital_identity) {
-        const uint8_t *fingerprint = digital_identity
-            ? g_digital_out_request_grant_fingerprint
-            : g_m7_digital_out_request_grant_fingerprint;
-        uint8_t expected_profile = digital_identity
-            ? RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
-            : RUNTIME_CAPABILITY_PROFILE_M7_DIGITAL_OUT;
+        int closed_io = m7_digital_identity
+            && capability_profile == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO;
+        const uint8_t *fingerprint = closed_io
+            ? g_closed_process_io_request_grant_fingerprint
+            : digital_identity ? g_digital_out_request_grant_fingerprint
+                               : g_m7_digital_out_request_grant_fingerprint;
+        uint8_t expected_profile = closed_io
+            ? RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO
+            : digital_identity ? RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
+                               : RUNTIME_CAPABILITY_PROFILE_M7_DIGITAL_OUT;
         if (capability_profile != expected_profile
             || !bytes_eq(header + 248, fingerprint, 8))
             return PILL_I2_IDENTITY;

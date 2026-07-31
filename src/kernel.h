@@ -180,7 +180,7 @@ int      kernel_m7_checkpoint_capture_roots(noun *gate, noun *queue,
                                              noun *tarms);
 int      kernel_m7_restore_checkpoint(const runtime_identity_t *identity,
                                       uint8_t capability_profile,
-                                      noun gate, noun queue, noun tarms,
+                                      uint64_t mode, noun gate, noun queue, noun tarms,
                                       noun manager_result);
 /* Strict PILL2 bounded/identity load, with isolated legacy I1 fallback. */
 noun     kernel_pill_load(void);

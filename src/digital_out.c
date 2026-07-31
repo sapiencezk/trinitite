@@ -18,6 +18,10 @@ static int g_configured;
 static int g_inhibited = 1;
 static int g_reconcile_armed;
 static int g_fatal;
+static struct {
+    uint64_t generation, incarnation, owner, sequence;
+    int armed;
+} g_m8_input_freshness;
 
 static void audit(uint32_t operation, uint32_t value)
 {
@@ -53,6 +57,7 @@ static int configure_and_clear(int inhibit)
     g_reconcile_armed = 0;
     g_fatal = 0;
     g_shadow = 0;
+    g_m8_input_freshness.armed = 0;
     return 1;
 }
 
@@ -80,13 +85,55 @@ int digital_out_force_safe(void)
     g_shadow = 0;
     g_inhibited = 1;
     g_reconcile_armed = 0;
-    return ok && !g_fatal;
+    g_m8_input_freshness.armed = 0;
+    /* A successful clear proves the physical bank low even when an earlier
+     * write failure remains latched.  Only lifecycle re-preparation clears
+     * that fatal latch and permits a later command. */
+    return ok;
 }
 
-void digital_out_note_external_sample(void)
+void digital_out_note_legacy_external_sample(void)
 {
     if (g_inhibited && !g_fatal)
         g_reconcile_armed = 1;
+}
+
+void digital_out_arm_closed_sample(uint64_t generation, uint64_t incarnation,
+                                   uint64_t owner, uint64_t sequence)
+{
+    if (generation && incarnation && owner && sequence) {
+        g_m8_input_freshness.generation = generation;
+        g_m8_input_freshness.incarnation = incarnation;
+        g_m8_input_freshness.owner = owner;
+        g_m8_input_freshness.sequence = sequence;
+        g_m8_input_freshness.armed = 1;
+        if (g_inhibited && !g_fatal) g_reconcile_armed = 1;
+    }
+}
+
+void digital_out_clear_closed_sample(void)
+{
+    g_m8_input_freshness.armed = 0;
+}
+
+int digital_out_apply_direct(uint64_t bank, uint64_t generation,
+                             uint64_t incarnation, uint64_t output_owner,
+                             uint64_t output_sequence)
+{
+    if (bank > 7 || !g_m8_input_freshness.armed
+        || g_m8_input_freshness.generation != generation
+        || g_m8_input_freshness.incarnation != incarnation
+        || g_m8_input_freshness.owner != 4u
+        || g_m8_input_freshness.sequence == 0
+        || output_owner != 7u || output_sequence == 0)
+        return 0;
+    g_m8_input_freshness.armed = 0;
+    return digital_out_apply(bank & 1u, (bank >> 1) & 1u, (bank >> 2) & 1u);
+}
+
+int digital_out_closed_sample_armed(void)
+{
+    return g_m8_input_freshness.armed;
 }
 
 int digital_out_apply(uint64_t p1, uint64_t p2, uint64_t alarm)
@@ -204,7 +251,7 @@ uint64_t digital_out_fake_selftest(void)
     digital_out_force_safe();
     if (digital_out_gpio_level() != (1u << DIGITAL_OUT_GPIO_P1))
         failures++;
-    digital_out_note_external_sample();
+    digital_out_note_legacy_external_sample();
     before = digital_out_backend_fake_operations();
     if (digital_out_apply(0, 1, 0)
         || digital_out_backend_fake_operations() != before + 1

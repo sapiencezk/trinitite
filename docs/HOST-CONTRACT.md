@@ -431,3 +431,35 @@ assignment-only. It preflights the complete jammed supervisor snapshot against
 calling it. See the
 parent `docs/I2-M7-CONTRACT.md` and `docs/I2-M7-VERDICT.md` for the exact
 profile and nonclaims.
+
+## M8 closed process-I/O candidate
+
+M7 remains canonical. PILL selector 3 (`closed-process-io`) retains ABI family
+`(1,2)` and authorizes exactly capability 3 fixed input plus capability 2
+fixed output. Input backend selection is independent of output. Production
+input configures GPIO 5/6/13/19/26 and performs exactly one GPLEV0 read per
+accepted request; the fake setter accepts only a logical atom 0..31. Output
+accepts a direct atom 0..7 and retains clear-before-set/safe-low.
+
+Input request is `[token 3 BANK_READ 0 0]`. Output request is
+`[token 2 BANK_WRITE deadline bank]`. Both require exact full
+`[generation incarnation owner sequence]` equality with the authoritative
+pending gate noun at preflight, queued-completion dequeue, and immediately
+before activation. Timer fire dequeue has the same exact pending-token check.
+The target prepares completion
+resources before publication. Under the no-allocation activation guard it
+mutates only direct completion status/data, performs the single fixed read or
+bank activation, and then queues the prebuilt completion. Successful input
+arms one bounded mirrored freshness descriptor; the next output consumes it.
+Lifecycle, deploy, restore, crash, read failure, output failure, and epoch
+change clear it. UART/external ingress never arms selector-3 output.
+
+Selector-3 checkpoint restore validates the saved gate before rebuilding it:
+input/output pending state and freshness must be empty, and a RUNNING saved
+E_DELAY token must exactly match the sole owner-3 timer descriptor and DT.
+Only then is a fresh current-incarnation full-DT timer constructed.
+
+QEMU with fake input and BCM output proves the fixed logical seam and the
+emulated GPSET/GPCLR/GPLEV latch observation only. It is not external-input,
+electrical, timing, physical-media, safety, certification, interoperability,
+or complete-conformance evidence.

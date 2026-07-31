@@ -105,6 +105,9 @@ uint64_t atom_store_capacity_bytes(void);
 uint64_t atom_store_index_occupancy(void);
 uint64_t atom_store_index_capacity(void);
 uint64_t atom_store_probe_hwm(void);
+uint64_t noun_copy_map_hwm(void);
+uint64_t noun_copy_map_capacity(void);
+void noun_copy_map_hwm_reset(void);
 
 noun  alloc_cell(noun head, noun tail);
 int   alloc_cell_checked(noun head, noun tail, noun *out);

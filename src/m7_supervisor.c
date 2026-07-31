@@ -6,6 +6,7 @@
 #include "blake3.h"
 #include "cold.h"
 #include "digital_out.h"
+#include "digital_in.h"
 #include "kernel.h"
 #include "jam.h"
 #include "memory.h"
@@ -841,7 +842,18 @@ int m7_scheduler_boundary(void)
             if (command == 3) {
                 g_m7.mode = M7_MODE_STOPPING;
             }
-            int delivered = m7_deliver_restart(g_m7.last_restart);
+            int prepared = 1;
+            if (command == 2
+                && runtime_identity_capability_profile()
+                    == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO) {
+                /* Closed M8 lifecycle restart is the only recovery boundary
+                 * for a latched process-output failure.  Both fixed services
+                 * are prepared while the resource is fenced and safe. */
+                prepared = digital_out_prepare_clean_pill()
+                    && digital_in_prepare();
+            }
+            int delivered = prepared
+                && m7_deliver_restart(g_m7.last_restart);
             if (!delivered) {
                 g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
                 g_m7.qo = 0;
@@ -1154,6 +1166,15 @@ int m7_deploy_activate(void)
         digital_out_force_safe();
         return M7_DEPLOY_STORAGE;
     }
+    if (capability == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO
+        && !digital_in_prepare()) {
+        m7_candidate_discard();
+        noun_tx_abort();
+        heap_persist_abort_tx();
+        g_m7.safe = 0;
+        digital_out_force_safe();
+        return M7_DEPLOY_STORAGE;
+    }
     noun snapshot;
     if (!m7_snapshot_build(
             pill_hash, g_m7.stage_total, pill_digest_noun, identity_noun,
@@ -1358,7 +1379,8 @@ int m7_boot_snapshot(void)
         return -1;
     }
     if (kernel_m7_restore_checkpoint(
-            &snapshot_identity, capability, live_gate, queue, timer,
+            &snapshot_identity, capability, direct_val(mode),
+            gate, queue, timer,
             NOUN_ZERO) != 0) {
         if (!m7_was_ready)
             m7_restore_discard();

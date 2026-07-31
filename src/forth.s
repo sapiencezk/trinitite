@@ -3070,6 +3070,25 @@ defcode "M6DO", 4, digital_out_fake_test_word, 0
     NEXT
 #endif
 
+#ifdef DIGITAL_IN_FAKE
+defcode "M8DIN!", 6, digital_in_fake_set_word, 0
+    ldr     x0, [DSP]
+    bl      digital_in_test_set_logical_bank
+    sxtw    x0, w0
+    str     x0, [DSP]
+    NEXT
+
+defcode "M8DI", 4, digital_in_fake_test_word, 0
+    bl      digital_in_fake_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
+defcode "M8DIC@", 6, digital_in_count_word, 0
+    bl      digital_in_read_count
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // CKM2 ( -- failures ) requires M2PREP; transactional restore matrix.
 defcode "CKM2", 4, ckpt_m2_test, 0
     bl      checkpoint_m2_selftest

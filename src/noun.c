@@ -202,6 +202,15 @@ static uint32_t g_copy_key[COPY_MAP_MAX];
 static noun     g_copy_val[COPY_MAP_MAX];
 static uint8_t  g_copy_used[COPY_MAP_MAX];
 static int64_t  g_copy_fail_after = -1;
+static uint64_t g_copy_entries;
+static uint64_t g_copy_entries_hwm;
+
+static void copy_entry_inserted(void)
+{
+    g_copy_entries++;
+    if (g_copy_entries > g_copy_entries_hwm)
+        g_copy_entries_hwm = g_copy_entries;
+}
 
 static noun noun_copy_rec(noun n)
 {
@@ -228,6 +237,7 @@ static noun noun_copy_rec(noun n)
             g_copy_key[i]  = op;
             g_copy_val[i]  = neu;
             g_copy_used[i] = 1;
+            copy_entry_inserted();
             return neu;
         }
         if (g_copy_key[i] == op)
@@ -242,6 +252,7 @@ noun noun_copy(noun n)
     /* 64KB clear is cheap vs O(n²) linear map; keeps stamps correct */
     for (uint32_t i = 0; i < COPY_MAP_MAX; i++)
         g_copy_used[i] = 0;
+    g_copy_entries = 0;
     return noun_copy_rec(n);
 }
 
@@ -283,6 +294,7 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
             g_copy_key[i] = op;
             g_copy_val[i] = neu;
             g_copy_used[i] = 1;
+            copy_entry_inserted();
             *out = neu;
             return 1;
         }
@@ -298,8 +310,13 @@ int noun_copy_checked(noun n, noun *out)
 {
     for (uint32_t i = 0; i < COPY_MAP_MAX; i++)
         g_copy_used[i] = 0;
+    g_copy_entries = 0;
     return noun_copy_checked_rec(n, out, 1);
 }
+
+uint64_t noun_copy_map_hwm(void) { return g_copy_entries_hwm; }
+uint64_t noun_copy_map_capacity(void) { return COPY_MAP_MAX; }
+void noun_copy_map_hwm_reset(void) { g_copy_entries_hwm = 0; }
 
 void noun_test_copy_fail_after(int64_t cells)
 {

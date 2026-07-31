@@ -17,6 +17,7 @@ LDFLAGS = -T $(SRCDIR)/linker.ld -nostdlib -no-pie
 
 COLD_MEDIA ?= ram
 DIGITAL_OUT_BACKEND ?= bcm2838
+DIGITAL_IN_BACKEND ?= bcm2838
 
 ifeq ($(COLD_MEDIA),ram)
 MEDIA_OBJS = cold_media.o cold_nv_none.o
@@ -32,6 +33,15 @@ else
 $(error unsupported COLD_MEDIA='$(COLD_MEDIA)' (ram, semihost, fake, rpi4-sd))
 endif
 
+ifeq ($(DIGITAL_IN_BACKEND),bcm2838)
+DIGITAL_IN_OBJS = digital_in.o digital_in_bcm2838.o
+else ifeq ($(DIGITAL_IN_BACKEND),fake)
+CFLAGS += -DDIGITAL_IN_FAKE=1
+DIGITAL_IN_OBJS = digital_in.o digital_in_fake.o
+else
+$(error unsupported DIGITAL_IN_BACKEND='$(DIGITAL_IN_BACKEND)' (bcm2838, fake))
+endif
+
 ifeq ($(DIGITAL_OUT_BACKEND),bcm2838)
 DIGITAL_OUT_OBJS = digital_out.o digital_out_bcm2838.o
 else ifeq ($(DIGITAL_OUT_BACKEND),fake)
@@ -41,7 +51,7 @@ else
 $(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake))
 endif
 
-OBJS    = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_ingress.o $(DIGITAL_OUT_OBJS) kernel.o m7_supervisor.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
+OBJS    = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_ingress.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
 
 all: $(TARGET).img
 
@@ -116,7 +126,9 @@ deploy: $(TARGET).img
 	cp $(TARGET).img $(TFTP_ROOT)/
 	@echo "Deployed. Reset the Pi."
 
-test: all
+test:
+	$(MAKE) clean
+	$(MAKE) all
 	./tests/run_tests.sh
 
 test-media-fake:
@@ -136,8 +148,17 @@ test-digital-out-fake:
 	$(MAKE) DIGITAL_OUT_BACKEND=fake all
 	python3 tests/digital_out_fake_qemu.py
 
+test-digital-in-fake:
+	$(MAKE) clean
+	$(MAKE) DIGITAL_IN_BACKEND=fake DIGITAL_OUT_BACKEND=bcm2838 all
+	python3 tests/digital_in_fake_qemu.py
+
+test-digital-in-production-source:
+	python3 tests/digital_in_bcm_source.py
+
 clean:
 	rm -f *.o *.elf *.img
 FORCE:
 .PHONY: all run run-pill run-kernel debug deploy test test-media-fake \
-	test-media-rpi4-build test-digital-out-fake clean FORCE
+	test-media-rpi4-build test-digital-out-fake test-digital-in-fake \
+	test-digital-in-production-source clean FORCE

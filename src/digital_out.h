@@ -17,12 +17,20 @@ int  digital_out_prepare_clean_pill(void);
 int  digital_out_restore_safe(void);
 /* Return non-zero only when the backend clear completed and the output bank
  * is therefore safe to claim.  The inhibit/shadow transition is performed
- * even on failure, but a failed clear remains latched unsafe. */
+ * even on failure.  A successful clear proves safe-low but does not clear a
+ * prior fatal write latch; lifecycle preparation owns that recovery. */
 int digital_out_force_safe(void);
-void digital_out_note_external_sample(void);
+void digital_out_note_legacy_external_sample(void);
+void digital_out_arm_closed_sample(uint64_t generation, uint64_t incarnation,
+                                   uint64_t owner, uint64_t sequence);
+void digital_out_clear_closed_sample(void);
 
 /* Post-commit activation of one complete logical [P1 P2 ALARM] bank. */
 int digital_out_apply(uint64_t p1, uint64_t p2, uint64_t alarm);
+int digital_out_apply_direct(uint64_t bank, uint64_t generation,
+                             uint64_t incarnation, uint64_t output_owner,
+                             uint64_t output_sequence);
+int digital_out_closed_sample_armed(void);
 
 /* Read-only bounded diagnostics. */
 uint64_t digital_out_shadow(void);
