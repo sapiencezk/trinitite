@@ -319,6 +319,64 @@ static int load_expected(uint64_t expected)
     return ok;
 }
 
+/* M7 TRI_DEPLOY has two append-only objects and a final selecting
+ * superblock.  Pre-selection failures must retain the old snapshot; an
+ * attempted final superblock or barrier is deliberately reported as an
+ * old-or-new durability ambiguity, never as an ordinary failed activation. */
+static uint64_t deployment_fault_matrix(void)
+{
+    uint64_t failures = 0;
+    uint64_t hash = 0;
+    if (!prepare_old_generation())
+        return 1;
+    uint64_t old_generation = cold_selected_generation();
+    arm_fault(COLD_MEDIA_FAKE_NONE, 1);
+    if (cold_store_deployment(direct(43), direct(44), &hash)
+            != COLD_DEPLOY_COMMITTED
+        || hash == 0 || g_transfer == 0)
+        return 2;
+    uint64_t transfer_boundaries = g_transfer;
+    static const cold_media_fake_fault_t final_selection_faults[] = {
+        /* Submitted/partial final write and final barrier are the two
+         * ambiguous-selection cases that previously split RAM from media. */
+        COLD_MEDIA_FAKE_PARTIAL_UNKNOWN_WRITE,
+        COLD_MEDIA_FAKE_BARRIER_FAILURE
+    };
+    for (unsigned f = 0;
+         f < sizeof final_selection_faults / sizeof final_selection_faults[0];
+         f++) {
+        for (uint64_t edge = 1; edge <= transfer_boundaries; edge++) {
+            if (!prepare_old_generation()) {
+                failures |= 1ULL << 2;
+                continue;
+            }
+            old_generation = cold_selected_generation();
+            arm_fault(final_selection_faults[f], edge);
+            cold_deploy_result_t result = cold_store_deployment(
+                direct(43), direct(44), &hash);
+            int injected = g_fault_effect_fired;
+            if (!remount_and_select()) {
+                failures |= 1ULL << 3;
+                continue;
+            }
+            uint64_t selected = cold_selected_generation();
+            int old_pair = selected == old_generation && load_expected(42);
+            int new_pair = selected == old_generation + 2 && load_expected(44);
+            if (!injected
+                || (result == COLD_DEPLOY_REJECTED && !old_pair)
+                || (result == COLD_DEPLOY_COMMITTED && !new_pair)
+                || (result == COLD_DEPLOY_DURABILITY_UNKNOWN
+                    && !old_pair && !new_pair)
+                || (result != COLD_DEPLOY_REJECTED
+                    && result != COLD_DEPLOY_COMMITTED
+                    && result != COLD_DEPLOY_DURABILITY_UNKNOWN)
+                || !sentinels_ok())
+                failures |= 1ULL << 4;
+        }
+    }
+    return failures;
+}
+
 static int digest_equal(const uint8_t a[32], const uint8_t b[32])
 {
     uint8_t diff = 0;
@@ -387,6 +445,9 @@ uint64_t cold_media_fake_smoketest(void)
 uint64_t cold_media_fake_selftest(void)
 {
     uint64_t failures = cold_media_fake_smoketest();
+    uint64_t deployment_failures = deployment_fault_matrix();
+    if (deployment_failures)
+        failures |= deployment_failures << 23;
     /*
      * Exercise the real cold.c append path through this adapter at every
      * physical read/write/barrier boundary, then reconstruct the RAM window

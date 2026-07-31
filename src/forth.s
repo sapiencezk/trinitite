@@ -2911,6 +2911,28 @@ defcode "M7MEM@", 6, m7_memory_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "M7ATOM@", 7, m7_atom_memory_word, 0
+    bl      m7_atom_bytes
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7DUR?", 6, m7_durability_word, 0
+    bl      m7_durability_unknown
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M7DFAULT ( after-bytes -- ) injects only the final TRI_DEPLOY superblock
+// write. It is a trusted-lab durability witness, not an M7 service form.
+defcode "M7DFAULT", 8, m7_deploy_fault_word, 0
+    ldr     x1, [DSP], #8
+    mov     x0, #4              // COLD_WRITE_SUPERBLOCK
+    bl      cold_fault_set
+    NEXT
+
+defcode "M7DCLR", 6, m7_deploy_fault_clear_word, 0
+    bl      cold_fault_clear
+    NEXT
+
 defcode "M7LROOT@", 8, m7_lifecycle_root_word, 0
     bl      kernel_m7_lifecycle_root_commits
     str     x0, [DSP, #-8]!
@@ -2922,7 +2944,8 @@ defcode "M7LDEST@", 8, m7_lifecycle_destination_word, 0
     NEXT
 
 // M7QSTORM ( count -- status ) runs bounded serial QUERY/CNF pairs and
-// returns 0 only when PERSIST cells stayed exactly constant.
+// returns 0 only when PERSIST cells and atom-store bytes stayed exactly
+// constant while cycling every published static QUERY result shape.
 defcode "M7QSTORM", 8, m7_query_storm_word, 0
     ldr     x0, [DSP], #8
     bl      m7_test_query_storm

@@ -2009,7 +2009,14 @@ static int kernel_m7_transaction_terminal(int committed)
         } else {
             g_m7_lifecycle_destination_commits++;
         }
-        if (g_m7_lifecycle_transactions > M7_LIFECYCLE_MAX_TRANSACTIONS) {
+        /* Refuse before selecting a fourth transaction.  A valid static
+         * graph can derive one receiver that fans out twice: its root plus
+         * first two receivers have already committed at this point, while a
+         * remaining queue entry must be retired rather than executed. */
+        if (g_m7_lifecycle_transactions >= M7_LIFECYCLE_MAX_TRANSACTIONS
+            && g_evq_n != 0) {
+            evq_clear();
+            g_m7_lifecycle_active = 0;
             g_m7_lifecycle_plan = 0;
             g_m7_lifecycle_draining = 0;
             return -1;

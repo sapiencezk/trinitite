@@ -39,7 +39,11 @@ enum {
     M7_DEPLOY_CANDIDATE = -24,
     M7_DEPLOY_STATE = -25,
     M7_DEPLOY_STORAGE = -26,
-    M7_DEPLOY_MEDIA = -27
+    M7_DEPLOY_MEDIA = -27,
+    /* Final selection or its barrier returned an error after the new
+     * superblock might have reached media.  This is intentionally not an IEC
+     * Table-7 status and not an ordinary activation failure. */
+    M7_DEPLOY_DURABILITY_UNKNOWN = -28
 };
 
 typedef struct {
@@ -77,6 +81,10 @@ typedef struct {
     uint64_t active_pill_len;
     uint8_t active_pill_digest[32];
     int active_pill_valid;
+    /* An attempted final cold selection had an unknown durability outcome.
+     * Keep the prepared candidate safe/IDLE in RAM, but reject START and all
+     * further persistent mutations until a reboot remounts selected media. */
+    int durability_unknown;
     /* MANAGER OBJECT/RESULT are volatile bounded byte envelopes.  Keeping
      * either decoded noun in the live semispace made serial QUERY requests
      * consume seven cells each; the supervisor root retains no query tree. */
@@ -492,6 +500,8 @@ uint64_t m7_qo(void) { return g_m7.qo; }
 uint64_t m7_last_status(void) { return g_m7.last_status; }
 uint64_t m7_last_restart(void) { return g_m7.last_restart; }
 uint64_t m7_persist_cells(void) { return heap_cells_used(HEAP_MODE_PERSIST); }
+uint64_t m7_atom_bytes(void) { return atom_store_bytes_used(); }
+uint64_t m7_durability_unknown(void) { return g_m7.durability_unknown != 0; }
 
 noun m7_last_result_noun(void)
 {
@@ -805,7 +815,14 @@ int m7_scheduler_boundary(void)
     g_m7.last_restart = noun_is_atom(reason) ? reason : NOUN_ZERO;
     g_m7.qo = g_m7.last_status == M7_STATUS_RDY;
     if (g_m7.last_status == M7_STATUS_RDY) {
-        if (command == 7) {
+        if (command == 2 && g_m7.durability_unknown) {
+            /* A caller that saw TRI_DEPLOY_DURABILITY_UNKNOWN must remount
+             * before ordinary operation.  Do not run a RAM-only candidate
+             * whose selected cold pair is deliberately unknown. */
+            g_m7.last_status = M7_STATUS_SYSTEM_TERMINATION;
+            g_m7.qo = 0;
+        }
+        else if (command == 7) {
             noun query = NOUN_ZERO;
             /* The jam atom used to serialize RESULT belongs to this scratch
              * transaction too. Abort it after copying bytes so serial QUERY
@@ -820,7 +837,7 @@ int m7_scheduler_boundary(void)
                 g_m7.qo = 0;
             }
         }
-        if (command == 2 || command == 3) {
+        else if (command == 2 || command == 3) {
             if (command == 3) {
                 g_m7.mode = M7_MODE_STOPPING;
             }
@@ -933,20 +950,33 @@ int m7_test_query_storm(uint64_t count)
      * reproducer. */
     if (count == 0 || count > 100000 || !g_m7.ready)
         return -1;
-    uint64_t before = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t cells_before = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t atoms_before = atom_store_bytes_used();
+    static const uint64_t result_kinds[] = {
+        M7_OBJECT_INVENTORY,
+        M7_OBJECT_IDENTITY,
+        M7_OBJECT_STATE,
+        M7_OBJECT_FB_INVENTORY,
+        M7_OBJECT_FB_STATUS
+    };
     for (uint64_t i = 0; i < count; i++) {
-        noun object = m7_object(M7_OBJECT_STATE, 1);
+        /* Cycle every published QUERY RESULT shape.  The observable
+         * request/CNF counters are checked by the target harness. */
+        noun object = m7_object(
+            result_kinds[i % (sizeof result_kinds / sizeof result_kinds[0])], 1);
         if (!noun_is_cell(object)
             || m7_manager_request(7, object) != M7_STATUS_RDY
             || m7_scheduler_boundary() != M7_STATUS_RDY)
             return -1;
     }
-    return heap_cells_used(HEAP_MODE_PERSIST) == before ? 0 : -1;
+    return heap_cells_used(HEAP_MODE_PERSIST) == cells_before
+        && atom_store_bytes_used() == atoms_before ? 0 : -1;
 }
 
 int m7_deploy_begin(uint64_t stage_id, uint64_t total, noun digest)
 {
     if (!g_m7.ready) return M7_STATUS_NOT_READY;
+    if (g_m7.durability_unknown) return M7_DEPLOY_DURABILITY_UNKNOWN;
     if (g_m7.stage_open) return M7_DEPLOY_BUSY;
     if (stage_id == 0 || total == 0 || total > M7_STAGE_BYTES
         || !noun_atom_read_fixed(digest, g_m7.stage_digest, 32))
@@ -1052,6 +1082,8 @@ static void m7_publish_deployment_candidate(void)
 
 int m7_deploy_activate(void)
 {
+    if (g_m7.durability_unknown)
+        return M7_DEPLOY_DURABILITY_UNKNOWN;
     if (!g_m7.stage_open || !g_m7.stage_sealed
         || g_m7.pending
         || (g_m7.mode != M7_MODE_IDLE && g_m7.mode != M7_MODE_STOPPED))
@@ -1133,7 +1165,9 @@ int m7_deploy_activate(void)
         return M7_DEPLOY_MEDIA;
     }
     uint64_t stored_pill_hash = 0;
-    if (cold_store_deployment(pill_atom, snapshot, &stored_pill_hash) != 0) {
+    cold_deploy_result_t cold_result = cold_store_deployment(
+        pill_atom, snapshot, &stored_pill_hash);
+    if (cold_result == COLD_DEPLOY_REJECTED) {
         m7_candidate_discard();
         noun_tx_abort();
         heap_persist_abort_tx();
@@ -1148,6 +1182,13 @@ int m7_deploy_activate(void)
     m7_publish_deployment_candidate();
     g_m7.stage_open = 0;
     g_m7.stage_sealed = 0;
+    if (cold_result == COLD_DEPLOY_DURABILITY_UNKNOWN) {
+        /* The assignment-only publication makes live RAM agree with the
+         * prepared candidate.  It remains inhibited/IDLE and cannot START
+         * until reboot has authoritatively selected and verified media. */
+        g_m7.durability_unknown = 1;
+        return M7_DEPLOY_DURABILITY_UNKNOWN;
+    }
     return 0;
 }
 
@@ -1201,7 +1242,7 @@ int m7_deploy_demo(void)
 
 int m7_checkpoint_save(void)
 {
-    if (!g_m7.ready || g_m7.pending || g_m7.stage_open
+    if (!g_m7.ready || g_m7.durability_unknown || g_m7.pending || g_m7.stage_open
         || g_m7.incarnation == 0)
         return -1;
     if (!g_m7.active_pill_valid && !m7_capture_active_pill())

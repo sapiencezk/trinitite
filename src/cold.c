@@ -126,12 +126,15 @@ static int cold_write_phase(cold_write_phase_t phase, uint64_t off,
             completed = 0;
         }
     }
-    if (writable)
-        cold_write_raw(off, src, writable);
     if (writable && cold_media_active()
         && cold_media_write(media_phase(phase), off, src, writable,
                             media_deadline()) != COLD_MEDIA_OK)
         return 0;
+    /* The RAM window is a mirror of successfully submitted media, never a
+     * speculative write-ahead cache.  A failed device operation must leave
+     * it unchanged so later in-process selection cannot diverge silently. */
+    if (writable)
+        cold_write_raw(off, src, writable);
     return completed;
 }
 
@@ -643,8 +646,9 @@ static int append_obj_unselected(const cold_super_t *old, uint32_t kind,
     return 0;
 }
 
-int cold_store_deployment(noun pill_blob, noun supervisor_snapshot,
-                          uint64_t *pill_hash_out)
+cold_deploy_result_t cold_store_deployment(noun pill_blob,
+                                           noun supervisor_snapshot,
+                                           uint64_t *pill_hash_out)
 {
     uint64_t pill_len, snapshot_len;
     const uint8_t *bytes;
@@ -658,36 +662,36 @@ int cold_store_deployment(noun pill_blob, noun supervisor_snapshot,
         || jam_size_checked(supervisor_snapshot, JAM_MAX_BYTES, &snapshot_len) != 0
         || select_super(&old, &old_slot) != COLD_RESULT_VALID
         || append_plan(&old, pill_len, &pill_off, &pill_head) != 0) {
-        return -1;
+        return COLD_DEPLOY_REJECTED;
     }
     cold_super_t after_pill = old;
     after_pill.generation = old.generation + 1;
     after_pill.data_head = pill_head;
     if (append_plan(&after_pill, snapshot_len, &snapshot_off, &snapshot_head)
         != 0)
-        return -1;
+        return COLD_DEPLOY_REJECTED;
 
     if (jam_bytes(pill_blob, &bytes, &pill_len) != 0) {
         g_last_result = COLD_RESULT_LENGTH;
-        return -1;
+        return COLD_DEPLOY_REJECTED;
     }
     blake3_hash(bytes, (size_t)pill_len, pill_digest);
     if (append_obj_unselected(&old, KIND_BLOB, bytes, pill_len,
                               old.generation + 1, pill_off, pill_head) != 0)
-        return -1;
+        return COLD_DEPLOY_REJECTED;
     /* The blob is read-verified before the snapshot and selection write. */
     if (object_validate(&after_pill, pill_off, KIND_BLOB,
                         old.generation + 1, 0) != COLD_RESULT_VALID)
-        return -1;
+        return COLD_DEPLOY_REJECTED;
 
     if (jam_bytes(supervisor_snapshot, &bytes, &snapshot_len) != 0) {
         g_last_result = COLD_RESULT_LENGTH;
-        return -1;
+        return COLD_DEPLOY_REJECTED;
     }
     if (append_obj_unselected(&after_pill, KIND_SNAP, bytes, snapshot_len,
                               old.generation + 2, snapshot_off,
                               snapshot_head) != 0)
-        return -1;
+        return COLD_DEPLOY_REJECTED;
 
     next = after_pill;
     next.generation = old.generation + 2;
@@ -703,14 +707,18 @@ int cold_store_deployment(noun pill_blob, noun supervisor_snapshot,
             && cold_media_barrier(COLD_MEDIA_PHASE_SUPERBLOCK_BARRIER,
                                   media_deadline()) != COLD_MEDIA_OK)) {
         g_last_result = COLD_RESULT_WRITE_FAULT;
-        return -1;
+        /* Do not guess whether a submitted/partially submitted superblock is
+         * selected.  The caller must publish a safe candidate or fail closed;
+         * treating this as the old pair is the RAM/media split this result
+         * exists to prevent. */
+        return COLD_DEPLOY_DURABILITY_UNKNOWN;
     }
     g_selected_generation = next.generation;
     g_selected_data_head = next.data_head;
     g_last_result = COLD_RESULT_VALID;
     if (pill_hash_out)
         *pill_hash_out = hash62_of(pill_digest);
-    return 0;
+    return COLD_DEPLOY_COMMITTED;
 }
 
 uint64_t cold_jam_hash(noun n)

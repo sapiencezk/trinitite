@@ -393,8 +393,10 @@ CREATE/DELETE.
 The M7 application FIFO is 256 entries; management is an independent
 one-entry priority mailbox. STOP's exact lifecycle slot is selected ahead of
 that FIFO, including at depth 256; its promotion retires the application
-backlog rather than copying it before the STOP cleanup. The slot drains the
-bounded E_RESTART receiver-cause chain (root plus at most two causes), so
+backlog rather than copying it before the STOP cleanup. The dedicated M7
+source explicitly supplies COLD/WARM/STOP receiver edges; the lowerer does not
+clone COLD. The slot drains the bounded E_RESTART receiver-cause chain (root
+plus at most two causes) and refuses before selecting transaction four, so
 `M7 LIFECYCLE COMMIT` is emitted only after both the lifecycle root and its
 actual destination causes commit; `M7 LIFECYCLE FAIL` is the audited
 non-delivery marker. `M7LROOT@`/`M7LDEST@` expose those counters only to the
@@ -405,12 +407,17 @@ host/deployment `(1,2)` and M7 digital-output profile 2 using the fixed
 `I2M7CAPv1` selector. PILL2, framed ingress, checkpoint, and cold-store
 container layouts remain unchanged. Candidate PILL bytes occupy the fixed
 volatile stage at `PILL_SCRATCH_BASE` until `SEAL`; activation stores the full
-candidate as a cold blob, records its full digest plus identity in the M7
-supervisor snapshot, and publishes RAM only after cold selection. The target
-prebuilds all fallible RAM roots before that selection and makes the final
-gate/supervisor/identity/output-inhibition publication assignment-only. It
-preflights the complete jammed supervisor snapshot against 65,536 bytes and
-preflights every cold-store jam against the 131,072-byte writer before
+candidate as a cold blob and records its full digest plus identity in the M7
+supervisor snapshot. It publishes RAM after confirmed cold selection; the
+explicit unknown-durability exception publishes only the prepared safe/IDLE
+candidate. The cold window is updated only after physical write success. A final
+superblock write or barrier error is `TRI_DEPLOY_DURABILITY_UNKNOWN`: the
+assignment-only candidate is published safe/IDLE, but START, checkpoint, and
+new deployment are rejected until reboot/remount selects and read-verifies
+media. The target prebuilds all fallible RAM roots before selection and makes
+the final gate/supervisor/identity/output-inhibition publication
+assignment-only. It preflights the complete jammed supervisor snapshot against
+65,536 bytes and every cold-store jam against the 131,072-byte writer before
 calling it. See the
 parent `docs/I2-M7-CONTRACT.md` and `docs/I2-M7-VERDICT.md` for the exact
 profile and nonclaims.

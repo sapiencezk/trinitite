@@ -34,6 +34,15 @@ typedef enum {
     COLD_WRITE_SUPERBLOCK = 4
 } cold_write_phase_t;
 
+/* TRI_DEPLOY has a distinct commit boundary.  Before the final superblock
+ * attempt the old selected pair is definitive; after an attempted final
+ * superblock write or its barrier, media may have selected either pair. */
+typedef enum {
+    COLD_DEPLOY_REJECTED = -1,
+    COLD_DEPLOY_COMMITTED = 0,
+    COLD_DEPLOY_DURABILITY_UNKNOWN = 1
+} cold_deploy_result_t;
+
 int cold_init(void);   /* auto-initialize only an exactly all-zero image */
 int cold_format(void); /* explicit destructive format */
 cold_result_t cold_probe(void);
@@ -44,10 +53,14 @@ uint64_t cold_data_head(void);
 
 uint64_t cold_store(noun n);
 /* M7 TRI_DEPLOY commit: append/verify one PILL blob and one supervisor
- * snapshot under one final superblock write. Any failure leaves the old
- * selected pair and append head authoritative. */
-int cold_store_deployment(noun pill_blob, noun supervisor_snapshot,
-                          uint64_t *pill_hash_out);
+ * snapshot under one final superblock write. COLD_DEPLOY_REJECTED means the
+ * final selection was never attempted and the old pair remains authoritative.
+ * COLD_DEPLOY_DURABILITY_UNKNOWN means the final write or barrier reported an
+ * error after selection became physically possible; a caller must not report
+ * this as an ordinary failed activation. */
+cold_deploy_result_t cold_store_deployment(noun pill_blob,
+                                           noun supervisor_snapshot,
+                                           uint64_t *pill_hash_out);
 /* Return the exact 62-bit identity of the canonical jam payload without
  * appending a blob.  M7 uses this to compare a restored blob in the same
  * hash domain used by cold_store(). */
