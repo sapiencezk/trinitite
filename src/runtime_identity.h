@@ -58,6 +58,11 @@ void runtime_identity_clear(void);
 /* Strict PILL2 load. Success returns a decoded, identity-validated gate.
  * Only NOT_I2/ABSENT may reach the isolated I1 compatibility probe. */
 pill_i2_status_t pill_i2_load(noun *gate_out);
+/* Candidate variant for atomic clean installation. It deliberately leaves
+ * the decoded noun transaction active and does not publish RuntimeIdentity. */
+pill_i2_status_t pill_i2_load_candidate(noun *gate_out,
+                                        runtime_identity_t *identity_out,
+                                        uint8_t *capability_out);
 /* Validate a PILL2 byte buffer without changing the live RuntimeIdentity or
  * PILL globals.  Successful cue leaves the noun transaction active; the
  * caller must commit only when the enclosing candidate is accepted, or

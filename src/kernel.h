@@ -162,9 +162,20 @@ int      kernel_boot(noun pill_gate);
 /* M7 publication after durable candidate selection. */
 int      kernel_m7_publish(noun gate, const runtime_identity_t *identity,
                            uint8_t capability_profile);
+int      kernel_m7_prepare_publish(noun gate,
+                                   const runtime_identity_t *identity,
+                                   noun *slam_out);
+void     kernel_m7_publish_prepared(noun gate,
+                                    const runtime_identity_t *identity,
+                                    uint8_t capability_profile, noun slam);
+uint64_t kernel_m7_lifecycle_root_commits(void);
+uint64_t kernel_m7_lifecycle_destination_commits(void);
 int      kernel_m7_replace_gate(noun gate);
 int      kernel_m7_gate_with_incarnation(noun source, uint64_t incarnation,
                                           noun *out);
+int      kernel_m7_gate_with_identity_incarnation(
+             noun source, const runtime_identity_t *identity,
+             uint64_t incarnation, noun *out);
 int      kernel_m7_checkpoint_capture_roots(noun *gate, noun *queue,
                                              noun *tarms);
 int      kernel_m7_restore_checkpoint(const runtime_identity_t *identity,

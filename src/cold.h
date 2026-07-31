@@ -43,6 +43,11 @@ uint64_t cold_selected_generation(void);
 uint64_t cold_data_head(void);
 
 uint64_t cold_store(noun n);
+/* M7 TRI_DEPLOY commit: append/verify one PILL blob and one supervisor
+ * snapshot under one final superblock write. Any failure leaves the old
+ * selected pair and append head authoritative. */
+int cold_store_deployment(noun pill_blob, noun supervisor_snapshot,
+                          uint64_t *pill_hash_out);
 /* Return the exact 62-bit identity of the canonical jam payload without
  * appending a blob.  M7 uses this to compare a restored blob in the same
  * hash domain used by cold_store(). */

@@ -2905,6 +2905,31 @@ defcode "M7RST@", 6, m7_restart_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// Trusted-lab M7 memory/lifecycle witnesses; neither is a MANAGER object.
+defcode "M7MEM@", 6, m7_memory_word, 0
+    bl      m7_persist_cells
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7LROOT@", 8, m7_lifecycle_root_word, 0
+    bl      kernel_m7_lifecycle_root_commits
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M7LDEST@", 8, m7_lifecycle_destination_word, 0
+    bl      kernel_m7_lifecycle_destination_commits
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M7QSTORM ( count -- status ) runs bounded serial QUERY/CNF pairs and
+// returns 0 only when PERSIST cells stayed exactly constant.
+defcode "M7QSTORM", 8, m7_query_storm_word, 0
+    ldr     x0, [DSP], #8
+    bl      m7_test_query_storm
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "M7FORCE", 7, m7_force_word, 0
     bl      m7_force_stop
     sxtw    x0, w0

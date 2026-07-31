@@ -479,6 +479,17 @@ pill_i2_status_t pill_i2_load(noun *gate_out)
     return PILL_I2_OK;
 }
 
+pill_i2_status_t pill_i2_load_candidate(noun *gate_out,
+                                        runtime_identity_t *identity_out,
+                                        uint8_t *capability_out)
+{
+    uint64_t available;
+    const volatile uint8_t *base = pill_base(&available);
+    return pill_i2_validate_buffer(
+        (const uint8_t *)(uintptr_t)base, available, HEAP_MODE_PERSIST,
+        gate_out, identity_out, capability_out);
+}
+
 const char *pill_i2_status_name(pill_i2_status_t status)
 {
     static const char *names[] = {

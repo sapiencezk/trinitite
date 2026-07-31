@@ -580,6 +580,139 @@ uint64_t cold_store(noun n)
     return hash62_of(h.payload_digest);
 }
 
+static int append_plan(const cold_super_t *old, uint64_t len,
+                       uint64_t *off_out, uint64_t *head_out)
+{
+    uint64_t head;
+    if (!old || !off_out || !head_out || len == 0 || len > JAM_SCRATCH_MAX
+        || old->generation > UINT64_MAX - 2
+        || old->data_head > UINT64_MAX - sizeof(cold_obj_hdr_t) - len
+        || !align8_checked(old->data_head + sizeof(cold_obj_hdr_t) + len,
+                           &head)
+        || head > COLD_SIZE) {
+        g_last_result = COLD_RESULT_LENGTH;
+        return -1;
+    }
+    *off_out = old->data_head;
+    *head_out = head;
+    return 0;
+}
+
+static int append_obj_unselected(const cold_super_t *old, uint32_t kind,
+                                 const uint8_t *payload, uint64_t len,
+                                 uint64_t generation, uint64_t off,
+                                 uint64_t head)
+{
+    if (!old || !payload || len == 0 || len > JAM_SCRATCH_MAX
+        || generation == 0 || off < COLD_DATA0 || head <= off) {
+        g_last_result = COLD_RESULT_LENGTH;
+        return -1;
+    }
+    cold_obj_hdr_t h = {0};
+    h.magic = COLD_OBJ_MAGIC;
+    h.version = COLD_VERSION;
+    h.header_len = sizeof h;
+    h.kind = kind;
+    h.generation = generation;
+    h.len = len;
+    blake3_hash(payload, (size_t)len, h.payload_digest);
+    object_header_digest(&h);
+    if (!cold_write_phase(COLD_WRITE_OBJECT_HEADER, off, &h, sizeof h)
+        || !cold_write_phase(COLD_WRITE_PAYLOAD, off + sizeof h, payload, len)) {
+        g_last_result = COLD_RESULT_WRITE_FAULT;
+        return -1;
+    }
+    uint64_t commit = COLD_COMMIT;
+    if (!cold_write_phase(COLD_WRITE_OBJECT_COMMIT,
+                          off + offsetof(cold_obj_hdr_t, commit),
+                          &commit, sizeof commit)
+        || (cold_media_active()
+            && cold_media_barrier(COLD_MEDIA_PHASE_DATA_BARRIER,
+                                  media_deadline()) != COLD_MEDIA_OK)) {
+        g_last_result = COLD_RESULT_WRITE_FAULT;
+        return -1;
+    }
+    cold_super_t provisional = *old;
+    provisional.generation = generation;
+    provisional.data_head = head;
+    if (object_validate(&provisional, off, kind, generation, 0)
+        != COLD_RESULT_VALID) {
+        g_last_result = COLD_RESULT_PAYLOAD_DIGEST;
+        return -1;
+    }
+    return 0;
+}
+
+int cold_store_deployment(noun pill_blob, noun supervisor_snapshot,
+                          uint64_t *pill_hash_out)
+{
+    uint64_t pill_len, snapshot_len;
+    const uint8_t *bytes;
+    cold_super_t old, next;
+    int old_slot;
+    uint64_t pill_off, pill_head, snapshot_off, snapshot_head;
+    uint8_t pill_digest[32];
+
+    /* Plan both object extents before writing a byte. */
+    if (jam_size_checked(pill_blob, JAM_MAX_BYTES, &pill_len) != 0
+        || jam_size_checked(supervisor_snapshot, JAM_MAX_BYTES, &snapshot_len) != 0
+        || select_super(&old, &old_slot) != COLD_RESULT_VALID
+        || append_plan(&old, pill_len, &pill_off, &pill_head) != 0) {
+        return -1;
+    }
+    cold_super_t after_pill = old;
+    after_pill.generation = old.generation + 1;
+    after_pill.data_head = pill_head;
+    if (append_plan(&after_pill, snapshot_len, &snapshot_off, &snapshot_head)
+        != 0)
+        return -1;
+
+    if (jam_bytes(pill_blob, &bytes, &pill_len) != 0) {
+        g_last_result = COLD_RESULT_LENGTH;
+        return -1;
+    }
+    blake3_hash(bytes, (size_t)pill_len, pill_digest);
+    if (append_obj_unselected(&old, KIND_BLOB, bytes, pill_len,
+                              old.generation + 1, pill_off, pill_head) != 0)
+        return -1;
+    /* The blob is read-verified before the snapshot and selection write. */
+    if (object_validate(&after_pill, pill_off, KIND_BLOB,
+                        old.generation + 1, 0) != COLD_RESULT_VALID)
+        return -1;
+
+    if (jam_bytes(supervisor_snapshot, &bytes, &snapshot_len) != 0) {
+        g_last_result = COLD_RESULT_LENGTH;
+        return -1;
+    }
+    if (append_obj_unselected(&after_pill, KIND_SNAP, bytes, snapshot_len,
+                              old.generation + 2, snapshot_off,
+                              snapshot_head) != 0)
+        return -1;
+
+    next = after_pill;
+    next.generation = old.generation + 2;
+    next.data_head = snapshot_head;
+    next.snap_generation = old.generation + 2;
+    next.snap_off = snapshot_off;
+    for (size_t i = 0; i < sizeof next.checksum; i++) next.checksum[i] = 0;
+    super_checksum(&next);
+    uint64_t next_slot = old_slot == 0 ? COLD_SLOT1 : COLD_SLOT0;
+    if (!cold_write_phase(COLD_WRITE_SUPERBLOCK, next_slot,
+                          &next, sizeof next)
+        || (cold_media_active()
+            && cold_media_barrier(COLD_MEDIA_PHASE_SUPERBLOCK_BARRIER,
+                                  media_deadline()) != COLD_MEDIA_OK)) {
+        g_last_result = COLD_RESULT_WRITE_FAULT;
+        return -1;
+    }
+    g_selected_generation = next.generation;
+    g_selected_data_head = next.data_head;
+    g_last_result = COLD_RESULT_VALID;
+    if (pill_hash_out)
+        *pill_hash_out = hash62_of(pill_digest);
+    return 0;
+}
+
 uint64_t cold_jam_hash(noun n)
 {
     const uint8_t *bytes;

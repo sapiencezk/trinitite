@@ -150,9 +150,17 @@ static noun     g_staged_kernel;
 static int      g_staged_shape;
 static uint32_t g_staged_version;
 static int      g_hstat;   /* idle / staged / pending */
-/* Set only while the supervisor's closed STOP intent is promoted. */
+/* Set only while the supervisor's closed lifecycle plan is promoted. */
 static int      g_m7_lifecycle_active;
 static int      g_m7_lifecycle_discard_backlog;
+static int      g_m7_lifecycle_plan;
+static int      g_m7_lifecycle_draining;
+static int      g_m7_lifecycle_root_seen;
+static uint64_t g_m7_lifecycle_transactions;
+static uint64_t g_m7_lifecycle_root_commits;
+static uint64_t g_m7_lifecycle_destination_commits;
+
+#define M7_LIFECYCLE_MAX_TRANSACTIONS 3u
 
 static void emit_swapped(uint32_t ver);
 
@@ -1941,6 +1949,11 @@ static int g_slam_event_from_queue;
 static noun g_m7_lifecycle_slot;
 static int  g_m7_lifecycle_slot_pending;
 static int  g_m7_boundary_active;
+/* PILL2 identity is a candidate until clean installation has prepared every
+ * other root.  Legacy PILL loading never sets this record. */
+static runtime_identity_t g_pill_candidate_identity;
+static uint8_t g_pill_candidate_capability;
+static int g_pill_candidate_i2;
 /* During snap-first boot the identity-admitted PILL gate has been decoded but
  * is not yet published as g_kernel. It is still the authoritative limit
  * anchor against which an ABI 1.1 checkpoint must compare. */
@@ -1979,8 +1992,35 @@ static void reject_event_scratch(void)
 static int kernel_m7_transaction_terminal(int committed)
 {
     if (g_m7_lifecycle_active) {
+        if (!committed) {
+            g_m7_lifecycle_active = 0;
+            g_m7_lifecycle_plan = 0;
+            g_m7_lifecycle_draining = 0;
+            return -1;
+        }
         g_m7_lifecycle_active = 0;
-        return committed ? 1 : -1;
+        g_m7_lifecycle_transactions++;
+        if (!g_m7_lifecycle_root_seen) {
+            g_m7_lifecycle_root_seen = 1;
+            g_m7_lifecycle_root_commits++;
+            /* Backlog omission applies to the root promotion only. Its
+             * authoritative causes now form the new FIFO and must drain. */
+            g_m7_lifecycle_discard_backlog = 0;
+        } else {
+            g_m7_lifecycle_destination_commits++;
+        }
+        if (g_m7_lifecycle_transactions > M7_LIFECYCLE_MAX_TRANSACTIONS) {
+            g_m7_lifecycle_plan = 0;
+            g_m7_lifecycle_draining = 0;
+            return -1;
+        }
+        if (g_evq_n == 0) {
+            g_m7_lifecycle_plan = 0;
+            g_m7_lifecycle_draining = 0;
+            return 1;
+        }
+        g_m7_lifecycle_draining = 1;
+        return 0;
     }
     if (m7_identity_active() && !g_m7_boundary_active) {
         g_m7_boundary_active = 1;
@@ -2068,11 +2108,15 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             uart_puts("canary\r\n");
         }
 
-        /* Phase 3: IRQ ring → event queue before schedule */
-        irq_ring_drain();
+        /* A lifecycle plan drains only its already-derived static causes.
+         * Do not admit IRQ/timer work between E_RESTART root and receiver. */
+        if (!g_m7_lifecycle_plan) {
+            /* Phase 3: IRQ ring → event queue before schedule */
+            irq_ring_drain();
 
-        /* Multi-arm timers → [%ei id %TICK 0] into queue */
-        tarm_poll();
+            /* Multi-arm timers → [%ei id %TICK 0] into queue */
+            tarm_poll();
+        }
 
         noun event;
         int event_from_i2_rx = 0;
@@ -2117,7 +2161,8 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                     event_admit_tick = runtime_counter_now();
                     break;
                 }
-                tarm_poll();
+                if (!g_m7_lifecycle_plan)
+                    tarm_poll();
                 if ((runtime_identity_live()
                      ? evq_peek_timed(&event, &event_timing)
                      : evq_deq_timed(&event, &event_timing))) {
@@ -2141,7 +2186,8 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
         uint64_t slam_start = runtime_counter_now();
         if (event_admit_tick == 0)
             event_admit_tick = slam_start;
-        g_m7_lifecycle_active = event_from_m7_lifecycle;
+        g_m7_lifecycle_active = event_from_m7_lifecycle
+            || (g_m7_lifecycle_draining && event_from_queue);
         if (event_from_i2_rx && !m7_external_event_allowed(event)) {
             runtime_stats_count(RT_COUNT_ABORTS, 1);
             uart_puts("M7 FENCE\r\n");
@@ -2423,16 +2469,39 @@ int kernel_m7_execute_lifecycle(noun event, int stopping)
 {
     if (!m7_identity_active() || !g_shrine_mode || !noun_is_cell(g_kernel)
         || !noun_is_cell(event) || g_m7_lifecycle_slot_pending
-        || g_m7_lifecycle_active)
+        || g_m7_lifecycle_active || g_m7_lifecycle_plan)
         return -1;
     g_m7_lifecycle_slot = event;
     g_m7_lifecycle_slot_pending = 1;
     g_m7_lifecycle_discard_backlog = stopping != 0;
+    /* STOP's bounded lifecycle cause must have admission room even when the
+     * drop-newest application FIFO is full. REQ+ has already fenced ingress;
+     * retire that ordinary backlog before preflight, then run the one STOP
+     * root and its receiver chain. Active services are handled by the caller
+     * after this plan and are never rearmed. */
+    if (stopping)
+        evq_clear();
+    g_m7_lifecycle_plan = 1;
+    g_m7_lifecycle_draining = 0;
+    g_m7_lifecycle_root_seen = 0;
+    g_m7_lifecycle_transactions = 0;
     int result = kernel_loop(g_kernel, 1, 0);
     g_m7_lifecycle_slot = NOUN_ZERO;
     g_m7_lifecycle_slot_pending = 0;
     g_m7_lifecycle_discard_backlog = 0;
+    g_m7_lifecycle_plan = 0;
+    g_m7_lifecycle_draining = 0;
     return result == 1 ? 0 : -1;
+}
+
+uint64_t kernel_m7_lifecycle_root_commits(void)
+{
+    return g_m7_lifecycle_root_commits;
+}
+
+uint64_t kernel_m7_lifecycle_destination_commits(void)
+{
+    return g_m7_lifecycle_destination_commits;
 }
 
 /* ── Durable checkpoint (live roots → cold store) ───────────────────────── */
@@ -2461,30 +2530,49 @@ int shrine_mode_get(void)
 
 static int noun_take(noun n, noun *head, noun *tail);
 
-int kernel_m7_publish(noun gate, const runtime_identity_t *identity,
-                      uint8_t capability_profile)
+int kernel_m7_prepare_publish(noun gate, const runtime_identity_t *identity,
+                              noun *slam_out)
 {
     noun candidate_formula;
     if (!noun_is_cell(gate) || !identity
         || !runtime_identity_validate_gate(gate, identity, 0)
         || !build_slam_formula_checked(&candidate_formula))
         return -1;
-    noun candidate_m7_formula, candidate_m7_result;
-    if (!digital_out_force_safe()
-        || !m7_supervisor_retain_roots(
-            &candidate_m7_formula, &candidate_m7_result))
+    if (!digital_out_force_safe())
         return -1;
+    if (!slam_out)
+        return -1;
+    *slam_out = candidate_formula;
+    return 0;
+}
+
+void kernel_m7_publish_prepared(noun gate, const runtime_identity_t *identity,
+                                uint8_t capability_profile, noun slam)
+{
+    /* All allocations, gate/identity validation, and safe-low work must
+     * happen in kernel_m7_prepare_publish before cold selection. This final
+     * publication is intentionally assignment-only. */
     evq_clear();
     tarm_clear();
     g_kernel = gate;
-    g_slam_formula = candidate_formula;
+    g_slam_formula = slam;
     g_shrine_mode = 1;
     noun_pill_shape = 1;
     noun_pill_version = 2;
     runtime_identity_set(identity);
     runtime_identity_set_capability_profile(capability_profile);
-    m7_supervisor_publish_roots(
-        candidate_m7_formula, candidate_m7_result);
+}
+
+int kernel_m7_publish(noun gate, const runtime_identity_t *identity,
+                      uint8_t capability_profile)
+{
+    noun slam, candidate_m7_formula, candidate_m7_result;
+    if (kernel_m7_prepare_publish(gate, identity, &slam) != 0
+        || !m7_supervisor_retain_roots(
+            &candidate_m7_formula, &candidate_m7_result))
+        return -1;
+    kernel_m7_publish_prepared(gate, identity, capability_profile, slam);
+    m7_supervisor_publish_roots(candidate_m7_formula, candidate_m7_result);
     return 0;
 }
 
@@ -2499,10 +2587,10 @@ int kernel_m7_replace_gate(noun gate)
     return 0;
 }
 
-int kernel_m7_gate_with_incarnation(noun source, uint64_t incarnation,
-                                    noun *out)
+int kernel_m7_gate_with_identity_incarnation(
+    noun source, const runtime_identity_t *identity, uint64_t incarnation,
+    noun *out)
 {
-    const runtime_identity_t *identity = runtime_identity_get();
     noun candidate, battery, sample, zero, state, tag, state_rest;
     noun header, state_tail, program, dynamic;
     noun versions, rest, resource_id, generation, old_incarnation;
@@ -2537,6 +2625,13 @@ int kernel_m7_gate_with_incarnation(noun source, uint64_t incarnation,
             *out, identity, &old_incarnation)) return 0;
     if (old_incarnation != incarnation) return 0;
     return old_incarnation == incarnation;
+}
+
+int kernel_m7_gate_with_incarnation(noun source, uint64_t incarnation,
+                                    noun *out)
+{
+    return kernel_m7_gate_with_identity_incarnation(
+        source, runtime_identity_get(), incarnation, out);
 }
 
 int kernel_m7_checkpoint_capture_roots(noun *gate, noun *queue,
@@ -3824,26 +3919,45 @@ static void uart_hex64_kernel(uint64_t value)
 static int install_clean_pill(noun pill_gate)
 {
     digital_out_force_safe();
-    if (!noun_is_cell(pill_gate))
+    if (!noun_is_cell(pill_gate)) {
+        if (noun_tx_active()) noun_tx_abort();
+        g_pill_candidate_i2 = 0;
         return -1;
-    if (runtime_identity_live()
-        && !runtime_identity_validate_gate(
-            pill_gate, runtime_identity_get(), 0))
+    }
+    const runtime_identity_t *candidate_identity = g_pill_candidate_i2
+        ? &g_pill_candidate_identity : runtime_identity_get();
+    uint8_t candidate_capability = g_pill_candidate_i2
+        ? g_pill_candidate_capability : runtime_identity_capability_profile();
+    if (candidate_identity
+        && !runtime_identity_validate_gate(pill_gate, candidate_identity, 0)) {
+        if (noun_tx_active()) noun_tx_abort();
+        g_pill_candidate_i2 = 0;
+        digital_out_force_safe();
         return -1;
+    }
     uint64_t candidate_budget = SLAM_BUDGET_DEFAULT;
-    if (runtime_identity_live()
-        && !i2_gate_slam_budget(pill_gate, &candidate_budget))
+    if (candidate_identity && !i2_gate_slam_budget(pill_gate, &candidate_budget)) {
+        if (noun_tx_active()) noun_tx_abort();
+        g_pill_candidate_i2 = 0;
+        digital_out_force_safe();
         return -1;
+    }
     heap_persist_begin_tx();
     heap_set_mode(HEAP_MODE_PERSIST);
     noun candidate_gate, candidate_slam;
     if (!noun_copy_checked(pill_gate, &candidate_gate)
         || !build_slam_formula_checked(&candidate_slam)) {
         heap_persist_abort_tx();
+        if (noun_tx_active()) noun_tx_abort();
+        g_pill_candidate_i2 = 0;
+        digital_out_force_safe();
         return -1;
     }
     if (!digital_out_prepare_clean_pill()) {
         heap_persist_abort_tx();
+        if (noun_tx_active()) noun_tx_abort();
+        g_pill_candidate_i2 = 0;
+        digital_out_force_safe();
         return -1;
     }
     /* Build the complete M7 supervisor candidate while the new semispace is
@@ -3851,12 +3965,22 @@ static int install_clean_pill(noun pill_gate)
      * success the remaining root assignment and transaction commit cannot
      * fail, so a clean PILL never publishes an M7 identity without its
      * supervisor formula/tags. */
-    if (m7_identity_active()
-        && m7_init(candidate_gate) != M7_STATUS_RDY) {
+    if (candidate_identity
+        && candidate_identity->runtime_abi[0] == 1
+        && candidate_identity->runtime_abi[1] == 2
+        && m7_init_clean_for_identity(candidate_gate, candidate_identity)
+            != M7_STATUS_RDY) {
         heap_persist_abort_tx();
+        if (noun_tx_active()) noun_tx_abort();
+        g_pill_candidate_i2 = 0;
+        digital_out_force_safe();
         return -1;
     }
     tarm_t empty_tarms[TARM_MAX] = {0};
+    if (candidate_identity) {
+        noun_pill_shape = 1;
+        noun_pill_version = 2;
+    }
     g_kernel = candidate_gate;
     g_slam_formula = candidate_slam;
     g_slam_budget = candidate_budget;
@@ -3866,7 +3990,14 @@ static int install_clean_pill(noun pill_gate)
     g_evq_n = 0;
     for (int i = 0; i < TARM_MAX; i++)
         g_tarms[i] = empty_tarms[i];
+    if (candidate_identity) {
+        runtime_identity_set(candidate_identity);
+        runtime_identity_set_capability_profile(candidate_capability);
+    }
+    if (noun_tx_active())
+        noun_tx_commit();
     heap_persist_commit_tx();
+    g_pill_candidate_i2 = 0;
     return 0;
 }
 
@@ -3878,8 +4009,15 @@ int kernel_prepare_pill(void)
 
 int kernel_boot(noun pill_gate)
 {
-    if (runtime_identity_live()
-        && runtime_identity_get()->runtime_abi[1] == 2) {
+    if (g_pill_candidate_i2
+        && g_pill_candidate_identity.runtime_abi[0] == 1
+        && g_pill_candidate_identity.runtime_abi[1] == 2) {
+        /* The clean PILL candidate only authorizes attempting the selected
+         * M7 pair; it is not a live identity and its decode is discarded
+         * before snapshot construction allocates its own candidate roots. */
+        if (noun_tx_active()) noun_tx_abort();
+        heap_set_mode(HEAP_MODE_PERSIST);
+        heap_scratch_reset();
         int m7_snap = m7_boot_snapshot();
         if (m7_snap == 0) {
             uart_puts("boot: m7-snap\r\n");
@@ -3890,6 +4028,9 @@ int kernel_boot(noun pill_gate)
             uart_puts("boot: m7-snap reject\r\n");
             return -1;
         }
+        /* m7_boot_snapshot consumed the candidate decode even when no
+         * selected M7 snapshot exists; reload it for clean PILL fallback. */
+        pill_gate = kernel_pill_load();
     }
     int want_snap = (g_boot_policy == BOOT_SNAP ||
                      g_boot_policy == BOOT_SNAP_ELSE_PILL);
@@ -3950,9 +4091,13 @@ noun kernel_pill_load(void)
 {
     digital_out_force_safe();
     noun gate = NOUN_ZERO;
-    pill_i2_status_t status = pill_i2_load(&gate);
-    if (status == PILL_I2_OK)
+    g_pill_candidate_i2 = 0;
+    pill_i2_status_t status = pill_i2_load_candidate(
+        &gate, &g_pill_candidate_identity, &g_pill_candidate_capability);
+    if (status == PILL_I2_OK) {
+        g_pill_candidate_i2 = 1;
         return gate;
+    }
     if (status == PILL_I2_NOT_I2 || status == PILL_I2_ABSENT) {
         /* Frozen I1 compatibility: the old PILL v2 + recursive cue path is
          * reachable only when the I2 magic is absent. */

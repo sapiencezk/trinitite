@@ -393,9 +393,12 @@ CREATE/DELETE.
 The M7 application FIFO is 256 entries; management is an independent
 one-entry priority mailbox. STOP's exact lifecycle slot is selected ahead of
 that FIFO, including at depth 256; its promotion retires the application
-backlog rather than copying it before the STOP cleanup. `M7 LIFECYCLE COMMIT`
-is emitted only after that exact intent commits; `M7 LIFECYCLE FAIL` is the
-audited non-delivery marker. `M7CFAIL` and `M7QFILL` are trusted-lab QEMU
+backlog rather than copying it before the STOP cleanup. The slot drains the
+bounded E_RESTART receiver-cause chain (root plus at most two causes), so
+`M7 LIFECYCLE COMMIT` is emitted only after both the lifecycle root and its
+actual destination causes commit; `M7 LIFECYCLE FAIL` is the audited
+non-delivery marker. `M7LROOT@`/`M7LDEST@` expose those counters only to the
+trusted-lab evidence bridge. `M7CFAIL` and `M7QFILL` are trusted-lab QEMU
 fault/priority witnesses, not services or application ingress. The target
 RuntimeIdentity work admits M7
 host/deployment `(1,2)` and M7 digital-output profile 2 using the fixed
@@ -404,6 +407,8 @@ container layouts remain unchanged. Candidate PILL bytes occupy the fixed
 volatile stage at `PILL_SCRATCH_BASE` until `SEAL`; activation stores the full
 candidate as a cold blob, records its full digest plus identity in the M7
 supervisor snapshot, and publishes RAM only after cold selection. The target
+prebuilds all fallible RAM roots before that selection and makes the final
+gate/supervisor/identity/output-inhibition publication assignment-only. It
 preflights the complete jammed supervisor snapshot against 65,536 bytes and
 preflights every cold-store jam against the 131,072-byte writer before
 calling it. See the

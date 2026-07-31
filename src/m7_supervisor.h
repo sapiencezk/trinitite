@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "noun.h"
+#include "runtime_identity.h"
 
 /* M7 target-side bounded supervisor surface.  The manager decision is a
  * Nock formula; these values are the IEC Table-6/7 numbers published by the
@@ -61,6 +62,9 @@ enum {
 };
 
 int      m7_init(noun gate);
+int      m7_init_for_identity(noun gate, const runtime_identity_t *identity);
+int      m7_init_clean_for_identity(noun gate,
+                                     const runtime_identity_t *identity);
 /* True only for the exact M7 RuntimeIdentity/Host ABI cut.  Kernel ingress
  * fencing and management scheduling are deliberately scoped to this identity;
  * M6 is not an uninitialised M7 resource. */
@@ -74,6 +78,7 @@ uint64_t m7_confirmations(void);
 uint64_t m7_qo(void);
 uint64_t m7_last_status(void);
 uint64_t m7_last_restart(void);
+uint64_t m7_persist_cells(void); /* trusted-lab bounded-memory witness */
 noun     m7_object(uint64_t kind, uint64_t object_id);
 noun     m7_last_result_noun(void);
 
@@ -102,6 +107,7 @@ int      m7_force_stop(void);
 int      m7_reset(void);
 /* Trusted-lab QEMU fault seam; not a MANAGER, deployment, or app surface. */
 int      m7_test_copy_fail_after(uint64_t cells);
+int      m7_test_query_storm(uint64_t count);
 
 /* TRI_DEPLOY bounded protocol. Stage storage is volatile and fixed-size;
  * successful SEAL does not alter live roots. */
