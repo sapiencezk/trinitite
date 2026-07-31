@@ -46,6 +46,9 @@ int runtime_identity_equal(const runtime_identity_t *a,
                            const runtime_identity_t *b);
 int runtime_identity_validate_gate(noun gate, const runtime_identity_t *identity,
                                    uint64_t *incarnation_out);
+int runtime_identity_validate_closed_process_io_gate(
+    noun gate, const runtime_identity_t *identity,
+    uint64_t *incarnation_out);
 int runtime_identity_to_noun(const runtime_identity_t *identity, noun *out);
 int runtime_identity_from_noun(noun n, runtime_identity_t *out);
 

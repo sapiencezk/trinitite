@@ -38,6 +38,7 @@ uint64_t digital_out_gpio_level(void);
 uint64_t digital_out_operation_count(void);
 uint64_t digital_out_audit_count(void);
 uint64_t digital_out_audit_dropped(void);
+uint64_t digital_out_state(void);
 
 #ifdef DIGITAL_OUT_FAKE
 uint64_t digital_out_fake_selftest(void);

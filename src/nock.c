@@ -23,14 +23,29 @@ void nock_crash(const char *msg) {
 
 static uint64_t g_budget_max;          /* 0 = unlimited */
 static uint64_t g_ops_used;
+static uint64_t g_cell_budget_max;     /* 0 = unlimited */
+static uint64_t g_cells_used;
 static uint64_t g_budget_abort_reason;
 static int (*g_wall_check)(void);
 
 void nock_budget_set(uint64_t max_ops)
 {
+    nock_budget_set_limits(max_ops, 0);
+}
+
+void nock_budget_set_limits(uint64_t max_ops, uint64_t max_cells)
+{
     g_budget_max = max_ops;
-    g_ops_used   = 0;
+    g_cell_budget_max = max_cells;
+    g_ops_used = 0;
+    g_cells_used = 0;
     g_budget_abort_reason = 0;
+}
+
+void nock_budget_finish(void)
+{
+    g_budget_max = 0;
+    g_cell_budget_max = 0;
 }
 
 uint64_t nock_budget_get(void)
@@ -41,6 +56,11 @@ uint64_t nock_budget_get(void)
 uint64_t nock_ops_used(void)
 {
     return g_ops_used;
+}
+
+uint64_t nock_cells_used(void)
+{
+    return g_cells_used;
 }
 
 uint64_t nock_budget_abort_reason(void)
@@ -67,6 +87,83 @@ void nock_budget_tick(void)
         longjmp(nock_abort, NOCK_ABORT_BUDGET);
     }
 }
+
+static noun nock_alloc_cell(noun head, noun tail)
+{
+    if (g_cell_budget_max != 0 && g_cells_used >= g_cell_budget_max) {
+        g_budget_abort_reason = 3;
+        longjmp(nock_abort, NOCK_ABORT_BUDGET);
+    }
+    g_cells_used++;
+    return alloc_cell(head, tail);
+}
+
+#ifdef M8_EVIDENCE
+uint64_t nock_cell_budget_selftest(void)
+{
+    volatile uint64_t failures = 0;
+    jmp_buf saved;
+    __builtin_memcpy(saved, nock_abort, sizeof saved);
+    heap_scratch_reset();
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return UINT64_MAX;
+    noun constant = alloc_cell(direct(1), direct(0));
+    noun one_cell = alloc_cell(constant, constant);
+    noun two_cells = alloc_cell(one_cell, constant);
+
+    nock_budget_set_limits(64, 1);
+    noun exact = nock(NOUN_ZERO, one_cell);
+    if (!noun_is_cell(exact) || nock_cells_used() != 1)
+        failures |= 1u;
+    nock_budget_finish();
+
+    int jumped = setjmp(nock_abort);
+    if (jumped == 0) {
+        nock_budget_set_limits(64, 1);
+        (void)nock(NOUN_ZERO, two_cells);
+        failures |= 2u;
+    } else if (jumped != NOCK_ABORT_BUDGET
+               || nock_budget_abort_reason() != 3
+               || nock_cells_used() != 1) {
+        failures |= 4u;
+    }
+    nock_budget_finish();
+
+    /* Exercise the admitted selector-3 edge itself, not only a toy N/N+1
+     * formula: exactly 20,000 wrapper allocations succeed and allocation
+     * 20,001 aborts before touching the heap. */
+    jumped = setjmp(nock_abort);
+    if (jumped == 0) {
+        noun cells = NOUN_ZERO;
+        nock_budget_set_limits(0, 20000);
+        for (uint64_t i = 0; i < 20000; i++)
+            cells = nock_alloc_cell(direct(i & 1u), cells);
+        if (!noun_is_cell(cells) || nock_cells_used() != 20000)
+            failures |= 8u;
+    } else {
+        failures |= 16u;
+    }
+    nock_budget_finish();
+
+    jumped = setjmp(nock_abort);
+    if (jumped == 0) {
+        nock_budget_set_limits(0, 20000);
+        for (uint64_t i = 0; i <= 20000; i++)
+            (void)nock_alloc_cell(NOUN_ZERO, NOUN_ZERO);
+        failures |= 32u;
+    } else if (jumped != NOCK_ABORT_BUDGET
+               || nock_budget_abort_reason() != 3
+               || nock_cells_used() != 20000) {
+        failures |= 64u;
+    }
+    nock_budget_finish();
+    __builtin_memcpy(nock_abort, saved, sizeof saved);
+    noun_tx_abort();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return failures;
+}
+#endif
 
 /* ── Noun printer (%slog, %xray) ─────────────────────────────────────────── */
 
@@ -386,7 +483,7 @@ static noun jet_flop(noun core, const wilt_t *jets, sky_fn_t sky) {
         if (++n > 1000000ULL)
             nock_crash("jet flop: list too long");
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(list);
-        acc  = alloc_cell(c->head, acc);
+        acc  = nock_alloc_cell(c->head, acc);
         list = c->tail;
     }
     return acc;
@@ -405,14 +502,14 @@ static noun jet_weld(noun core, const wilt_t *jets, sky_fn_t sky) {
         if (++n > 1000000ULL)
             nock_crash("jet weld: list too long");
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(cur);
-        rev = alloc_cell(c->head, rev);
+        rev = nock_alloc_cell(c->head, rev);
         cur = c->tail;
     }
     noun out = b;
     cur = rev;
     while (noun_is_cell(cur)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(cur);
-        out = alloc_cell(c->head, out);
+        out = nock_alloc_cell(c->head, out);
         cur = c->tail;
     }
     return out;
@@ -512,9 +609,9 @@ static noun hax(uint64_t a, noun new_val, noun target) {
     uint64_t sub = (a & ((1ULL << (d - 1)) - 1)) | (1ULL << (d - 1));
 
     if (first == 0)
-        return alloc_cell(hax(sub, new_val, t->head), t->tail);
+        return nock_alloc_cell(hax(sub, new_val, t->head), t->tail);
     else
-        return alloc_cell(t->head, hax(sub, new_val, t->tail));
+        return nock_alloc_cell(t->head, hax(sub, new_val, t->tail));
 }
 
 /* ── Slot  (/[axis subject]) ─────────────────────────────────────────────── */
@@ -605,7 +702,7 @@ loop:
     if (noun_is_cell(head)) {
         noun left  = nock_eval(subject, head, jets, sky);
         noun right = nock_eval(subject, tail, jets, sky);
-        return alloc_cell(left, right);
+        return nock_alloc_cell(left, right);
     }
 
     /* head is an atom — it's the opcode */
@@ -731,7 +828,7 @@ loop:
             nock_crash("op8 tail not cell");
         cell_t *args = (cell_t *)(uintptr_t)cell_ptr(tail);
         noun pinned = nock_eval(subject, args->head, jets, sky);
-        subject = alloc_cell(pinned, subject);  /* [*[a b] a] */
+        subject = nock_alloc_cell(pinned, subject);  /* [*[a b] a] */
         formula = args->tail;
         goto loop;
     }

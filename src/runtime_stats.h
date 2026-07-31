@@ -94,6 +94,8 @@ typedef enum {
     RT_COUNT_COPY_MAP_ENTRIES_HWM,
     /* Appended to preserve every pre-M8 counter ordinal. */
     RT_COUNT_ATOM_INDEX_HWM,
+    RT_COUNT_NOCK_OPS_HWM,
+    RT_COUNT_NOCK_CELLS_HWM,
     RT_COUNT_COUNT
 } runtime_counter_t;
 

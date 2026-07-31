@@ -56,13 +56,19 @@ __attribute__((noreturn)) void nock_crash(const char *msg);
  * Optional wall: every 256 ops call wall_check if set (kernel deadline).
  */
 void     nock_budget_set(uint64_t max_ops);   /* also resets ops_used */
+void     nock_budget_set_limits(uint64_t max_ops, uint64_t max_cells);
+void     nock_budget_finish(void);
 uint64_t nock_budget_get(void);               /* current max (0 = off) */
 uint64_t nock_ops_used(void);
-/* Reason for the last NOCK_ABORT_BUDGET: 1=op budget, 2=wall deadline. */
+uint64_t nock_cells_used(void);
+/* Reason: 1=op budget, 2=wall deadline, 3=cell budget. */
 uint64_t nock_budget_abort_reason(void);
 void     nock_wall_check_set(int (*fn)(void)); /* 1 → budget abort */
 /* Tick one op; may longjmp. Public so SKA eval paths share the same budget. */
 void     nock_budget_tick(void);
+#ifdef M8_EVIDENCE
+uint64_t nock_cell_budget_selftest(void);
+#endif
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 noun nock(noun subject, noun formula);

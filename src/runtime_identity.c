@@ -3,6 +3,7 @@
 #include "runtime_identity.h"
 #include "bounded_cue.h"
 #include "blake3.h"
+#include "jam.h"
 #include "memory.h"
 
 #define PILL_I2_HEADER_SIZE (256u)
@@ -31,6 +32,16 @@ static const uint8_t g_m7_digital_out_request_grant_fingerprint[8] = {
 };
 static const uint8_t g_closed_process_io_request_grant_fingerprint[8] = {
     0x79, 0x90, 0xcd, 0xd1, 0x04, 0x7d, 0xaa, 0xc3
+};
+/* Canonical jam(program) BLAKE3 bytes for the one selector-3 graph.  The
+ * published hexadecimal atom is
+ * 38fc05c6ddab1ab20c0aaea87b87b242e7fa516060762e7afa47f7e8d8f3b1a8;
+ * RuntimeIdentity stores that atom little-endian. */
+static const uint8_t g_closed_process_io_program_hash[32] = {
+    0xa8, 0xb1, 0xf3, 0xd8, 0xe8, 0xf7, 0x47, 0xfa,
+    0x7a, 0x2e, 0x76, 0x60, 0x60, 0x51, 0xfa, 0xe7,
+    0x42, 0xb2, 0x87, 0x7b, 0xa8, 0xae, 0x0a, 0x0c,
+    0xb2, 0x1a, 0xab, 0xdd, 0xc6, 0x05, 0xfc, 0x38
 };
 
 static runtime_identity_t g_live_identity;
@@ -238,6 +249,34 @@ int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
     return 1;
 }
 
+int runtime_identity_validate_closed_process_io_gate(
+    noun gate, const runtime_identity_t *id, uint64_t *incarnation_out)
+{
+    uint64_t incarnation = 0;
+    if (!runtime_identity_validate_gate(gate, id, &incarnation))
+        return 0;
+    noun battery, sample, zero, state, tag, rest, header, state_tail;
+    noun program, dynamic;
+    const uint8_t *encoded;
+    uint64_t encoded_len;
+    uint8_t actual[32];
+    if (!bytes_eq(id->program_hash, g_closed_process_io_program_hash, 32)
+        || !take(gate, &battery, &sample)
+        || !take(sample, &zero, &state)
+        || !take(state, &tag, &rest)
+        || !take(rest, &header, &state_tail)
+        || !take(state_tail, &program, &dynamic)
+        || jam_encode_bytes_checked(program, &encoded, &encoded_len) != 0) {
+        return 0;
+    }
+    blake3_hash(encoded, (size_t)encoded_len, actual);
+    if (!bytes_eq(actual, id->program_hash, sizeof actual))
+        return 0;
+    if (incarnation_out)
+        *incarnation_out = incarnation;
+    return 1;
+}
+
 static void put16(uint8_t *p, uint16_t v)
 {
     p[0] = (uint8_t)v;
@@ -432,8 +471,9 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
         && identity.deployment_schema[0] == 1
         && identity.deployment_schema[1] == 2;
     uint8_t capability_profile = header[25];
+    int closed_io = 0;
     if (digital_identity || m7_digital_identity) {
-        int closed_io = m7_digital_identity
+        closed_io = m7_digital_identity
             && capability_profile == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO;
         const uint8_t *fingerprint = closed_io
             ? g_closed_process_io_request_grant_fingerprint
@@ -446,6 +486,10 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
         if (capability_profile != expected_profile
             || !bytes_eq(header + 248, fingerprint, 8))
             return PILL_I2_IDENTITY;
+        if (closed_io && !bytes_eq(
+                identity.program_hash,
+                g_closed_process_io_program_hash, 32))
+            return PILL_I2_IDENTITY;
     } else if (capability_profile != RUNTIME_CAPABILITY_PROFILE_NONE
                || bytes_nonzero(header + 248, 8)) {
         return PILL_I2_IDENTITY;
@@ -457,7 +501,11 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
     if (cue_status != CUE_BOUNDED_OK)
         return cue_status == CUE_BOUNDED_ALLOC
             ? PILL_I2_ALLOC : PILL_I2_CUE;
-    if (!runtime_identity_validate_gate(gate, &identity, 0)) {
+    int gate_ok = closed_io
+        ? runtime_identity_validate_closed_process_io_gate(
+            gate, &identity, 0)
+        : runtime_identity_validate_gate(gate, &identity, 0);
+    if (!gate_ok) {
         noun_tx_abort();
         return PILL_I2_GATE;
     }

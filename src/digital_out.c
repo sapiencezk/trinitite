@@ -205,6 +205,15 @@ uint64_t digital_out_audit_dropped(void)
     return g_audit_dropped;
 }
 
+uint64_t digital_out_state(void)
+{
+    return (uint64_t)(g_configured != 0)
+        | ((uint64_t)(g_inhibited != 0) << 1)
+        | ((uint64_t)(g_reconcile_armed != 0) << 2)
+        | ((uint64_t)(g_fatal != 0) << 3)
+        | ((uint64_t)(g_m8_input_freshness.armed != 0) << 4);
+}
+
 #ifdef DIGITAL_OUT_FAKE
 uint64_t digital_out_fake_selftest(void)
 {

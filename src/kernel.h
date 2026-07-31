@@ -76,6 +76,7 @@ void     emit_timeout(uint64_t elapsed);
  * capped by the target at 2e6. */
 void     slam_budget_set(uint64_t max_ops);
 uint64_t slam_budget_get(void);
+uint64_t slam_cell_budget_get(void);
 
 /* Multi-arm periodic timers (%tset / %tcan) — IEC host contract */
 void     tarm_set(uint64_t id, uint64_t period);  /* period 0 = cancel */
@@ -102,6 +103,13 @@ void     evq_metrics_reset(void);       /* zero overflows + hwm baseline */
 uint64_t kernel_queue_pressure_selftest(uint64_t percent);
 uint64_t kernel_queue_retry_selftest(void);
 uint64_t kernel_i2_limit_shape_selftest(void);
+#ifdef M8_EVIDENCE
+uint64_t kernel_m8_external_ingress_selftest(void);
+uint64_t kernel_m8_input_failure_safe_selftest(void);
+uint64_t kernel_m8_service_state(void);
+uint64_t kernel_m8_checkpoint_restore_selftest(void);
+uint64_t kernel_m8_profile_admission_selftest(void);
+#endif
 
 /* WP4 — crash recovery: 0 hard (clear tarms), 1 soft (keep tarms) */
 void     crash_soft_set(int soft);

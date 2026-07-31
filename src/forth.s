@@ -3052,8 +3052,9 @@ defcode "M7DEMO", 6, m7_deploy_demo_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
-// M6 fixed-bank read-only diagnostics. DOUT@ is the backend shadow,
-// GPIOLEV@ is the independently read BCM2838 GPLEV0 value masked to 17/27/22.
+// Shared fixed-bank read-only observations, not process ingress. DOUT@ is the
+// backend shadow; GPIOLEV@ is the independently read BCM2838 GPLEV0 value
+// masked to 17/27/22.
 defcode "DOUT@", 5, digital_out_shadow_word, 0
     bl      digital_out_shadow
     str     x0, [DSP, #-8]!
@@ -3084,6 +3085,20 @@ defcode "M8DIN!", 6, digital_in_fake_set_word, 0
     str     x0, [DSP]
     NEXT
 
+// Test-only failure ordinal for the exact fake bank reader.  It exposes no
+// GPIO number, mask, register, or arbitrary MMIO surface.
+defcode "M8DIF!", 6, digital_in_fake_fail_word, 0
+    ldr     x0, [DSP], #8
+    bl      digital_in_test_fail_read_at
+    NEXT
+
+#ifdef M8_EVIDENCE
+defcode "M8IFSAFE", 8, m8_input_failure_safe_word, 0
+    bl      kernel_m8_input_failure_safe_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
 defcode "M8DI", 4, digital_in_fake_test_word, 0
     bl      digital_in_fake_selftest
     str     x0, [DSP, #-8]!
@@ -3094,6 +3109,34 @@ defcode "M8DIC@", 6, digital_in_count_word, 0
     bl      digital_in_read_count
     str     x0, [DSP, #-8]!
     NEXT
+
+#ifdef M8_EVIDENCE
+// M8EXTT ( -- failures ) proves selector-3 denies a shaped external event.
+defcode "M8EXTT", 6, m8_external_ingress_test_word, 0
+    bl      kernel_m8_external_ingress_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// Closed-profile read-only diagnostic: bits 0/1 input/output initialized,
+// 2 input pending, 3 freshness, 4 output pending, 5 desired, 6 host mirror.
+defcode "M8SVC@", 6, m8_service_state_word, 0
+    bl      kernel_m8_service_state
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M8ADMIT", 7, m8_profile_admission_test_word, 0
+    bl      kernel_m8_profile_admission_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M8CKT ( -- failures ) requires a running quiescent selector-3 gate.
+// It rejects queue, full-token, and service-lifecycle corruption without
+// changing the live checkpoint authority.
+defcode "M8CKT", 5, m8_checkpoint_restore_test_word, 0
+    bl      kernel_m8_checkpoint_restore_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
 
 // CKM2 ( -- failures ) requires M2PREP; transactional restore matrix.
 defcode "CKM2", 4, ckpt_m2_test, 0
@@ -3160,6 +3203,20 @@ defcode "I2LIMT", 6, i2_limit_shape_test, 0
     bl      kernel_i2_limit_shape_selftest
     str     x0, [DSP, #-8]!
     NEXT
+
+#ifdef M8_EVIDENCE
+// Exact target cell-limit witness: parser-selected live ceiling and an
+// evaluator edge/overflow selftest using the production allocation wrapper.
+defcode "I2CELL@", 7, i2_cell_limit_fetch, 0
+    bl      slam_cell_budget_get
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "I2CELLT", 7, i2_cell_limit_test, 0
+    bl      nock_cell_budget_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
 
 defcode "NOVM3", 5, novel_atom_test, 0
     ldr     x0, [DSP]

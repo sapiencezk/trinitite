@@ -67,6 +67,8 @@ static const char *const g_counter_name[RT_COUNT_COUNT] = {
     "service_active_hwm",
     "copy_map_entries_hwm",
     "atom_index_hwm",
+    "nock_ops_hwm",
+    "nock_cells_hwm",
 };
 
 static const char *const g_phase_name[RT_PHASE_COUNT] = {

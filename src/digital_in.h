@@ -8,5 +8,6 @@ uint64_t digital_in_read_count(void);
 
 #ifdef DIGITAL_IN_FAKE
 int digital_in_test_set_logical_bank(uint32_t logical_bank);
+void digital_in_test_fail_read_at(uint64_t ordinal);
 uint64_t digital_in_fake_selftest(void);
 #endif

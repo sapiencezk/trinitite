@@ -18,6 +18,11 @@ LDFLAGS = -T $(SRCDIR)/linker.ld -nostdlib -no-pie
 COLD_MEDIA ?= ram
 DIGITAL_OUT_BACKEND ?= bcm2838
 DIGITAL_IN_BACKEND ?= bcm2838
+M8_EVIDENCE ?= 0
+
+ifeq ($(M8_EVIDENCE),1)
+CFLAGS += -DM8_EVIDENCE=1
+endif
 
 ifeq ($(COLD_MEDIA),ram)
 MEDIA_OBJS = cold_media.o cold_nv_none.o
@@ -128,12 +133,12 @@ deploy: $(TARGET).img
 
 test:
 	$(MAKE) clean
-	$(MAKE) all
+	$(MAKE) M8_EVIDENCE=1 all
 	./tests/run_tests.sh
 
 test-media-fake:
 	$(MAKE) clean
-	$(MAKE) COLD_MEDIA=fake all
+	$(MAKE) COLD_MEDIA=fake M8_EVIDENCE=1 all
 	./tests/run_tests.sh
 	./tests/media-fake-matrix.sh
 	# Do not leave COLD_MEDIA=fake objects for a following RAM/semihost build.

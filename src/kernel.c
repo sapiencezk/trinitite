@@ -2,6 +2,7 @@
 #include "noun.h"
 #include "uart.h"
 #include "memory.h"
+#include "blake3.h"
 #include "jam.h"
 #include "nock.h"
 #include "setjmp.h"
@@ -111,6 +112,8 @@ static int m8_gate_pending_token(noun gate, uint64_t owner, noun *pending);
 static int m7_external_event_allowed(noun event)
 {
     noun tag, rest;
+    if (closed_process_io_authorized())
+        return 0;
     /* M6 is a complete, separately selected RuntimeIdentity.  The M7
      * application-origin fence is not a default-deny compatibility shim: it
      * exists only for the exact M7 ABI/Host-ABI/deployment-schema cut. */
@@ -147,7 +150,7 @@ static volatile int  g_i2_preparing;
 static noun build_slam_formula(void);
 static int build_slam_formula_checked(noun *out);
 static int i2_gate_execution_limits(
-    noun gate, noun *execution_out, uint64_t *budget);
+    noun gate, noun *execution_out, uint64_t *budget, uint64_t *cells);
 static int make_timer_event_checked(noun token, noun *out);
 static noun g_slam_formula;
 
@@ -1562,7 +1565,11 @@ static void dispatch_i2_activate(noun effects)
                         g_activation_completions[completion_i], raw);
                     digital_out_arm_closed_sample(gen, inc, owner, seq);
                 } else {
-                    digital_out_clear_closed_sample();
+                    /* A failed snapshot cannot leave a prior command active
+                     * during the bounded retry.  force_safe() clears and
+                     * inhibits the exact fixed bank, clears freshness, and
+                     * truthfully latches a physical clear failure fatal. */
+                    (void)digital_out_force_safe();
                 }
             }
             runtime_stats_count(
@@ -1579,6 +1586,34 @@ static void dispatch_i2_activate(noun effects)
     heap_noalloc_end();
     g_activation_completion_n = 0;
 }
+
+#ifdef M8_EVIDENCE
+uint64_t kernel_m8_input_failure_safe_selftest(void)
+{
+    uint64_t failures = 0;
+    for (uint64_t bank = 1; bank <= 7; bank++) {
+        if ((bank & 3u) == 0)
+            continue; /* alarm-only is not an energized pump bank */
+        if (!digital_out_prepare_clean_pill()) {
+            failures |= 1ULL << bank;
+            continue;
+        }
+        digital_out_arm_closed_sample(1, 1, 4, bank);
+        if (!digital_out_apply_direct(bank, 1, 1, 7, bank)
+            || digital_out_shadow() == 0) {
+            failures |= 1ULL << bank;
+            continue;
+        }
+        (void)digital_out_force_safe();
+        if (digital_out_shadow() != 0 || digital_out_gpio_level() != 0
+            || digital_out_closed_sample_armed()
+            || digital_out_apply_direct(bank, 1, 1, 7, bank))
+            failures |= 1ULL << bank;
+    }
+    (void)digital_out_prepare_clean_pill();
+    return failures;
+}
+#endif
 
 static int test_completion(noun token, uint64_t status_code, noun *out)
 {
@@ -2107,6 +2142,7 @@ void crash_recover_host(void)
 #define I2_SLAM_BUDGET_MAX  2000000ULL
 
 static uint64_t g_slam_budget = SLAM_BUDGET_DEFAULT;
+static uint64_t g_slam_cell_budget;
 static int g_slam_event_from_queue;
 /* M7 lifecycle is a single closed supervisor intent, not an application FIFO
  * item.  It is selected before the drop-newest FIFO even when that FIFO is
@@ -2141,6 +2177,11 @@ void slam_budget_set(uint64_t max_ops)
 uint64_t slam_budget_get(void)
 {
     return g_slam_budget;
+}
+
+uint64_t slam_cell_budget_get(void)
+{
+    return g_slam_cell_budget;
 }
 
 static void reject_event_scratch(void)
@@ -2219,6 +2260,12 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
     for (;;) {
         int jr = setjmp(nock_abort);
         if (jr == NOCK_ABORT_CRASH) {
+            if (nock_budget_get() != 0) {
+                runtime_stats_max(RT_COUNT_NOCK_OPS_HWM, nock_ops_used());
+                runtime_stats_max(
+                    RT_COUNT_NOCK_CELLS_HWM, nock_cells_used());
+            }
+            nock_budget_finish();
             g_slam_event_from_queue = 0;
             uart_puts("\r\nkernel crash\r\n");
             heap_noalloc_end();
@@ -2244,6 +2291,9 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             continue;
         }
         if (jr == NOCK_ABORT_BUDGET) {
+            runtime_stats_max(RT_COUNT_NOCK_OPS_HWM, nock_ops_used());
+            runtime_stats_max(RT_COUNT_NOCK_CELLS_HWM, nock_cells_used());
+            nock_budget_finish();
             /*
              * WP2: budget / mid-eval wall — no product commit, keep tarms
              * (unlike crash). Emit %timeout so apps see the same host effect
@@ -2412,11 +2462,14 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
             event = carried;
         }
 
-        nock_budget_set(g_slam_budget);
+        nock_budget_set_limits(g_slam_budget, g_slam_cell_budget);
         noun subject = alloc_cell(g_kernel, event);
         slam_start = runtime_counter_now();
         g_slam_event_from_queue = event_from_queue;
         noun result  = nock(subject, slam);
+        runtime_stats_max(RT_COUNT_NOCK_OPS_HWM, nock_ops_used());
+        runtime_stats_max(RT_COUNT_NOCK_CELLS_HWM, nock_cells_used());
+        nock_budget_finish();
         g_slam_event_from_queue = 0;
         uint64_t slam_end = runtime_counter_now();
         runtime_stats_record(
@@ -2882,6 +2935,119 @@ static int m8_gate_pending_token(noun gate, uint64_t owner, noun *pending)
     return 0;
 }
 
+#ifdef M8_EVIDENCE
+uint64_t kernel_m8_external_ingress_selftest(void)
+{
+    if (!closed_process_io_authorized())
+        return UINT64_MAX;
+    heap_scratch_reset();
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return UINT64_MAX;
+    noun tag = cord_from_bytes("i2-ei", 5);
+    noun body, event;
+    uint64_t failures = 0;
+    if (!alloc_cell_checked(direct(1), NOUN_ZERO, &body)
+        || !alloc_cell_checked(tag, body, &event)
+        || m7_external_event_allowed(event))
+        failures = 1;
+    noun_tx_abort();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return failures;
+}
+
+uint64_t kernel_m8_service_state(void)
+{
+    noun input, container, input_pending, freshness;
+    noun output, output_pending, desired;
+    uint64_t input_init, input_seq, output_init, output_seq;
+    if (!closed_process_io_authorized()
+        || !m8_instance_lib(g_kernel, 4u, &input, &container)
+        || !m8_lib_fields4(input, &input_init, &input_seq,
+                           &input_pending, &freshness)
+        || !m8_instance_lib(g_kernel, 7u, &output, &container)
+        || !m8_lib_fields4(output, &output_init, &output_seq,
+                           &output_pending, &desired))
+        return UINT64_MAX;
+    (void)input_seq;
+    (void)output_seq;
+    return (input_init != 0)
+        | ((output_init != 0) << 1)
+        | ((input_pending != NOUN_ZERO) << 2)
+        | ((freshness != NOUN_ZERO) << 3)
+        | ((output_pending != NOUN_ZERO) << 4)
+        | ((desired != NOUN_ZERO) << 5)
+        | ((uint64_t)digital_out_closed_sample_armed() << 6);
+}
+
+uint64_t kernel_m8_profile_admission_selftest(void)
+{
+    const runtime_identity_t *live = runtime_identity_get();
+    uint64_t failures = 0;
+    if (!live || !closed_process_io_authorized()
+        || !runtime_identity_validate_closed_process_io_gate(
+            g_kernel, live, 0))
+        return UINT64_MAX;
+
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return UINT64_MAX;
+    noun gate;
+    if (!noun_copy_checked(g_kernel, &gate)) {
+        noun_tx_abort();
+        return UINT64_MAX;
+    }
+    noun battery, sample, zero, state, tag, state_rest;
+    noun header, state_tail, program, dynamic;
+    if (!noun_take(gate, &battery, &sample)
+        || !noun_take(sample, &zero, &state)
+        || !noun_take(state, &tag, &state_rest)
+        || !noun_take(state_rest, &header, &state_tail)
+        || !noun_take(state_tail, &program, &dynamic)) {
+        noun_tx_abort();
+        return UINT64_MAX;
+    }
+    ((cell_t *)(uintptr_t)cell_ptr(state_tail))->head = NOUN_ZERO;
+    if (runtime_identity_validate_closed_process_io_gate(
+            gate, live, 0))
+        failures |= 1u;
+
+    const uint8_t *encoded;
+    uint64_t encoded_len;
+    uint8_t digest[32];
+    uint64_t limbs[4] = {0};
+    if (jam_encode_bytes_checked(
+            NOUN_ZERO, &encoded, &encoded_len) != 0) {
+        failures |= 2u;
+    } else {
+        blake3_hash(encoded, (size_t)encoded_len, digest);
+        for (unsigned i = 0; i < sizeof digest; i++)
+            limbs[i / 8] |= (uint64_t)digest[i] << ((i % 8) * 8);
+        noun hash_atom;
+        runtime_identity_t changed = *live;
+        for (unsigned i = 0; i < sizeof digest; i++)
+            changed.program_hash[i] = digest[i];
+        noun rest = header, ignored;
+        int header_ok = noun_take(rest, &ignored, &rest);
+        for (int i = 0; i < 4 && header_ok; i++)
+            header_ok = noun_take(rest, &ignored, &rest);
+        if (!header_ok || !noun_is_cell(rest)
+            || !make_atom_checked(limbs, 4, &hash_atom)) {
+            failures |= 2u;
+        } else {
+            ((cell_t *)(uintptr_t)cell_ptr(rest))->head = hash_atom;
+            if (!runtime_identity_validate_gate(gate, &changed, 0)
+                || runtime_identity_validate_closed_process_io_gate(
+                    gate, &changed, 0))
+                failures |= 4u;
+        }
+    }
+    noun_tx_abort();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return failures;
+}
+#endif
+
 static int m8_checkpoint_quiescent(void)
 {
     if (g_evq != NOUN_ZERO || g_evq_n != 0 || g_activation_completion_n != 0
@@ -2924,10 +3090,12 @@ static int m8_checkpoint_quiescent(void)
         || !m8_instance_lib(g_kernel, 7u, &output, &output_cell)
         || !m8_lib_fields4(output, &output_init, &output_seq,
                            &out_pending, &desired)
-        || out_pending != NOUN_ZERO)
+        || out_pending != NOUN_ZERO
+        || input_init != (running ? 1u : 0u)
+        || output_init != (running ? 1u : 0u))
         return 0;
-    (void)input_init; (void)input_seq; (void)input_cell;
-    (void)output_init; (void)output_seq; (void)output_cell; (void)desired;
+    (void)input_seq; (void)input_cell;
+    (void)output_seq; (void)output_cell; (void)desired;
     return 1;
 }
 
@@ -2975,9 +3143,11 @@ static int m8_rebuild_quiescent_gate(noun gate, int running,
 
     noun old_pending, old_tail;
     uint64_t initialized, service_sequence;
+    uint64_t expected_initialized = running ? 1u : 0u;
     if (!m8_instance_lib(gate, 4u, &input, &input_cell)
         || !m8_lib_fields4(input, &initialized, &service_sequence,
                            &old_pending, &old_tail)
+        || initialized != expected_initialized
         || old_pending != NOUN_ZERO || old_tail != NOUN_ZERO
         || !alloc_cell_checked(NOUN_ZERO, NOUN_ZERO, &n0)
         || !alloc_cell_checked(direct(service_sequence), n0, &n1)
@@ -2987,6 +3157,7 @@ static int m8_rebuild_quiescent_gate(noun gate, int running,
     if (!m8_instance_lib(gate, 7u, &output, &output_cell)
         || !m8_lib_fields4(output, &initialized, &service_sequence,
                            &old_pending, &old_tail)
+        || initialized != expected_initialized
         || old_pending != NOUN_ZERO
         || !alloc_cell_checked(NOUN_ZERO, NOUN_ZERO, &n0)
         || !alloc_cell_checked(direct(service_sequence), n0, &n1)
@@ -3397,18 +3568,20 @@ static int m8_saved_checkpoint_quiescent(
     noun delay, container, seq_n, rest, pending, last_dt;
     noun input, input_pending, freshness;
     noun output, output_pending, desired;
-    uint64_t delay_seq, initialized, service_seq;
+    uint64_t delay_seq, input_initialized, output_initialized, service_seq;
     if (!m8_instance_lib(view->gate, 3u, &delay, &container)
         || !noun_take(delay, &seq_n, &rest) || !noun_is_direct(seq_n)
         || !noun_take(rest, &pending, &last_dt) || !noun_is_direct(last_dt)
         || !m8_instance_lib(view->gate, 4u, &input, &container)
-        || !m8_lib_fields4(input, &initialized, &service_seq,
+        || !m8_lib_fields4(input, &input_initialized, &service_seq,
                            &input_pending, &freshness)
         || input_pending != NOUN_ZERO || freshness != NOUN_ZERO
         || !m8_instance_lib(view->gate, 7u, &output, &container)
-        || !m8_lib_fields4(output, &initialized, &service_seq,
+        || !m8_lib_fields4(output, &output_initialized, &service_seq,
                            &output_pending, &desired)
-        || output_pending != NOUN_ZERO)
+        || output_pending != NOUN_ZERO
+        || input_initialized != (mode == M7_MODE_RUNNING ? 1u : 0u)
+        || output_initialized != (mode == M7_MODE_RUNNING ? 1u : 0u))
         return 0;
     delay_seq = direct_val(seq_n);
     (void)desired;
@@ -3455,33 +3628,36 @@ static int checkpoint_install_m7_candidate(
         .incarnation = 0, .queue_n = 0, .timer_n = 0
     };
     uint64_t incarnation;
-    if (!runtime_identity_validate_gate(gate, identity, &incarnation)
-        || incarnation == 0) {
+    int m8 = capability_profile
+        == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO;
+    int gate_valid = m8
+        ? runtime_identity_validate_closed_process_io_gate(
+            gate, identity, &incarnation)
+        : runtime_identity_validate_gate(gate, identity, &incarnation);
+    if (!gate_valid || incarnation == 0) {
         g_checkpoint_last_result = COLD_RESULT_SHAPE;
         return -1;
     }
     view.incarnation = incarnation;
-    int m8 = capability_profile
-        == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO;
     if (!checkpoint_validate_m7_roots(&view)
-        || (m8 && !m8_saved_checkpoint_quiescent(&view, mode))
-        || !digital_out_restore_safe()
-        || (m8 && !digital_in_prepare())) {
+        || (m8 && !m8_saved_checkpoint_quiescent(&view, mode))) {
         g_checkpoint_last_result = COLD_RESULT_SHAPE;
         return -1;
     }
 
-    uint64_t candidate_budget, live_budget;
+    uint64_t candidate_budget, candidate_cells, live_budget, live_cells;
     noun candidate_limits, live_limits;
     if (!i2_gate_execution_limits(
-            view.gate, &candidate_limits, &candidate_budget)) {
+            view.gate, &candidate_limits, &candidate_budget,
+            &candidate_cells)) {
         g_checkpoint_last_result = COLD_RESULT_SHAPE;
         return -1;
     }
     if (runtime_origin_v1()
         && identity->runtime_abi[1] == 1
         && (!i2_gate_execution_limits(
-                g_checkpoint_limit_anchor, &live_limits, &live_budget)
+                g_checkpoint_limit_anchor, &live_limits, &live_budget,
+                &live_cells)
             || !noun_eq(candidate_limits, live_limits))) {
         g_checkpoint_last_result = COLD_RESULT_IDENTITY;
         return -1;
@@ -3574,9 +3750,18 @@ static int checkpoint_install_m7_candidate(
         && !noun_copy_checked(manager_result, &candidate_m7_result))
         goto m7_alloc_fail;
 
+    /* No rejected noun/copy/limit candidate may touch or unlatch the live
+     * fixed backends.  These are the final fallible preparations; after they
+     * succeed, publication below is assignment-only.  A preparation failure
+     * may itself leave the exact bank safely inhibited, but never publishes
+     * the candidate durable state. */
+    if (!digital_out_restore_safe() || (m8 && !digital_in_prepare()))
+        goto m7_backend_fail;
+
     g_kernel = candidate_gate;
     g_slam_formula = candidate_slam;
     g_slam_budget = candidate_budget;
+    g_slam_cell_budget = candidate_cells;
     g_shrine_mode = 1;
     noun_pill_shape = 1;
     noun_pill_version = 2;
@@ -3608,6 +3793,13 @@ m7_alloc_fail:
         noun_tx_abort();
     g_checkpoint_last_result = COLD_RESULT_ALLOC;
     return -1;
+
+m7_backend_fail:
+    heap_persist_abort_tx();
+    if (noun_tx_active())
+        noun_tx_abort();
+    g_checkpoint_last_result = COLD_RESULT_SHAPE;
+    return -1;
 }
 
 static int checkpoint_identity_matches(noun ckpt, int *identity_represented)
@@ -3631,13 +3823,14 @@ static int checkpoint_identity_matches(noun ckpt, int *identity_represented)
 /* Extract the bound per-event Nock budget from an identity-admitted I2 gate.
  * Its state header carries the admitted execution limits; field 5 is
  * max_nock_ops_per_event. Keep legacy I1 on SLAM_BUDGET_DEFAULT and cap every
- * I2 request at the target's audited maximum before it reaches Nock. */
+ * I2 request at the substrate hard maximum before it reaches Nock. Selector
+ * 3's exact canonical program/identity pins its narrower audited limits. */
 static int i2_gate_execution_limits(
-    noun gate, noun *execution_out, uint64_t *budget)
+    noun gate, noun *execution_out, uint64_t *budget, uint64_t *cells)
 {
     noun battery, sample, axis, state, tag, rest, header, field;
     noun execution;
-    if (!execution_out || !budget
+    if (!execution_out || !budget || !cells
         || !noun_take(gate, &battery, &sample)
         || !noun_take(sample, &axis, &state)
         || !noun_is_direct(axis) || direct_val(axis) != 0
@@ -3661,17 +3854,20 @@ static int i2_gate_execution_limits(
         }
     }
     if (!positive_direct(rest, &values[9])
-        || values[4] > I2_SLAM_BUDGET_MAX)
+        || values[4] > I2_SLAM_BUDGET_MAX
+        || values[5] > HEAP_SCRATCH_SIZE / sizeof(cell_t))
         return 0;
     *execution_out = execution;
     *budget = values[4];
+    *cells = values[5];
     return 1;
 }
 
-static int i2_gate_slam_budget(noun gate, uint64_t *budget)
+static int i2_gate_slam_limits(
+    noun gate, uint64_t *budget, uint64_t *cells)
 {
     noun execution;
-    return i2_gate_execution_limits(gate, &execution, budget);
+    return i2_gate_execution_limits(gate, &execution, budget, cells);
 }
 
 static int i2_limit_test_gate(int mode, noun *gate)
@@ -3710,23 +3906,24 @@ static int i2_limit_test_gate(int mode, noun *gate)
 
 uint64_t kernel_i2_limit_shape_selftest(void)
 {
-    uint64_t failures = 0, budget = 0;
+    uint64_t failures = 0, budget = 0, cells = 0;
     noun gate, baseline_execution, changed_execution;
     if (!i2_limit_test_gate(0, &gate)
-        || !i2_gate_slam_budget(gate, &budget) || budget != 5)
+        || !i2_gate_slam_limits(gate, &budget, &cells)
+        || budget != 5 || cells != 6)
         failures |= 1ULL << 0;
     for (int mode = 1; mode <= 4; mode++) {
         budget = 0;
         if (!i2_limit_test_gate(mode, &gate)
-            || i2_gate_slam_budget(gate, &budget))
+            || i2_gate_slam_limits(gate, &budget, &cells))
             failures |= 1ULL << mode;
     }
     if (!i2_limit_test_gate(0, &gate)
         || !i2_gate_execution_limits(
-            gate, &baseline_execution, &budget)
+            gate, &baseline_execution, &budget, &cells)
         || !i2_limit_test_gate(5, &gate)
         || !i2_gate_execution_limits(
-            gate, &changed_execution, &budget)
+            gate, &changed_execution, &budget, &cells)
         || noun_eq(baseline_execution, changed_execution))
         failures |= 1ULL << 5;
     return failures;
@@ -3826,10 +4023,11 @@ int checkpoint_install(noun ckpt)
             noun_tx_abort();
         return -1;
     }
-    uint64_t candidate_budget, live_budget;
+    uint64_t candidate_budget, candidate_cells, live_budget, live_cells;
     noun candidate_limits, live_limits;
     if (!i2_gate_execution_limits(
-            view.gate, &candidate_limits, &candidate_budget)) {
+            view.gate, &candidate_limits, &candidate_budget,
+            &candidate_cells)) {
         g_checkpoint_last_result = COLD_RESULT_SHAPE;
         if (noun_tx_active())
             noun_tx_abort();
@@ -3839,7 +4037,7 @@ int checkpoint_install(noun ckpt)
         ? g_checkpoint_limit_anchor : g_kernel;
     if (runtime_origin_v1()
         && (!i2_gate_execution_limits(
-                limit_anchor, &live_limits, &live_budget)
+                limit_anchor, &live_limits, &live_budget, &live_cells)
             || !noun_eq(candidate_limits, live_limits))) {
         g_checkpoint_last_result = COLD_RESULT_IDENTITY;
         if (noun_tx_active())
@@ -3910,6 +4108,7 @@ int checkpoint_install(noun ckpt)
     g_kernel = candidate_gate;
     g_slam_formula = candidate_slam;
     g_slam_budget = candidate_budget;
+    g_slam_cell_budget = candidate_cells;
     g_shrine_mode = 1;
     g_evq = candidate_q;
     g_evq_tail = candidate_tail;
@@ -4068,6 +4267,10 @@ typedef struct {
     uint64_t evq_n;
     uint64_t persist_cells;
     uint64_t atom_bytes;
+    uint64_t digital_out_operations;
+    uint64_t digital_out_state;
+    uint64_t digital_out_shadow;
+    uint64_t digital_out_level;
     tarm_t tarms[TARM_MAX];
     runtime_identity_t identity;
 } checkpoint_test_live_t;
@@ -4081,6 +4284,10 @@ static void checkpoint_test_snapshot(checkpoint_test_live_t *s)
     s->evq_n = g_evq_n;
     s->persist_cells = heap_cells_used(HEAP_MODE_PERSIST);
     s->atom_bytes = atom_store_bytes_used();
+    s->digital_out_operations = digital_out_operation_count();
+    s->digital_out_state = digital_out_state();
+    s->digital_out_shadow = digital_out_shadow();
+    s->digital_out_level = digital_out_gpio_level();
     for (int i = 0; i < TARM_MAX; i++)
         s->tarms[i] = g_tarms[i];
     s->identity = *runtime_identity_get();
@@ -4093,6 +4300,10 @@ static int checkpoint_test_unchanged(const checkpoint_test_live_t *s)
         || g_evq_n != s->evq_n
         || heap_cells_used(HEAP_MODE_PERSIST) != s->persist_cells
         || atom_store_bytes_used() != s->atom_bytes
+        || digital_out_operation_count() != s->digital_out_operations
+        || digital_out_state() != s->digital_out_state
+        || digital_out_shadow() != s->digital_out_shadow
+        || digital_out_gpio_level() != s->digital_out_level
         || !runtime_identity_equal(runtime_identity_get(), &s->identity))
         return 0;
     for (int i = 0; i < TARM_MAX; i++) {
@@ -4163,6 +4374,169 @@ static int checkpoint_test_reject(noun ckpt,
     heap_scratch_reset();
     return rejected && checkpoint_test_unchanged(live);
 }
+
+#ifdef M8_EVIDENCE
+static unsigned checkpoint_test_reject_m8(
+    noun ckpt, const checkpoint_test_live_t *live)
+{
+    checkpoint_view_t view = {0};
+    int rejected = 1;
+    if (checkpoint_validate(ckpt, &view)) {
+        rejected = checkpoint_install_m7_candidate(
+            &view.identity,
+            RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO,
+            M7_MODE_RUNNING, view.gate, view.queue, view.tarms,
+            NOUN_ZERO) != 0;
+        /* Shape/identity rejection occurs before the candidate opens its
+         * persistent transaction, so the caller still owns the decoded
+         * scratch transaction in that case. */
+        if (noun_tx_active())
+            noun_tx_abort();
+    } else {
+        g_checkpoint_last_result = COLD_RESULT_SHAPE;
+        if (noun_tx_active())
+            noun_tx_abort();
+    }
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return (rejected ? 1u : 0u)
+        | (checkpoint_test_unchanged(live) ? 2u : 0u);
+}
+
+static void checkpoint_test_note_m8(
+    uint64_t *failures, uint64_t bit, unsigned outcome)
+{
+    if (outcome != 3u)
+        *failures |= bit;
+    if ((outcome & 1u) == 0)
+        *failures |= bit << 16;
+    if ((outcome & 2u) == 0)
+        *failures |= bit << 32;
+}
+
+uint64_t kernel_m8_checkpoint_restore_selftest(void)
+{
+    if (!closed_process_io_authorized() || m7_mode() != M7_MODE_RUNNING
+        || !m8_checkpoint_quiescent())
+        return UINT64_MAX;
+
+    const runtime_identity_t *identity = runtime_identity_get();
+    uint64_t incarnation = 0;
+    if (!identity || !runtime_identity_validate_closed_process_io_gate(
+            g_kernel, identity, &incarnation))
+        return UINT64_MAX;
+
+    uint64_t failures = 0;
+    noun ckpt, pair;
+
+    /* A nonempty application FIFO is never normalized away. */
+    checkpoint_test_live_t attempt_live;
+    checkpoint_test_snapshot(&attempt_live);
+    if (!checkpoint_test_capture(&ckpt, &pair)) {
+        failures |= 1u;
+    } else {
+        noun tag = cord_from_bytes("i2-lifecycle", 12);
+        noun event, queue;
+        if (!alloc_cell_checked(tag, direct(0x646c6f63), &event)
+            || !alloc_cell_checked(event, NOUN_ZERO, &queue)) {
+            noun_tx_abort();
+            failures |= 1u;
+        } else {
+            ((cell_t *)(uintptr_t)cell_ptr(pair))->head = queue;
+            checkpoint_test_note_m8(
+                &failures, 1u,
+                checkpoint_test_reject_m8(ckpt, &attempt_live));
+        }
+    }
+
+    /* Every field of the one saved E_DELAY token is authoritative. */
+    for (unsigned which = 0; which < 4; which++) {
+        uint64_t bit = 1u << (which + 1u);
+        checkpoint_test_snapshot(&attempt_live);
+        if (!checkpoint_test_capture(&ckpt, &pair)) {
+            failures |= bit;
+            continue;
+        }
+        noun timers = ((cell_t *)(uintptr_t)cell_ptr(pair))->tail;
+        noun id, rest, timer_rest, period, remain, replacement, pending;
+        uint64_t generation, candidate_incarnation, owner, sequence;
+        if (!noun_is_cell(timers)
+            || !noun_take(((cell_t *)(uintptr_t)cell_ptr(timers))->head,
+                          &id, &rest)
+            || !noun_take(rest, &period, &timer_rest)
+            || !noun_take(timer_rest, &remain, &pending)
+            || !token_fields(pending, &generation, &candidate_incarnation,
+                              &owner, &sequence)) {
+            noun_tx_abort();
+            failures |= bit;
+            continue;
+        }
+        if (which == 0) generation++;
+        if (which == 1) candidate_incarnation++;
+        if (which == 2) owner++;
+        if (which == 3) sequence++;
+        if (!checkpoint_test_token(
+                generation, candidate_incarnation, owner, sequence,
+                &replacement)) {
+            noun_tx_abort();
+            failures |= bit;
+            continue;
+        }
+        ((cell_t *)(uintptr_t)cell_ptr(timer_rest))->tail = replacement;
+        checkpoint_test_note_m8(
+            &failures, bit,
+            checkpoint_test_reject_m8(ckpt, &attempt_live));
+        (void)id; (void)period; (void)remain; (void)pending;
+    }
+
+    /* RUNNING snapshots require both exact service initialized bits. */
+    for (unsigned which = 0; which < 2; which++) {
+        uint64_t bit = 1u << (which + 5u);
+        checkpoint_test_snapshot(&attempt_live);
+        if (!checkpoint_test_capture(&ckpt, &pair)) {
+            failures |= bit;
+            continue;
+        }
+        noun rest = ckpt, field, gate, lib, container;
+        int shaped = 1;
+        for (int i = 0; i < 4 && shaped; i++)
+            shaped = noun_take(rest, &field, &rest);
+        if (!shaped || !noun_take(rest, &gate, &rest)
+            || !m8_instance_lib(gate, which == 0 ? 4u : 7u,
+                                &lib, &container)
+            || !noun_is_cell(lib)) {
+            noun_tx_abort();
+            failures |= bit;
+            continue;
+        }
+        ((cell_t *)(uintptr_t)cell_ptr(lib))->head = NOUN_ZERO;
+        checkpoint_test_note_m8(
+            &failures, bit,
+            checkpoint_test_reject_m8(ckpt, &attempt_live));
+        (void)pair; (void)container;
+    }
+
+    /* Candidate allocation failure occurs before backend preparation and
+     * preserves the complete fixed-output safety latch and audit state. */
+    checkpoint_test_snapshot(&attempt_live);
+    if (!checkpoint_test_capture(&ckpt, &pair)) {
+        failures |= 1u << 7;
+    } else {
+        noun_test_copy_fail_after(0);
+        checkpoint_test_note_m8(
+            &failures, 1u << 7,
+            checkpoint_test_reject_m8(ckpt, &attempt_live));
+        if (g_checkpoint_last_result != COLD_RESULT_ALLOC)
+            failures |= 1u << 8;
+        noun_test_copy_fail_after(-1);
+    }
+
+    noun_test_copy_fail_after(-1);
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+    return failures;
+}
+#endif
 
 uint64_t checkpoint_m2_selftest(void)
 {
@@ -4386,7 +4760,9 @@ static int install_clean_pill(noun pill_gate)
         return -1;
     }
     uint64_t candidate_budget = SLAM_BUDGET_DEFAULT;
-    if (candidate_identity && !i2_gate_slam_budget(pill_gate, &candidate_budget)) {
+    uint64_t candidate_cells = 0;
+    if (candidate_identity && !i2_gate_slam_limits(
+            pill_gate, &candidate_budget, &candidate_cells)) {
         if (noun_tx_active()) noun_tx_abort();
         g_pill_candidate_i2 = 0;
         digital_out_force_safe();
@@ -4436,6 +4812,7 @@ static int install_clean_pill(noun pill_gate)
     g_kernel = candidate_gate;
     g_slam_formula = candidate_slam;
     g_slam_budget = candidate_budget;
+    g_slam_cell_budget = candidate_cells;
     g_shrine_mode = noun_pill_shape ? 1 : 0;
     g_evq = NOUN_ZERO;
     g_evq_tail = NOUN_ZERO;

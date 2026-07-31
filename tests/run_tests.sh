@@ -1329,6 +1329,9 @@ T "i2: queued preflight refusal retains FIFO head" "0000000000000000" \
 T "i2: execution limits require exact positive ten-field shape" "0000000000000000" \
     "I2LIMT ."
 
+T "i2: Nock cell limit exact edge and overflow" "0000000000000000" \
+    "I2CELLT ."
+
 T "m3: bounded novel atom characterization" "0000000000000000" \
     "RSTCLR 10 NOVM3 ."
 
