@@ -336,6 +336,7 @@ static uint64_t deployment_fault_matrix(void)
 {
     uint64_t failures = 0;
     uint64_t hash = 0;
+    int bit_flip_durability_unknown = 0;
     static const cold_media_fake_fault_t final_selection_faults[] = {
         /* A submitted partial write, barrier fault, or acknowledged but
          * corrupted sector must never become a false COMMITTED deployment. */
@@ -373,13 +374,15 @@ static uint64_t deployment_fault_matrix(void)
                 uint64_t selected = cold_selected_generation();
                 int old_pair = selected == old_generation && load_expected(42);
                 int new_pair = selected == old_generation + 2 && load_expected(44);
+                if (final_selection_faults[f] == COLD_MEDIA_FAKE_BIT_FLIP
+                    && result == COLD_DEPLOY_DURABILITY_UNKNOWN)
+                    bit_flip_durability_unknown = 1;
+                /* A successful-but-corrupt sector used to return COMMITTED
+                 * while remount selected the old pair.  A bit flip in an
+                 * unused portion of a read-modify-write sector may still
+                 * commit safely; every COMMITTED result must nevertheless
+                 * remount the exact new pair. */
                 if (!injected
-                    /* A successful-but-corrupt sector used to return
-                     * COMMITTED because only the RAM mirror was validated.
-                     * Post-barrier physical readback makes every such
-                     * boundary explicitly uncertain. */
-                    || (final_selection_faults[f] == COLD_MEDIA_FAKE_BIT_FLIP
-                        && result != COLD_DEPLOY_DURABILITY_UNKNOWN)
                     || (result == COLD_DEPLOY_REJECTED && !old_pair)
                     || (result == COLD_DEPLOY_COMMITTED && !new_pair)
                     || (result == COLD_DEPLOY_DURABILITY_UNKNOWN
@@ -392,6 +395,11 @@ static uint64_t deployment_fault_matrix(void)
             }
         }
     }
+    /* At least one selected-chain corruption/readback fault must prove the
+     * post-selection fence, in addition to the all-boundary old-or-new
+     * invariant above. */
+    if (!bit_flip_durability_unknown)
+        failures |= 1ULL << 5;
     return failures;
 }
 
