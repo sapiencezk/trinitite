@@ -1771,6 +1771,12 @@ defcode "JAM", 3, jam_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// JAMBYTES ( -- failures ) exact direct-view/legacy format parity probe.
+defcode "JAMBYTES", 8, jam_bytes_test_word, 0
+    bl      jam_encode_bytes_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // CUE ( atom -- noun )   deserialize atom back to noun via cue decoding
 defcode "CUE", 3, cue_word, 0
     ldr     x0, [DSP], #8

@@ -219,14 +219,104 @@ int jam_size_checked(noun n, uint64_t max_bytes, uint64_t *out_bytes)
     return *out_bytes <= max_bytes ? 0 : -1;
 }
 
-noun jam(noun n) {
+static uint64_t jam_encode(noun n) {
     jb_init(&g_jambuf);
     jcache_init();
     do_jam(n);
-    uint64_t bits  = g_jambuf.cur;
+    return g_jambuf.cur;
+}
+
+noun jam(noun n) {
+    uint64_t bits = jam_encode(n);
     uint64_t limbs = (bits + 63) / 64;
     if (limbs == 0) limbs = 1;
     return bn_normalize(g_jambuf.buf, limbs);
+}
+
+int jam_encode_bytes_checked(noun n, const uint8_t **out,
+                             uint64_t *out_bytes)
+{
+    uint64_t checked_bytes;
+    if (!out || !out_bytes)
+        return -1;
+    *out = 0;
+    *out_bytes = 0;
+    if (jam_size_checked(n, JAM_MAX_BYTES, &checked_bytes) != 0)
+        return -1;
+    uint64_t bits = jam_encode(n);
+    uint64_t bytes = (bits + 7) / 8;
+    if (bytes == 0)
+        bytes = 1;
+    if (bytes != checked_bytes || bytes > JAM_MAX_BYTES)
+        return -1;
+    *out = (const uint8_t *)(const void *)g_jambuf.buf;
+    *out_bytes = bytes;
+    return 0;
+}
+
+static int jam_byte_view_matches(noun n)
+{
+    uint8_t direct_bytes[8] = {0};
+    const uint8_t *legacy_bytes = direct_bytes;
+    uint64_t legacy_len = 0;
+    noun encoded = jam(n);
+    if (noun_is_direct(encoded)) {
+        uint64_t value = direct_val(encoded);
+        for (unsigned i = 0; i < sizeof direct_bytes; i++) {
+            direct_bytes[i] = (uint8_t)(value & 0xffu);
+            if (direct_bytes[i])
+                legacy_len = (uint64_t)i + 1u;
+            value >>= 8;
+        }
+        if (legacy_len == 0)
+            legacy_len = 1;
+    } else if (noun_is_indirect(encoded)) {
+        atom_t *atom = atom_store_get(indirect_hash(encoded));
+        if (!atom)
+            return 0;
+        legacy_bytes = (const uint8_t *)atom->limbs;
+        legacy_len = atom->size * sizeof(uint64_t);
+        while (legacy_len > 1 && legacy_bytes[legacy_len - 1] == 0)
+            legacy_len--;
+    } else {
+        return 0;
+    }
+
+    const uint8_t *view;
+    uint64_t view_len;
+    if (jam_encode_bytes_checked(n, &view, &view_len) != 0
+        || view_len != legacy_len)
+        return 0;
+    for (uint64_t i = 0; i < view_len; i++)
+        if (view[i] != legacy_bytes[i])
+            return 0;
+    return 1;
+}
+
+uint64_t jam_encode_bytes_selftest(void)
+{
+    uint64_t failures = 0;
+    noun atom63 = direct(0x4000000000000000ULL);
+    uint64_t limb64[1] = {0x8000000000000000ULL};
+    uint64_t limb65[2] = {0, 1};
+    noun atom64, atom65, shared, nested, near;
+    if (!make_atom_checked(limb64, 1, &atom64)
+        || !make_atom_checked(limb65, 2, &atom65)
+        || !alloc_cell_checked(atom64, atom65, &shared)
+        || !alloc_cell_checked(shared, shared, &nested))
+        return 1;
+    noun cases[] = {NOUN_ZERO, direct(1), atom63, atom64, atom65, nested};
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++)
+        if (!jam_byte_view_matches(cases[i]))
+            failures++;
+
+    const uint64_t near_limbs = JAM_MAX_BYTES / sizeof(uint64_t) - 512u;
+    for (uint64_t i = 0; i < near_limbs; i++)
+        g_jambuf.buf[i] = 0x8000000000000000ULL ^ (i * 0x9e3779b97f4a7c15ULL);
+    if (!make_atom_checked(g_jambuf.buf, near_limbs, &near)
+        || !jam_byte_view_matches(near))
+        failures++;
+    return failures;
 }
 
 /* ── cue: atom → noun ─────────────────────────────────────────────────────── */

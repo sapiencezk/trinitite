@@ -421,41 +421,7 @@ int cold_init(void)
 
 static int jam_bytes(noun n, const uint8_t **out, uint64_t *out_len)
 {
-    uint64_t checked_len;
-    if (jam_size_checked(n, JAM_MAX_BYTES, &checked_len) != 0)
-        return -1;
-    noun a = jam(n);
-    if (noun_is_direct(a)) {
-        uint64_t v = direct_val(a);
-        uint64_t nbytes = 0;
-        for (int i = 0; i < 8; i++) {
-            jam_scratch[i] = (uint8_t)(v & 0xff);
-            if (jam_scratch[i])
-                nbytes = (uint64_t)i + 1;
-            v >>= 8;
-        }
-        if (nbytes == 0)
-            nbytes = 1;
-        *out = jam_scratch;
-        *out_len = nbytes;
-        return 0;
-    }
-    if (!noun_is_indirect(a))
-        return -1;
-    atom_t *at = atom_store_get(indirect_hash(a));
-    if (!at)
-        return -1;
-    uint64_t nbytes = at->size * 8;
-    const uint8_t *bytes = (const uint8_t *)at->limbs;
-    while (nbytes > 1 && bytes[nbytes - 1] == 0)
-        nbytes--;
-    if (nbytes > JAM_SCRATCH_MAX || nbytes > checked_len)
-        return -1;
-    for (uint64_t i = 0; i < nbytes; i++)
-        jam_scratch[i] = bytes[i];
-    *out = jam_scratch;
-    *out_len = nbytes;
-    return 0;
+    return jam_encode_bytes_checked(n, out, out_len);
 }
 
 static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,

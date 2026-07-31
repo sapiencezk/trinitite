@@ -21,6 +21,12 @@
 noun jam(noun n);   /* noun  → serialized atom              */
 noun cue(noun a);   /* atom  → deserialized noun            */
 
+/* Checked view of the fixed jam writer. The returned bytes remain valid
+ * until the next jam operation and never enter the persistent atom store. */
+int jam_encode_bytes_checked(noun n, const uint8_t **out,
+                             uint64_t *out_bytes);
+uint64_t jam_encode_bytes_selftest(void);
+
 /* The target jam writer has a fixed 128 KiB output buffer.  This checked
  * preflight uses the same cache and encoding choices as jam(), but performs
  * no writes and therefore fails closed before the writer can overflow. */

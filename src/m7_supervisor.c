@@ -1289,7 +1289,7 @@ int m7_checkpoint_save(void)
     /* Capture the full-root copy/snapshot peak before the scratch abort. */
     runtime_stats_note_memory();
     int result = cold_snap_save(snapshot);
-    /* jam_bytes() may add a transaction-local atom; sample before rollback. */
+    /* Account for the completed bounded jam phase before scratch rollback. */
     runtime_stats_note_memory();
     noun_tx_abort();
     heap_set_mode(HEAP_MODE_PERSIST);

@@ -554,6 +554,7 @@ TD "jam: atom 2"            "72"   "2 N>N JAM N."
 TD "jam: atom 42"           "5456" "42 N>N JAM N."
 TD "jam: [0 0]"             "41"   "0 N>N 0 N>N CONS JAM N."
 TD "jam: [1 2]"             "4657" "1 N>N 2 N>N CONS JAM N."
+T "jam: checked byte view parity" "0000000000000000" "JAMBYTES ."
 
 # cue: decode jam output back to original noun
 T "cue: 2 -> 0"             "0000000000000000" "2 N>N CUE NOUN> ."
