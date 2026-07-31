@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "m7_supervisor.h"
 #include "runtime_identity.h"
+#include "runtime_stats.h"
 #include "bounded_cue.h"
 #include "blake3.h"
 #include "cold.h"
@@ -1285,6 +1286,8 @@ int m7_checkpoint_save(void)
         heap_scratch_reset();
         return -1;
     }
+    /* Capture the full-root copy/snapshot peak before the scratch abort. */
+    runtime_stats_note_memory();
     int result = cold_snap_save(snapshot);
     noun_tx_abort();
     heap_set_mode(HEAP_MODE_PERSIST);

@@ -66,6 +66,7 @@ static const char *const g_counter_name[RT_COUNT_COUNT] = {
     "timer_active_hwm",
     "service_active_hwm",
     "copy_map_entries_hwm",
+    "atom_index_hwm",
 };
 
 static const char *const g_phase_name[RT_PHASE_COUNT] = {
@@ -165,6 +166,7 @@ void runtime_stats_reset(void)
     g_stats.counter[RT_COUNT_ATOM_BYTES_HWM] = atoms;
     g_stats.counter[RT_COUNT_ATOM_INDEX_OCCUPANCY] = index;
     g_stats.counter[RT_COUNT_ATOM_INDEX_START] = index;
+    g_stats.counter[RT_COUNT_ATOM_INDEX_HWM] = index;
     noun_copy_map_hwm_reset();
     if (g_boot_load_pending) {
         histogram_add(
@@ -226,8 +228,9 @@ void runtime_stats_note_memory(void)
     runtime_stats_max(RT_COUNT_SCRATCH_CELLS_HWM, scratch);
     runtime_stats_set(RT_COUNT_ATOM_BYTES_CURRENT, atoms);
     runtime_stats_max(RT_COUNT_ATOM_BYTES_HWM, atoms);
-    runtime_stats_set(
-        RT_COUNT_ATOM_INDEX_OCCUPANCY, atom_store_index_occupancy());
+    uint64_t index = atom_store_index_occupancy();
+    runtime_stats_set(RT_COUNT_ATOM_INDEX_OCCUPANCY, index);
+    runtime_stats_max(RT_COUNT_ATOM_INDEX_HWM, index);
     runtime_stats_max(RT_COUNT_ATOM_PROBE_HWM, atom_store_probe_hwm());
     runtime_stats_max(RT_COUNT_COPY_MAP_ENTRIES_HWM, noun_copy_map_hwm());
 }
