@@ -2,7 +2,11 @@
 *.xcf
 *.elf
 *.img
-.build-config-*
+kernel8.elf.tmp.*
+kernel8.img.tmp.*
+.build/
+.trinitite-build.lock
+__pycache__/
 .DS_Store
 *.pill
 *.bin

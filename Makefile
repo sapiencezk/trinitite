@@ -56,35 +56,45 @@ else
 $(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake))
 endif
 
-OBJS    = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_ingress.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
-CONFIG_STAMP = .build-config-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)
+OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_ingress.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
+CONFIG_KEY = $(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)
+BUILD_DIR = .build/$(CONFIG_KEY)
+OBJDIR = $(BUILD_DIR)/obj
+OBJS = $(addprefix $(OBJDIR)/,$(OBJ_NAMES))
+CONFIG_ELF = $(BUILD_DIR)/$(TARGET).elf
+CONFIG_IMG = $(BUILD_DIR)/$(TARGET).img
 
-all: $(TARGET).img
+all:
+	python3 tools/with_build_lock.py $(MAKE) locked-all
 
-# Object names are shared across the fixed backend/evidence configurations.
-# Retain exactly one configuration stamp so changing any selector invalidates
-# every common object, including sources whose behavior changes only via a
-# preprocessor definition.
-$(CONFIG_STAMP):
-	rm -f .build-config-* *.o *.elf *.img
-	touch $@
+$(TARGET).elf:
+	python3 tools/with_build_lock.py $(MAKE) locked-elf
 
-$(OBJS): $(CONFIG_STAMP)
+$(TARGET).img:
+	python3 tools/with_build_lock.py $(MAKE) locked-all
 
-%.o: %.s
+locked-all: publish-img
+
+locked-elf: publish-elf
+
+$(OBJDIR):
+	mkdir -p $@
+
+$(BUILD_DIR):
+	mkdir -p $@
+
+$(OBJDIR)/%.o: $(SRCDIR)/%.s | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # M3 fake-media test words are compiled only into the explicit fake build.
-forth.o: $(SRCDIR)/forth.s
+$(OBJDIR)/forth.o: $(SRCDIR)/forth.s | $(OBJDIR)
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c $< -o $@
 
-%.o: %.c
+$(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# The backend macro changes cold_media.c without changing its source mtime.
-cold_media.o: FORCE
-
-$(TARGET).elf: $(OBJS)
+# Configuration-specific directories prevent preprocessor/backend object reuse.
+$(CONFIG_ELF): $(OBJS) | $(BUILD_DIR)
 	$(LD) $(LDFLAGS) -o $@ $^
 
 # Create an empty stub pill if none exists (so the build doesn't fail).
@@ -93,13 +103,23 @@ pill.bin:
 	@echo "No pill.bin found; creating empty stub (KERNEL will return no-pill)"
 	python3 -c "import struct; open('pill.bin','wb').write(struct.pack('<Q',0)+bytes(8))"
 
-pill_embed.o: src/pill_embed.s pill.bin
+$(OBJDIR)/pill_embed.o: src/pill_embed.s pill.bin | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(TARGET).img: $(TARGET).elf
+$(CONFIG_IMG): $(CONFIG_ELF)
 	$(OBJCOPY) -O binary $< $@
 
-run: $(TARGET).img
+# Preserve the historical top-level paths as atomically published aliases.
+# The build lock serializes distinct configurations in one worktree.
+publish-elf: $(CONFIG_ELF) FORCE
+	cp $(CONFIG_ELF) $(TARGET).elf.tmp.$(CONFIG_KEY)
+	mv $(TARGET).elf.tmp.$(CONFIG_KEY) $(TARGET).elf
+
+publish-img: $(CONFIG_IMG) publish-elf FORCE
+	cp $(CONFIG_IMG) $(TARGET).img.tmp.$(CONFIG_KEY)
+	mv $(TARGET).img.tmp.$(CONFIG_KEY) $(TARGET).img
+
+run: all
 	qemu-system-aarch64 \
 	  -machine raspi4b \
 	  -m 2G \
@@ -112,7 +132,7 @@ run: $(TARGET).img
 # The shape byte in the pill selects Arvo or Shrine mode automatically.
 # With no pill: falls back to interactive REPL.
 PILL ?= pill.bin
-run-pill: $(TARGET).img
+run-pill: all
 	qemu-system-aarch64 \
 	  -machine raspi4b \
 	  -m 2G \
@@ -123,7 +143,7 @@ run-pill: $(TARGET).img
 
 run-kernel: run-pill
 
-debug: $(TARGET).img
+debug: all
 	qemu-system-aarch64 \
 	  -machine raspi4b \
 	  -m 2G \
@@ -138,7 +158,7 @@ debug: $(TARGET).img
 	  -ex "continue"
 
 TFTP_ROOT ?= /private/tftpboot
-deploy: $(TARGET).img
+deploy: all
 	cp $(TARGET).img $(TFTP_ROOT)/
 	@echo "Deployed. Reset the Pi."
 
@@ -146,6 +166,18 @@ test:
 	$(MAKE) clean
 	$(MAKE) M8_EVIDENCE=1 all
 	./tests/run_tests.sh
+	$(MAKE) test-build-config
+
+test-build-config:
+	$(MAKE) clean
+	$(MAKE) -j8 COLD_MEDIA=ram DIGITAL_IN_BACKEND=bcm2838 \
+		DIGITAL_OUT_BACKEND=bcm2838 M8_EVIDENCE=0 all
+	$(MAKE) -j8 COLD_MEDIA=fake DIGITAL_IN_BACKEND=fake \
+		DIGITAL_OUT_BACKEND=bcm2838 M8_EVIDENCE=1 all
+	test -s .build/ram-bcm2838-bcm2838-0/kernel8.img
+	test -s .build/fake-fake-bcm2838-1/kernel8.img
+	test -s kernel8.elf
+	test -s kernel8.img
 
 test-media-fake:
 	$(MAKE) clean
@@ -173,8 +205,12 @@ test-digital-in-production-source:
 	python3 tests/digital_in_bcm_source.py
 
 clean:
-	rm -f *.o *.elf *.img .build-config-*
+	python3 tools/with_build_lock.py $(MAKE) locked-clean
+locked-clean:
+	rm -f *.o *.elf *.img $(TARGET).elf.tmp.* $(TARGET).img.tmp.*
+	rm -rf .build
 FORCE:
-.PHONY: all run run-pill run-kernel debug deploy test test-media-fake \
+.PHONY: all $(TARGET).elf $(TARGET).img locked-all locked-elf publish-elf publish-img \
+	run run-pill run-kernel debug deploy test test-media-fake \
 	test-media-rpi4-build test-digital-out-fake test-digital-in-fake \
-	test-digital-in-production-source clean FORCE
+	test-digital-in-production-source test-build-config clean locked-clean FORCE
