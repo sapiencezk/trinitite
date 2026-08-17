@@ -15,4 +15,5 @@ void i2_operator_set_recovery(unsigned selected);
 unsigned i2_operator_recovery(void);
 uint64_t i2_operator_selftest(void);
 uint64_t i2_operator_query_storm(uint64_t count);
+uint64_t i2_operator_scheduler_ticks(void);
 void i2_operator_boot(void);

@@ -28,6 +28,7 @@ static size_t cstr_len(const char *s)
 #include "m7_supervisor.h"
 #include "runtime_identity.h"
 #include "uart.h"
+#include "cold.h"
 
 #define OP_STATUS 1
 #define OP_START 2
@@ -70,6 +71,9 @@ static struct {
     uint64_t lease_deadline;
     uint64_t busy_drops;
     uint64_t now_override;
+    uint64_t scheduler_ticks;
+    uint8_t pending[FRAME_MAX];
+    uint64_t pending_len;
 } g_op;
 
 static uint64_t counter_now(void)
@@ -231,6 +235,23 @@ static int queue_frame(const uint8_t *frame, uint64_t len)
     return 1;
 }
 
+static int tx_in_progress(void)
+{
+    return g_op.tx_len != 0 && g_op.tx_off < g_op.tx_len;
+}
+
+static int enqueue_or_send(const uint8_t *frame, uint64_t len)
+{
+    if (!frame || len == 0 || len > FRAME_MAX)
+        return 0;
+    if (tx_in_progress()) {
+        memcpy(g_op.pending, frame, (size_t)len);
+        g_op.pending_len = len;
+        return 1;
+    }
+    return queue_frame(frame, len);
+}
+
 static int finish(uint64_t request_id, const uint8_t content[32],
                   noun result, noun body)
 {
@@ -252,7 +273,7 @@ static int finish(uint64_t request_id, const uint8_t content[32],
     g_op.last_frame_len = frame_len;
     g_op.last_id = request_id;
     memcpy(g_op.last_content, content, 32);
-    return queue_frame(g_op.last_frame, frame_len);
+    return enqueue_or_send(g_op.last_frame, frame_len);
 }
 
 static noun reject_body(const char *reason)
@@ -334,6 +355,11 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
         if (m7_checkpoint_save() != 0) {
             *result = cord_from_bytes("failed", 6);
             *body = fail_body("snapshot", 1);
+            return 1;
+        }
+        if (cold_nv_enabled() && cold_nv_flush() != 0) {
+            *result = cord_from_bytes("failed", 6);
+            *body = fail_body("snapshot", 2);
             return 1;
         }
         return 1;
@@ -459,21 +485,36 @@ int i2_operator_handle(noun request)
     if (g_op.last_id == request_id
         && bytes_eq(g_op.last_content, content, 32)
         && g_op.last_frame_len) {
-        if (g_op.tx_len)
+        if (tx_in_progress())
             return 1;
-        return queue_frame(g_op.last_frame, g_op.last_frame_len);
+        return enqueue_or_send(g_op.last_frame, g_op.last_frame_len);
     }
     if (g_op.last_id == request_id
         && !bytes_eq(g_op.last_content, content, 32)) {
         return finish(request_id, content,
                       cord_from_bytes("rejected", 8), reject_body("conflict"));
     }
-    if (g_op.active || g_op.tx_len) {
+    if (g_op.active || tx_in_progress()) {
+        uint8_t busy_frame[FRAME_MAX];
+        uint64_t busy_len = 0;
+        noun busy = reject_body("busy");
+        noun result = cord_from_bytes("rejected", 8);
+        noun cmd = pair(result, busy);
+        noun rest = pair(direct(request_id), cmd);
+        noun ver = pair(direct(1), rest);
+        noun noun_out = pair(cord_from_bytes("i2-operator", 11), ver);
+        const uint8_t *jammed = 0;
+        uint64_t jam_len = 0;
+        uint8_t payload[I2_OPERATOR_MAX_PAYLOAD];
         g_op.busy_drops++;
-        if (g_op.tx_len)
+        if (!noun_is_cell(noun_out)
+            || jam_encode_bytes_checked(noun_out, &jammed, &jam_len) != 0
+            || jam_len == 0 || jam_len > I2_OPERATOR_MAX_PAYLOAD)
             return 0;
-        return finish(request_id, content,
-                      cord_from_bytes("rejected", 8), reject_body("busy"));
+        memcpy(payload, jammed, (size_t)jam_len);
+        if (!i2_frame_encode(payload, jam_len, busy_frame, FRAME_MAX, &busy_len))
+            return 0;
+        return enqueue_or_send(busy_frame, busy_len);
     }
     int op = op_code(op_n);
     if (!op)
@@ -488,6 +529,7 @@ int i2_operator_handle(noun request)
 void i2_operator_poll(void)
 {
     expire_lease();
+    g_op.scheduler_ticks++;
     while (g_op.tx_off < g_op.tx_len) {
         if (!uart_putc_nb(g_op.tx[g_op.tx_off]))
             break;
@@ -497,7 +539,16 @@ void i2_operator_poll(void)
         g_op.tx_len = 0;
         g_op.tx_off = 0;
         g_op.active = 0;
+        if (g_op.pending_len) {
+            (void)queue_frame(g_op.pending, g_op.pending_len);
+            g_op.pending_len = 0;
+        }
     }
+}
+
+uint64_t i2_operator_scheduler_ticks(void)
+{
+    return g_op.scheduler_ticks;
 }
 
 static noun test_request(uint64_t id, const char *op)
@@ -523,21 +574,56 @@ uint64_t i2_operator_selftest(void)
     if (!i2_operator_handle(req) || g_op.last_frame_len != first_len)
         failures++;
     noun conflict = test_request(1, "start");
-    if (!i2_operator_handle(conflict))
+    if (!i2_operator_handle(conflict) || g_op.last_id != 1)
+        failures++;
+    uint64_t conflict_len = g_op.last_frame_len;
+    if (!i2_operator_handle(conflict) || g_op.last_frame_len != conflict_len)
         failures++;
     uart_test_tx_stuck(1);
     i2_operator_init();
     req = test_request(3, "status");
     if (!i2_operator_handle(req))
         failures++;
-    uint64_t before = g_op.tx_off;
+    uint64_t ticks0 = g_op.scheduler_ticks;
     i2_operator_poll();
-    if (g_op.tx_off != before)
+    if (g_op.tx_off != 0)
+        failures++;
+    noun busy_req = test_request(4, "status");
+    if (!i2_operator_handle(busy_req) || g_op.pending_len == 0)
+        failures++;
+    if (g_op.tx_off != 0 || g_op.last_id != 3)
+        failures++;
+    noun busy2 = test_request(5, "status");
+    if (!i2_operator_handle(busy2) || g_op.pending_len == 0)
+        failures++;
+    if (g_op.tx_off != 0 || g_op.last_id != 3)
+        failures++;
+    i2_operator_poll();
+    i2_operator_poll();
+    if (g_op.scheduler_ticks <= ticks0 || g_op.tx_off != 0)
         failures++;
     uart_test_tx_stuck(0);
-    i2_operator_poll();
-    if (g_op.tx_len != 0)
+    for (int i = 0; i < 16; i++)
+        i2_operator_poll();
+    if (g_op.tx_len != 0 || g_op.pending_len != 0)
         failures++;
+    if (m7_ready()) {
+        uint8_t zeros[32] = {0};
+        if (m7_deploy_begin(1, 16, digest_atom(zeros)) == 0) {
+            uart_test_tx_stuck(1);
+            noun held = test_request(8, "status");
+            if (!i2_operator_handle(held))
+                failures++;
+            g_op.lease_deadline = 1;
+            g_op.now_override = 2;
+            i2_operator_poll();
+            if (g_op.install_condition != INST_LEASE || m7_stage_open())
+                failures++;
+            uart_test_tx_stuck(0);
+            for (int i = 0; i < 16; i++)
+                i2_operator_poll();
+        }
+    }
     return failures;
 }
 
@@ -562,6 +648,7 @@ uint64_t i2_operator_query_storm(uint64_t count)
 void i2_operator_boot(void)
 {
     i2_operator_init();
+    cold_nv_arm();
     boot_policy_set(BOOT_SNAP_ELSE_PILL);
     (void)kernel_boot(kernel_pill_load());
 }
