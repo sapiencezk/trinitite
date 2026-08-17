@@ -94,3 +94,8 @@ void uart_test_tx_stuck(int stuck)
 {
     g_test_tx_stuck = stuck ? 1 : 0;
 }
+
+int uart_test_tx_is_stuck(void)
+{
+    return g_test_tx_stuck;
+}

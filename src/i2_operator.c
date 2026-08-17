@@ -74,6 +74,7 @@ static struct {
     uint64_t scheduler_ticks;
     uint8_t pending[FRAME_MAX];
     uint64_t pending_len;
+    int mute_tx;
 } g_op;
 
 static uint64_t counter_now(void)
@@ -245,6 +246,8 @@ static int enqueue_or_send(const uint8_t *frame, uint64_t len)
     if (!frame || len == 0 || len > FRAME_MAX)
         return 0;
     if (tx_in_progress()) {
+        if (g_op.pending_len)
+            return 1;
         memcpy(g_op.pending, frame, (size_t)len);
         g_op.pending_len = len;
         return 1;
@@ -252,8 +255,8 @@ static int enqueue_or_send(const uint8_t *frame, uint64_t len)
     return queue_frame(frame, len);
 }
 
-static int finish(uint64_t request_id, const uint8_t content[32],
-                  noun result, noun body)
+static int encode_result_frame(uint64_t request_id, noun result, noun body,
+                               uint8_t *out, uint64_t *out_len)
 {
     noun cmd = pair(result, body);
     noun rest = pair(direct(request_id), cmd);
@@ -262,18 +265,33 @@ static int finish(uint64_t request_id, const uint8_t content[32],
     const uint8_t *jammed = 0;
     uint64_t jam_len = 0;
     uint8_t payload[I2_OPERATOR_MAX_PAYLOAD];
-    uint64_t frame_len = 0;
-    if (!noun_is_cell(noun_out)
+    if (!out || !out_len || !noun_is_cell(noun_out)
         || jam_encode_bytes_checked(noun_out, &jammed, &jam_len) != 0
         || jam_len == 0 || jam_len > I2_OPERATOR_MAX_PAYLOAD)
         return 0;
     memcpy(payload, jammed, (size_t)jam_len);
-    if (!i2_frame_encode(payload, jam_len, g_op.last_frame, FRAME_MAX, &frame_len))
+    return i2_frame_encode(payload, jam_len, out, FRAME_MAX, out_len);
+}
+
+static int finish(uint64_t request_id, const uint8_t content[32],
+                  noun result, noun body)
+{
+    uint64_t frame_len = 0;
+    if (!encode_result_frame(request_id, result, body, g_op.last_frame, &frame_len))
         return 0;
     g_op.last_frame_len = frame_len;
     g_op.last_id = request_id;
     memcpy(g_op.last_content, content, 32);
     return enqueue_or_send(g_op.last_frame, frame_len);
+}
+
+static int send_uncached(uint64_t request_id, noun result, noun body)
+{
+    uint8_t frame[FRAME_MAX];
+    uint64_t frame_len = 0;
+    if (!encode_result_frame(request_id, result, body, frame, &frame_len))
+        return 0;
+    return enqueue_or_send(frame, frame_len);
 }
 
 static noun reject_body(const char *reason)
@@ -368,6 +386,13 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
         noun stage_n, rest, total_n, digest_n;
         uint64_t stage_id, total;
         uint8_t digest[32];
+        uint64_t mode = m7_mode();
+        if ((mode != M7_MODE_IDLE && mode != M7_MODE_STOPPED)
+            || !outputs_inhibited()) {
+            *result = cord_from_bytes("rejected", 8);
+            *body = reject_body("state");
+            return 1;
+        }
         if (!take(payload, &stage_n, &rest) || !take(rest, &total_n, &digest_n)
             || !direct_u64(stage_n, &stage_id) || !direct_u64(total_n, &total)
             || !noun_atom_read_fixed(digest_n, digest, 32) || stage_id == 0
@@ -491,30 +516,15 @@ int i2_operator_handle(noun request)
     }
     if (g_op.last_id == request_id
         && !bytes_eq(g_op.last_content, content, 32)) {
-        return finish(request_id, content,
-                      cord_from_bytes("rejected", 8), reject_body("conflict"));
+        return send_uncached(request_id,
+                             cord_from_bytes("rejected", 8),
+                             reject_body("conflict"));
     }
     if (g_op.active || tx_in_progress()) {
-        uint8_t busy_frame[FRAME_MAX];
-        uint64_t busy_len = 0;
-        noun busy = reject_body("busy");
-        noun result = cord_from_bytes("rejected", 8);
-        noun cmd = pair(result, busy);
-        noun rest = pair(direct(request_id), cmd);
-        noun ver = pair(direct(1), rest);
-        noun noun_out = pair(cord_from_bytes("i2-operator", 11), ver);
-        const uint8_t *jammed = 0;
-        uint64_t jam_len = 0;
-        uint8_t payload[I2_OPERATOR_MAX_PAYLOAD];
         g_op.busy_drops++;
-        if (!noun_is_cell(noun_out)
-            || jam_encode_bytes_checked(noun_out, &jammed, &jam_len) != 0
-            || jam_len == 0 || jam_len > I2_OPERATOR_MAX_PAYLOAD)
-            return 0;
-        memcpy(payload, jammed, (size_t)jam_len);
-        if (!i2_frame_encode(payload, jam_len, busy_frame, FRAME_MAX, &busy_len))
-            return 0;
-        return enqueue_or_send(busy_frame, busy_len);
+        return send_uncached(request_id,
+                             cord_from_bytes("rejected", 8),
+                             reject_body("busy"));
     }
     int op = op_code(op_n);
     if (!op)
@@ -531,6 +541,12 @@ void i2_operator_poll(void)
     expire_lease();
     g_op.scheduler_ticks++;
     while (g_op.tx_off < g_op.tx_len) {
+        if (g_op.mute_tx) {
+            if (uart_test_tx_is_stuck())
+                break;
+            g_op.tx_off = g_op.tx_len;
+            break;
+        }
         if (!uart_putc_nb(g_op.tx[g_op.tx_off]))
             break;
         g_op.tx_off++;
@@ -563,6 +579,7 @@ uint64_t i2_operator_selftest(void)
 {
     uint64_t failures = 0;
     i2_operator_init();
+    g_op.mute_tx = 1;
     noun req = test_request(1, "status");
     if (!i2_operator_is_noun(req))
         failures++;
@@ -576,11 +593,13 @@ uint64_t i2_operator_selftest(void)
     noun conflict = test_request(1, "start");
     if (!i2_operator_handle(conflict) || g_op.last_id != 1)
         failures++;
-    uint64_t conflict_len = g_op.last_frame_len;
-    if (!i2_operator_handle(conflict) || g_op.last_frame_len != conflict_len)
+    if (g_op.last_frame_len != first_len)
+        failures++;
+    if (!i2_operator_handle(req) || g_op.last_frame_len != first_len)
         failures++;
     uart_test_tx_stuck(1);
     i2_operator_init();
+    g_op.mute_tx = 1;
     req = test_request(3, "status");
     if (!i2_operator_handle(req))
         failures++;
@@ -593,8 +612,9 @@ uint64_t i2_operator_selftest(void)
         failures++;
     if (g_op.tx_off != 0 || g_op.last_id != 3)
         failures++;
+    uint64_t pending0 = g_op.pending_len;
     noun busy2 = test_request(5, "status");
-    if (!i2_operator_handle(busy2) || g_op.pending_len == 0)
+    if (!i2_operator_handle(busy2) || g_op.pending_len != pending0)
         failures++;
     if (g_op.tx_off != 0 || g_op.last_id != 3)
         failures++;
@@ -623,7 +643,13 @@ uint64_t i2_operator_selftest(void)
             for (int i = 0; i < 16; i++)
                 i2_operator_poll();
         }
+        (void)m7_deploy_abort();
     }
+    uart_test_tx_stuck(0);
+    g_op.tx_len = 0;
+    g_op.tx_off = 0;
+    g_op.pending_len = 0;
+    g_op.active = 0;
     return failures;
 }
 
