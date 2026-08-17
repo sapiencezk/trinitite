@@ -650,6 +650,8 @@ uint64_t i2_operator_selftest(void)
                 i2_operator_poll();
         }
         (void)m7_deploy_abort();
+        if (m7_stage_id() || m7_stage_total())
+            failures++;
     }
     uart_test_tx_stuck(0);
     g_op.tx_len = 0;

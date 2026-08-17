@@ -1243,6 +1243,10 @@ int m7_deploy_abort(void)
     g_m7.stage_sealed = 0;
     g_m7.stage_received = 0;
     g_m7.stage_chunks = 0;
+    g_m7.stage_id = 0;
+    g_m7.stage_total = 0;
+    for (size_t i = 0; i < sizeof(g_m7.stage_digest); i++)
+        g_m7.stage_digest[i] = 0;
     return 0;
 }
 
