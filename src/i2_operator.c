@@ -474,6 +474,12 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
         return 1;
     }
     if (op == OP_ICANCEL) {
+        if (g_op.install_condition != INST_STAGING
+            && g_op.install_condition != INST_SEALED) {
+            *result = cord_from_bytes("rejected", 8);
+            *body = reject_body("state");
+            return 1;
+        }
         (void)m7_deploy_abort();
         g_op.install_condition = INST_CANCELLED;
         g_op.lease_deadline = 0;
