@@ -1613,6 +1613,59 @@ uint64_t kernel_m8_input_failure_safe_selftest(void)
     (void)digital_out_prepare_clean_pill();
     return failures;
 }
+
+/* Exercise the live selector-3 Nock path at every controller state and every
+ * raw five-bit input bank.  This is target execution coverage, not a claim
+ * about external timing or physical input behavior. */
+uint64_t kernel_m8_state_matrix_selftest(void)
+{
+#ifndef DIGITAL_IN_FAKE
+    return UINT64_MAX;
+#else
+    if (!closed_process_io_authorized() || m7_mode() != M7_MODE_RUNNING)
+        return UINT64_MAX;
+    uint64_t failures = 0;
+    for (uint64_t state = 0; state < 8; state++) {
+        noun states, sample, zero, live_state, tag, rest, header, program, dynamic;
+        if (!noun_take(g_kernel, &sample, &rest)
+            || !noun_take(rest, &zero, &live_state)
+            || !noun_take(live_state, &tag, &rest)
+            || !noun_take(rest, &header, &rest)
+            || !noun_take(rest, &program, &dynamic)
+            || !noun_take(dynamic, &states, &rest)) {
+            return UINT64_MAX;
+        }
+        (void)sample; (void)zero; (void)tag; (void)header;
+        int found = 0;
+        while (noun_is_cell(states)) {
+            cell_t *entry_cell = (cell_t *)(uintptr_t)cell_ptr(states);
+            noun entry = entry_cell->head, id, instance, kind, body;
+            if (!noun_take(entry, &id, &instance)
+                || !noun_take(instance, &kind, &body)
+                || !noun_is_cell(body))
+                return UINT64_MAX;
+            if (noun_is_direct(id) && direct_val(id) == 6u) {
+                ((cell_t *)(uintptr_t)cell_ptr(body))->head = direct(state);
+                found = 1;
+                break;
+            }
+            states = entry_cell->tail;
+        }
+        if (!found) return UINT64_MAX;
+        for (uint64_t raw = 0; raw < 32; raw++) {
+            if (!digital_in_test_set_logical_bank((uint32_t)raw))
+                return UINT64_MAX;
+            tarm_force_due(3u);
+            if (kernel_run_bounded(9) != 0
+                || m7_mode() != M7_MODE_RUNNING
+                || (digital_out_state() & (1u << 3)) != 0)
+                failures++;
+        }
+    }
+    (void)digital_out_force_safe();
+    return failures;
+#endif
+}
 #endif
 
 static int test_completion(noun token, uint64_t status_code, noun *out)
@@ -3006,6 +3059,26 @@ uint64_t kernel_m8_profile_admission_selftest(void)
         noun_tx_abort();
         return UINT64_MAX;
     }
+    /* The executable anchor rejects an independently replaced specialized
+     * formula even when the program and every state-header atom remain. */
+    if (!noun_is_cell(dynamic)) {
+        failures |= 8u;
+    } else {
+        cell_t *dynamic_cell = (cell_t *)(uintptr_t)cell_ptr(dynamic);
+        noun saved_formula = dynamic_cell->tail;
+        dynamic_cell->tail = NOUN_ZERO;
+        if (runtime_identity_validate_closed_process_io_gate(gate, live, 0))
+            failures |= 8u;
+        dynamic_cell->tail = saved_formula;
+    }
+    /* The outer battery noun is independently covered; its header hash is
+     * deliberately left untouched so this probes actual-noun recomputation. */
+    cell_t *gate_cell = (cell_t *)(uintptr_t)cell_ptr(gate);
+    noun saved_battery = gate_cell->head;
+    gate_cell->head = NOUN_ZERO;
+    if (runtime_identity_validate_closed_process_io_gate(gate, live, 0))
+        failures |= 16u;
+    gate_cell->head = saved_battery;
     ((cell_t *)(uintptr_t)cell_ptr(state_tail))->head = NOUN_ZERO;
     if (runtime_identity_validate_closed_process_io_gate(
             gate, live, 0))

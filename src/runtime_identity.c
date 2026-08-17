@@ -43,7 +43,9 @@ static const uint8_t g_closed_process_io_program_hash[32] = {
     0x42, 0xb2, 0x87, 0x7b, 0xa8, 0xae, 0x0a, 0x0c,
     0xb2, 0x1a, 0xab, 0xdd, 0xc6, 0x05, 0xfc, 0x38
 };
-
+static const uint8_t g_m8_executable_domain[11] = {
+    'I', '2', 'M', '8', 'E', 'X', 'E', 'C', 'v', '1', 0
+};
 static runtime_identity_t g_live_identity;
 static int g_live_identity_valid;
 static uint8_t g_live_capability_profile;
@@ -198,6 +200,46 @@ static int atom_matches_hash(noun n, const uint8_t expected[32])
         && bytes_eq(actual, expected, sizeof actual);
 }
 
+static int noun_matches_hash(noun n, const uint8_t expected[32])
+{
+    const uint8_t *encoded;
+    uint64_t encoded_len;
+    uint8_t actual[32];
+    if (jam_encode_bytes_checked(n, &encoded, &encoded_len) != 0)
+        return 0;
+    blake3_hash(encoded, (size_t)encoded_len, actual);
+    return bytes_eq(actual, expected, sizeof actual);
+}
+
+/* Selector 3 keeps the RuntimeIdentity record shape but binds the actual
+ * battery, normalized program, and specialized formula through one digest.
+ * Component hashes are computed from the live nouns immediately before this
+ * fixed-size digest is compared; this is an executable identity, not a
+ * header-only assertion. */
+static int m8_executable_matches(noun battery, noun program, noun formula,
+                                 const uint8_t expected[32])
+{
+    const uint8_t *encoded;
+    uint64_t encoded_len;
+    uint8_t input[11 + 32 * 3];
+    uint8_t component[32];
+    size_t off = sizeof g_m8_executable_domain;
+    for (int i = 0; i < 3; i++) {
+        noun value = i == 0 ? battery : i == 1 ? program : formula;
+        if (jam_encode_bytes_checked(value, &encoded, &encoded_len) != 0)
+            return 0;
+        blake3_hash(encoded, (size_t)encoded_len, component);
+        for (size_t j = 0; j < sizeof component; j++)
+            input[off + j] = component[j];
+        off += sizeof component;
+    }
+    for (size_t i = 0; i < sizeof g_m8_executable_domain; i++)
+        input[i] = g_m8_executable_domain[i];
+    uint8_t actual[32];
+    blake3_hash(input, sizeof input, actual);
+    return bytes_eq(actual, expected, sizeof actual);
+}
+
 int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
                                    uint64_t *incarnation_out)
 {
@@ -230,8 +272,19 @@ int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
         || !direct_is(generation, id->generation)
         || !noun_is_direct(incarnation) || direct_val(incarnation) == 0
         || !atom_matches_hash(battery_hash, id->battery_hash)
-        || !atom_matches_hash(program_hash, id->program_hash))
+        || !atom_matches_hash(program_hash, id->program_hash)
+        || !noun_matches_hash(battery, id->battery_hash)
+        || !noun_matches_hash(program, id->program_hash))
         return 0;
+
+    if (bytes_eq(id->program_hash, g_closed_process_io_program_hash, 32)) {
+        noun instance_states, formula;
+        if (!take(dynamic, &instance_states, &formula)
+            || !noun_is_cell(instance_states)
+            || !m8_executable_matches(
+                battery, program, formula, id->package_hash))
+            return 0;
+    }
 
     noun kver, rv_rest, runtime_abi, program_schema, algorithm_abi;
     if (!take(versions, &kver, &rv_rest)

@@ -41,7 +41,6 @@ static int configure_and_clear(int inhibit)
         g_configured = 0;
         g_inhibited = 1;
         g_fatal = 1;
-        g_shadow = 0;
         return 0;
     }
     audit(DIGITAL_OUT_OP_CLEAR, DIGITAL_OUT_GPIO_MASK);
@@ -49,7 +48,6 @@ static int configure_and_clear(int inhibit)
         g_configured = 1;
         g_inhibited = 1;
         g_fatal = 1;
-        g_shadow = 0;
         return 0;
     }
     g_configured = 1;
@@ -82,7 +80,8 @@ int digital_out_force_safe(void)
     int ok = digital_out_backend_clear_fixed_bank();
     if (!ok)
         g_fatal = 1;
-    g_shadow = 0;
+    if (ok)
+        g_shadow = 0;
     g_inhibited = 1;
     g_reconcile_armed = 0;
     g_m8_input_freshness.armed = 0;

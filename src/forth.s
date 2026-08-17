@@ -3070,6 +3070,11 @@ defcode "DOUTOPS", 7, digital_out_operations_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "DOUTSTATE", 9, digital_out_state_word, 0
+    bl      digital_out_state
+    str     x0, [DSP, #-8]!
+    NEXT
+
 #ifdef DIGITAL_OUT_FAKE
 defcode "M6DO", 4, digital_out_fake_test_word, 0
     bl      digital_out_fake_selftest
@@ -3134,6 +3139,13 @@ defcode "M8ADMIT", 7, m8_profile_admission_test_word, 0
 // changing the live checkpoint authority.
 defcode "M8CKT", 5, m8_checkpoint_restore_test_word, 0
     bl      kernel_m8_checkpoint_restore_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+// M8MAT ( -- failures ) executes the live Nock path for 8 controller states
+// and all 32 target fake-input banks. It is an evidence-build probe only.
+defcode "M8MAT", 5, m8_state_matrix_test_word, 0
+    bl      kernel_m8_state_matrix_selftest
     str     x0, [DSP, #-8]!
     NEXT
 #endif

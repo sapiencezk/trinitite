@@ -109,6 +109,7 @@ uint64_t kernel_m8_input_failure_safe_selftest(void);
 uint64_t kernel_m8_service_state(void);
 uint64_t kernel_m8_checkpoint_restore_selftest(void);
 uint64_t kernel_m8_profile_admission_selftest(void);
+uint64_t kernel_m8_state_matrix_selftest(void);
 #endif
 
 /* WP4 — crash recovery: 0 hard (clear tarms), 1 soft (keep tarms) */

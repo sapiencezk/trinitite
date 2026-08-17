@@ -16,9 +16,10 @@ int  digital_out_boot_safe(void);
 int  digital_out_prepare_clean_pill(void);
 int  digital_out_restore_safe(void);
 /* Return non-zero only when the backend clear completed and the output bank
- * is therefore safe to claim.  The inhibit/shadow transition is performed
- * even on failure.  A successful clear proves safe-low but does not clear a
- * prior fatal write latch; lifecycle preparation owns that recovery. */
+ * is therefore safe to claim.  A failed clear leaves the last shadow value
+ * visible as unknown and latches fatal/inhibited; it is never rewritten to a
+ * false safe-low value.  A successful clear does not clear a prior fatal write
+ * latch; lifecycle preparation owns that recovery. */
 int digital_out_force_safe(void);
 void digital_out_note_legacy_external_sample(void);
 void digital_out_arm_closed_sample(uint64_t generation, uint64_t incarnation,
