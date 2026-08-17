@@ -2800,6 +2800,19 @@ defcode "TXM2", 4, tx_m2_test, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+#ifndef I2_OPERATOR
+defcode "I2OP", 4, i2_operator_test, 0
+    bl      i2_operator_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "I2OPQ", 5, i2_operator_query_test, 0
+    ldr     x0, [DSP]
+    bl      i2_operator_query_storm
+    str     x0, [DSP]
+    NEXT
+#endif
+
 defcode "COLDM2", 6, cold_m2_test, 0
     bl      cold_m2_selftest
     str     x0, [DSP, #-8]!

@@ -354,15 +354,33 @@ static int m7_advance_incarnation(void)
     return 1;
 }
 
-static int m7_capture_active_pill(void)
+extern uint8_t _pill_embed_start[];
+extern uint8_t _pill_embed_end[];
+
+static const uint8_t *m7_live_pill_base(uint64_t *total_out)
 {
-    const uint8_t *base = (const uint8_t *)(uintptr_t)PILL_BASE;
+    const uint8_t *q = (const uint8_t *)(uintptr_t)PILL_BASE;
+    int any = 0;
+    for (int i = 0; i < 8; i++)
+        any |= q[i];
+    const uint8_t *base = any ? q : (const uint8_t *)_pill_embed_start;
+    if (!any && &_pill_embed_start[0] >= &_pill_embed_end[0])
+        return 0;
     uint64_t payload_len = 0;
     for (int i = 0; i < 8; i++)
         payload_len |= (uint64_t)base[16 + i] << (i * 8);
     if (payload_len == 0 || payload_len > M7_STAGE_BYTES - 256)
         return 0;
-    uint64_t total = 256 + payload_len;
+    *total_out = 256 + payload_len;
+    return base;
+}
+
+static int m7_capture_active_pill(void)
+{
+    uint64_t total = 0;
+    const uint8_t *base = m7_live_pill_base(&total);
+    if (!base)
+        return 0;
     uint64_t aligned = (total + 7) & ~7ULL;
     for (uint64_t i = 0; i < total; i++)
         ((uint8_t *)(uintptr_t)M7_STAGE_BASE)[i] = base[i];
@@ -1227,6 +1245,37 @@ int m7_deploy_abort(void)
     g_m7.stage_chunks = 0;
     return 0;
 }
+
+int m7_copy_active_digest(uint8_t out[32])
+{
+    if (!out) return 0;
+    if (g_m7.active_pill_valid) {
+        for (size_t i = 0; i < 32; i++)
+            out[i] = g_m7.active_pill_digest[i];
+        return 1;
+    }
+    uint64_t total = 0;
+    const uint8_t *base = m7_live_pill_base(&total);
+    if (!base)
+        return 0;
+    blake3_hash(base, (size_t)total, out);
+    return 1;
+}
+
+int m7_copy_stage_digest(uint8_t out[32])
+{
+    if (!out) return 0;
+    for (size_t i = 0; i < 32; i++)
+        out[i] = g_m7.stage_digest[i];
+    return g_m7.stage_open || g_m7.stage_sealed;
+}
+
+uint64_t m7_stage_id(void) { return g_m7.stage_id; }
+uint64_t m7_stage_received(void) { return g_m7.stage_received; }
+uint64_t m7_stage_total(void) { return g_m7.stage_total; }
+int m7_stage_open(void) { return g_m7.stage_open; }
+int m7_stage_sealed(void) { return g_m7.stage_sealed; }
+int m7_outputs_safe(void) { return g_m7.safe; }
 
 noun m7_current_pill_digest(void)
 {

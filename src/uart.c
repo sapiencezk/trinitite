@@ -49,10 +49,23 @@ int uart_getc_nb(uint8_t *out) {
 }
 
 void uart_puts(const char *s) {
+#ifdef I2_OPERATOR
+    (void)s;
+    return;
+#else
     while (*s) {
         if (*s == '\n') uart_putc('\r');
         uart_putc(*s++);
     }
+#endif
+}
+
+int uart_putc_nb(uint8_t byte)
+{
+    if (g_test_tx_stuck || (UART_FR & (1 << 5)))
+        return 0;
+    UART_DR = byte;
+    return 1;
 }
 
 void uart_read_bytes(uint8_t *buf, uint64_t n) {

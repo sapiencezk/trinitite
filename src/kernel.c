@@ -17,6 +17,7 @@
 #include "digital_out.h"
 #include "digital_in.h"
 #include "m7_supervisor.h"
+#include "i2_operator.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
 #define CORD_OUT     7632239ULL              /* %out      */
@@ -2421,17 +2422,31 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
              * frames therefore coexist with timer and watchdog polling.
              */
             for (;;) {
+                i2_operator_poll();
+#ifdef I2_OPERATOR
+                /* Exclusive pump owns classification in shrine_loop. */
+                if (0) {
+#else
                 if (runtime_identity_live()) {
                     if (i2_rx_poll(32)) {
                         heap_scratch_reset();
                         heap_set_mode(HEAP_MODE_SCRATCH);
                         if (i2_rx_take(&event)) {
+                            if (i2_operator_is_noun(event)) {
+                                (void)i2_operator_handle(event);
+                                if (noun_tx_active())
+                                    noun_tx_abort();
+                                heap_set_mode(HEAP_MODE_PERSIST);
+                                heap_scratch_reset();
+                                continue;
+                            }
                             event_from_i2_rx = 1;
                             event_admit_tick = runtime_counter_now();
                             break;
                         }
                     }
                 } else if (uart_rx_ready()) {
+#endif
                     event = uart_recv_noun();
                     event_admit_tick = runtime_counter_now();
                     break;
@@ -2737,7 +2752,44 @@ void arvo_loop(noun kernel_init)
 
 void shrine_loop(noun kernel_init)
 {
+#ifdef I2_OPERATOR
+    g_kernel = kernel_init;
+    g_shrine_mode = 1;
+    if (!noun_is_cell(g_slam_formula))
+        g_slam_formula = build_slam_formula();
+    nock_wall_check_set(deadline_expired);
+    for (;;) {
+        i2_operator_poll();
+        if (i2_rx_poll(32)) {
+            noun event = NOUN_ZERO;
+            heap_scratch_reset();
+            heap_set_mode(HEAP_MODE_SCRATCH);
+            if (i2_rx_take(&event) && i2_operator_is_noun(event)) {
+                (void)i2_operator_handle(event);
+                if (noun_tx_active())
+                    noun_tx_abort();
+                heap_set_mode(HEAP_MODE_PERSIST);
+                heap_scratch_reset();
+                continue;
+            }
+            if (noun_tx_active())
+                noun_tx_abort();
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
+        }
+        irq_ring_drain();
+        tarm_poll();
+        if (evq_len() != 0)
+            (void)kernel_run_bounded(1);
+        else {
+            if (wdt_check())
+                emit_wdt();
+            wdt_kick();
+        }
+    }
+#else
     (void)kernel_loop(kernel_init, 1, 0);
+#endif
 }
 
 int kernel_run_bounded(uint64_t max_commits)
@@ -4789,6 +4841,7 @@ uint64_t checkpoint_m2_selftest(void)
 /* ── Boot policy (pill vs durable snap) ─────────────────────────────────── */
 
 static int g_boot_policy = BOOT_PILL;
+static int g_boot_source = BOOT_SOURCE_NONE;
 
 void boot_policy_set(int policy)
 {
@@ -4800,6 +4853,11 @@ void boot_policy_set(int policy)
 int boot_policy_get(void)
 {
     return g_boot_policy;
+}
+
+int kernel_boot_source(void)
+{
+    return g_boot_source;
 }
 
 static void uart_hex64_kernel(uint64_t value)
@@ -4923,6 +4981,8 @@ int kernel_boot(noun pill_gate)
         int m7_snap = m7_boot_snapshot();
         if (m7_snap == 0) {
             uart_puts("boot: m7-snap\r\n");
+            g_boot_source = BOOT_SOURCE_SNAPSHOT;
+            i2_operator_set_recovery(1);
             shrine_loop(g_kernel);
             return -1;
         }
@@ -4943,6 +5003,8 @@ int kernel_boot(noun pill_gate)
         g_checkpoint_limit_anchor = NOUN_ZERO;
         if (load_result == 0) {
             uart_puts("boot: snap\r\n");
+            g_boot_source = BOOT_SOURCE_SNAPSHOT;
+            i2_operator_set_recovery(1);
             uart_puts("boot: identity ");
             const runtime_identity_t *identity = runtime_identity_get();
             uint64_t prefix = 0;
@@ -4982,6 +5044,8 @@ int kernel_boot(noun pill_gate)
         return -1;
     }
     uart_puts("boot: pill\r\n");
+    g_boot_source = BOOT_SOURCE_PACKAGE;
+    i2_operator_set_recovery(2);
     if (g_shrine_mode)
         shrine_loop(g_kernel);
     else

@@ -14,3 +14,5 @@ void uart_write_bytes(const uint8_t *buf, uint64_t n);
 int  uart_putc_bounded(char c, uint64_t absolute_deadline);
 /* Deterministic QEMU/unit probe: affects only bounded I2 writes. */
 void uart_test_tx_stuck(int stuck);
+/* Nonblocking TX for the operator frame writer. 1 if the byte was accepted. */
+int  uart_putc_nb(uint8_t byte);

@@ -123,6 +123,14 @@ int      m7_deploy_activate(void);
 int      m7_deploy_query(void);
 int      m7_deploy_abort(void);
 noun     m7_current_pill_digest(void);
+int      m7_copy_active_digest(uint8_t out[32]);
+int      m7_copy_stage_digest(uint8_t out[32]);
+uint64_t m7_stage_id(void);
+uint64_t m7_stage_received(void);
+uint64_t m7_stage_total(void);
+int      m7_stage_open(void);
+int      m7_stage_sealed(void);
+int      m7_outputs_safe(void);
 int      m7_checkpoint_save(void);
 
 /* Boot selected M7 supervisor snapshot.  0 = selected M7 snapshot loaded,

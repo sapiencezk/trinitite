@@ -470,3 +470,15 @@ QEMU with fake input and BCM output proves the fixed logical seam and the
 emulated GPSET/GPCLR/GPLEV latch observation only. It is not external-input,
 electrical, timing, physical-media, safety, certification, interoperability,
 or complete-conformance evidence.
+
+## M9 1499 Operator — candidate exclusive UART
+
+The production operator build (`I2_OPERATOR=1`) owns UART exclusively. It
+does not start the Forth console. After I2FN cue, a `%i2-operator` noun is
+classified and handled by `i2_operator.c`; it is never slammed as an
+application event. Selector-3 application ingress remains fenced. The
+adapter calls the existing M7 supervisor for START/STOP and the existing
+vendor installation/snapshot seams. One request is active; TX is
+nonblocking and resumable; a five-second stage inactivity lease aborts
+only the volatile stage. Diagnostic ASCII is not emitted on the operator
+UART.

@@ -1308,6 +1308,9 @@ T "m2: bounded cue rollback matrix" "0000000000000000" \
 T "m2: stuck TX bounded reserved completion" "0000000000000000" \
     "TXM2 ."
 
+T "m9: operator adapter replay/conflict/stalled-TX" "0000000000000000" \
+    "I2OP ."
+
 T "m2: cold fail-closed and torn writes" "0000000000000000" \
     "COLDM2 ."
 

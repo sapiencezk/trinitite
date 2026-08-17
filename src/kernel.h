@@ -165,6 +165,10 @@ uint64_t checkpoint_selected_generation(void);
 #define BOOT_SNAP            2
 void     boot_policy_set(int policy);
 int      boot_policy_get(void);
+#define BOOT_SOURCE_NONE     0
+#define BOOT_SOURCE_SNAPSHOT 1
+#define BOOT_SOURCE_PACKAGE  2
+int      kernel_boot_source(void);
 /* Apply policy and enter arvo/shrine loop. pill_gate may be 0.
  * Never returns on success; returns -1 to fall back to REPL. */
 int      kernel_boot(noun pill_gate);

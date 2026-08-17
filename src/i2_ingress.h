@@ -33,3 +33,7 @@ const char *i2_rx_reason_name(i2_rx_reason_t reason);
 /* Focused device-code regression probes; return zero on success. */
 uint64_t i2_rx_selftest(void);
 uint64_t cue_bounded_selftest(void);
+
+#define I2_FRAME_HEADER_SIZE 56u
+int i2_frame_encode(const uint8_t *payload, uint64_t len,
+                    uint8_t *out, uint64_t out_cap, uint64_t *out_len);

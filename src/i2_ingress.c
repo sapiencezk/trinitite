@@ -7,7 +7,9 @@
 #include "runtime_stats.h"
 #include "uart.h"
 
+#ifndef I2_FRAME_HEADER_SIZE
 #define I2_FRAME_HEADER_SIZE 56u
+#endif
 #define I2_FRAME_MAX_PAYLOAD UART_RXBUF_SIZE
 
 typedef enum {
@@ -254,6 +256,27 @@ int i2_rx_take(noun *out)
 int i2_rx_ready(void)
 {
     return g_rx.state == RX_READY;
+}
+
+int i2_frame_encode(const uint8_t *payload, uint64_t len,
+                    uint8_t *out, uint64_t out_cap, uint64_t *out_len)
+{
+    uint64_t total = I2_FRAME_HEADER_SIZE + len;
+    if (!payload || !out || !out_len || len == 0 || len > I2_FRAME_MAX_PAYLOAD
+        || out_cap < total)
+        return 0;
+    for (size_t i = 0; i < sizeof g_magic; i++)
+        out[i] = g_magic[i];
+    put16(out + 8, 1);
+    put16(out + 10, 0);
+    put16(out + 12, I2_FRAME_HEADER_SIZE);
+    put16(out + 14, 0);
+    put64(out + 16, len);
+    blake3_hash(payload, (size_t)len, out + 24);
+    for (uint64_t i = 0; i < len; i++)
+        out[I2_FRAME_HEADER_SIZE + i] = payload[i];
+    *out_len = total;
+    return 1;
 }
 
 uint64_t i2_rx_reject_count(i2_rx_reason_t reason)
