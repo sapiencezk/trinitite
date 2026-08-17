@@ -351,14 +351,14 @@ int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
         || !direct_is(generation, id->generation)
         || !noun_is_direct(incarnation) || direct_val(incarnation) == 0
         || !atom_matches_hash(battery_hash, id->battery_hash)
-        || !atom_matches_hash(program_hash, id->program_hash)
-        || !noun_matches_hash(battery, id->battery_hash)
-        || !noun_matches_hash(program, id->program_hash))
+        || !atom_matches_hash(program_hash, id->program_hash))
         return 0;
 
     if (bytes_eq(id->program_hash, g_closed_process_io_program_hash, 32)) {
         noun instance_states, formula;
         if (!take(dynamic, &instance_states, &formula)
+            || !noun_matches_hash(battery, id->battery_hash)
+            || !noun_matches_hash(program, id->program_hash)
             || !noun_is_cell(instance_states)
             || !m8_executable_matches(
                 battery, program, formula, id->package_hash))
