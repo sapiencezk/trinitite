@@ -1663,7 +1663,7 @@ uint64_t kernel_m8_state_matrix_selftest(void)
         }
     }
     (void)digital_out_force_safe();
-    return failures;
+    return (digital_out_state() << 32) | (failures & UINT64_C(0xffffffff));
 #endif
 }
 #endif
