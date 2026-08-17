@@ -46,6 +46,12 @@ static const uint8_t g_closed_process_io_program_hash[32] = {
 static const uint8_t g_m8_executable_domain[11] = {
     'I', '2', 'M', '8', 'E', 'X', 'E', 'C', 'v', '1', 0
 };
+static const uint8_t g_m8_formula_domain[11] = {
+    'I', '2', 'M', '8', 'F', 'O', 'R', 'M', 'v', '1', 0
+};
+#define M8_FORMULA_HASH_CACHE_CAP 32768u
+static noun g_m8_formula_hash_keys[M8_FORMULA_HASH_CACHE_CAP];
+static uint8_t g_m8_formula_hash_values[M8_FORMULA_HASH_CACHE_CAP][32];
 static runtime_identity_t g_live_identity;
 static int g_live_identity_valid;
 static uint8_t g_live_capability_profile;
@@ -211,6 +217,72 @@ static int noun_matches_hash(noun n, const uint8_t expected[32])
     return bytes_eq(actual, expected, sizeof actual);
 }
 
+static int m8_formula_merkle(noun n, uint8_t out[32], uint32_t depth)
+{
+    if (depth > 512)
+        return 0;
+    if (!noun_is_cell(n)) {
+        uint8_t atom[256];
+        uint8_t payload[sizeof g_m8_formula_domain + 1 + 8 + sizeof atom];
+        size_t len = 0;
+        if (!noun_atom_read_fixed(n, atom, sizeof atom))
+            return 0;
+        if (noun_is_direct(n)) {
+            uint64_t value = direct_val(n);
+            len = value == 0 ? 1 : (size_t)((64 - __builtin_clzll(value) + 7) / 8);
+        } else {
+            atom_t *stored = atom_store_get(indirect_hash(n));
+            if (!stored)
+                return 0;
+            len = (size_t)stored->size * 8;
+            while (len > 1 && atom[len - 1] == 0)
+                len--;
+        }
+        size_t off = 0;
+        for (size_t i = 0; i < sizeof g_m8_formula_domain; i++)
+            payload[off++] = g_m8_formula_domain[i];
+        payload[off++] = 0;
+        for (size_t i = 0; i < 8; i++)
+            payload[off++] = (uint8_t)(len >> (i * 8));
+        for (size_t i = 0; i < len; i++)
+            payload[off++] = atom[i];
+        blake3_hash(payload, off, out);
+        return 1;
+    }
+
+    uint32_t slot = (uint32_t)(((uintptr_t)n >> 4)
+        & (M8_FORMULA_HASH_CACHE_CAP - 1));
+    for (uint32_t probe = 0; probe < M8_FORMULA_HASH_CACHE_CAP; probe++) {
+        uint32_t at = (slot + probe) & (M8_FORMULA_HASH_CACHE_CAP - 1);
+        if (g_m8_formula_hash_keys[at] == n) {
+            for (size_t i = 0; i < 32; i++)
+                out[i] = g_m8_formula_hash_values[at][i];
+            return 1;
+        }
+        if (g_m8_formula_hash_keys[at] == NOUN_ZERO) {
+            noun h, t;
+            if (!take(n, &h, &t))
+                return 0;
+            uint8_t left[32], right[32], payload[sizeof g_m8_formula_domain + 1 + 64];
+            if (!m8_formula_merkle(h, left, depth + 1)
+                || !m8_formula_merkle(t, right, depth + 1))
+                return 0;
+            size_t off = 0;
+            for (size_t i = 0; i < sizeof g_m8_formula_domain; i++)
+                payload[off++] = g_m8_formula_domain[i];
+            payload[off++] = 1;
+            for (size_t i = 0; i < 32; i++) payload[off++] = left[i];
+            for (size_t i = 0; i < 32; i++) payload[off++] = right[i];
+            blake3_hash(payload, off, out);
+            g_m8_formula_hash_keys[at] = n;
+            for (size_t i = 0; i < 32; i++)
+                g_m8_formula_hash_values[at][i] = out[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Selector 3 keeps the RuntimeIdentity record shape but binds the actual
  * battery, normalized program, and specialized formula through one digest.
  * Component hashes are computed from the live nouns immediately before this
@@ -224,11 +296,18 @@ static int m8_executable_matches(noun battery, noun program, noun formula,
     uint8_t input[11 + 32 * 3];
     uint8_t component[32];
     size_t off = sizeof g_m8_executable_domain;
+    for (uint32_t i = 0; i < M8_FORMULA_HASH_CACHE_CAP; i++)
+        g_m8_formula_hash_keys[i] = NOUN_ZERO;
     for (int i = 0; i < 3; i++) {
         noun value = i == 0 ? battery : i == 1 ? program : formula;
-        if (jam_encode_bytes_checked(value, &encoded, &encoded_len) != 0)
-            return 0;
-        blake3_hash(encoded, (size_t)encoded_len, component);
+        if (i == 2) {
+            if (!m8_formula_merkle(value, component, 0))
+                return 0;
+        } else {
+            if (jam_encode_bytes_checked(value, &encoded, &encoded_len) != 0)
+                return 0;
+            blake3_hash(encoded, (size_t)encoded_len, component);
+        }
         for (size_t j = 0; j < sizeof component; j++)
             input[off + j] = component[j];
         off += sizeof component;
