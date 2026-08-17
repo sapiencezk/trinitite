@@ -432,14 +432,21 @@ calling it. See the
 parent `docs/I2-M7-CONTRACT.md` and `docs/I2-M7-VERDICT.md` for the exact
 profile and nonclaims.
 
-## M8 closed process-I/O candidate
+## M8 closed process-I/O canonical bounded R&D profile
 
-M7 remains canonical. PILL selector 3 (`closed-process-io`) retains ABI family
+M8 is the canonical local operator profile. M7 remains available only through
+explicit historical/recovery commands. PILL selector 3 (`closed-process-io`) retains ABI family
 `(1,2)` and authorizes exactly capability 3 fixed input plus capability 2
 fixed output. Input backend selection is independent of output. Production
 input configures GPIO 5/6/13/19/26 and performs exactly one GPLEV0 read per
 accepted request; the fake setter accepts only a logical atom 0..31. Output
 accepts a direct atom 0..7 and retains clear-before-set/safe-low.
+
+Selector-3 admission recomputes the actual battery, normalized program, and
+specialized formula before accepting the single executable anchor; a matching
+PILL header alone is insufficient. The same check is applied to clean install,
+PILL2 admission, and checkpoint restore. The published anchor is
+`acc3c06e1ab4a58b9eb7012e8fa5862deefd2e22ef734143ba4a6e0cbadcc874`.
 
 Input request is `[token 3 BANK_READ 0 0]`. Output request is
 `[token 2 BANK_WRITE deadline bank]`. Both require exact full
