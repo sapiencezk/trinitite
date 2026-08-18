@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include "digital_out.h"
 #include "digital_out_backend.h"
+#include "i2_closed_process.h"
 
 #define DIGITAL_OUT_AUDIT_CAP 64u
 
@@ -119,12 +120,14 @@ int digital_out_apply_direct(uint64_t bank, uint64_t generation,
                              uint64_t incarnation, uint64_t output_owner,
                              uint64_t output_sequence)
 {
+    i2_closed_process_roles_t roles;
     if (bank > 7 || !g_m8_input_freshness.armed
+        || !i2_closed_process_roles_live(&roles)
         || g_m8_input_freshness.generation != generation
         || g_m8_input_freshness.incarnation != incarnation
-        || g_m8_input_freshness.owner != 4u
+        || g_m8_input_freshness.owner != roles.input_bank_owner
         || g_m8_input_freshness.sequence == 0
-        || output_owner != 7u || output_sequence == 0)
+        || output_owner != roles.output_bank_owner || output_sequence == 0)
         return 0;
     g_m8_input_freshness.armed = 0;
     return digital_out_apply(bank & 1u, (bank >> 1) & 1u, (bank >> 2) & 1u);

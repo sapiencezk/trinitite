@@ -22,7 +22,11 @@ static int take(noun n, noun *head, noun *tail)
     return 1;
 }
 
+#ifdef I2_M11
+#include "i2_m11_catalog.inc"
+#else
 #include "i2_m10_catalog.inc"
+#endif
 
 int i2_admission_program_known(const uint8_t program_hash[32])
 {

@@ -13,6 +13,7 @@
 #include "kernel.h"
 #include "runtime_identity.h"
 #include "i2_admission_policy.h"
+#include "i2_closed_process.h"
 #include "i2_ingress.h"
 #include "runtime_stats.h"
 #include "digital_out.h"
@@ -514,6 +515,14 @@ static int tag_is_i2_service_cancel(noun tag, uint64_t t)
         || tag_is_name(tag, "i2-service-cancel");
 }
 
+static int closed_roles_now(i2_closed_process_roles_t *out)
+{
+    if (i2_closed_process_roles_live(out))
+        return 1;
+    return i2_closed_process_roles_refresh(g_kernel)
+        && i2_closed_process_roles_live(out);
+}
+
 static int i2_token_epoch_valid(noun token)
 {
     uint64_t gen, inc, owner, seq;
@@ -523,9 +532,14 @@ static int i2_token_epoch_valid(noun token)
     if (runtime_identity_capability_profile()
         != RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO)
         return 1;
+    {
+        i2_closed_process_roles_t roles;
+        if (!i2_closed_process_roles_live(&roles))
+            (void)i2_closed_process_roles_refresh(g_kernel);
+    }
     return identity && gen == identity->generation
         && inc == m7_incarnation() && seq != 0
-        && (owner == 3u || owner == 4u || owner == 7u);
+        && i2_closed_process_is_owner(owner);
 }
 
 static int m8_queued_authority_current(noun event)
@@ -1545,9 +1559,11 @@ static void dispatch_i2_activate(noun effects)
                      && digital_output_identity_authorized()) {
                 if (closed_process_io_authorized()) {
                     uint64_t gen, inc, owner, seq;
+                    i2_closed_process_roles_t roles;
                     ok = noun_is_direct(payload) && direct_val(payload) <= 7
                         && token_fields(token, &gen, &inc, &owner, &seq)
-                        && owner == 7u
+                        && closed_roles_now(&roles)
+                        && owner == roles.output_bank_owner
                         && digital_out_apply_direct(
                             direct_val(payload), gen, inc, owner, seq);
                 } else if (i2_digital_bank(payload, &p1, &p2, &alarm)) {
@@ -1559,8 +1575,10 @@ static void dispatch_i2_activate(noun effects)
                        && closed_process_io_authorized()) {
                 uint32_t raw = 0;
                 uint64_t gen, inc, owner, seq;
+                i2_closed_process_roles_t roles;
                 ok = token_fields(token, &gen, &inc, &owner, &seq)
-                    && owner == 4u
+                    && closed_roles_now(&roles)
+                    && owner == roles.input_bank_owner
                     && digital_in_read_once(&raw);
                 if (ok) {
                     i2_service_completion_data(
@@ -1593,6 +1611,9 @@ static void dispatch_i2_activate(noun effects)
 uint64_t kernel_m8_input_failure_safe_selftest(void)
 {
     uint64_t failures = 0;
+    i2_closed_process_roles_t roles;
+    if (!closed_roles_now(&roles))
+        return UINT64_MAX;
     for (uint64_t bank = 1; bank <= 7; bank++) {
         if ((bank & 3u) == 0)
             continue; /* alarm-only is not an energized pump bank */
@@ -1600,8 +1621,9 @@ uint64_t kernel_m8_input_failure_safe_selftest(void)
             failures |= 1ULL << bank;
             continue;
         }
-        digital_out_arm_closed_sample(1, 1, 4, bank);
-        if (!digital_out_apply_direct(bank, 1, 1, 7, bank)
+        digital_out_arm_closed_sample(1, 1, roles.input_bank_owner, bank);
+        if (!digital_out_apply_direct(
+                bank, 1, 1, roles.output_bank_owner, bank)
             || digital_out_shadow() == 0) {
             failures |= 1ULL << bank;
             continue;
@@ -1609,7 +1631,8 @@ uint64_t kernel_m8_input_failure_safe_selftest(void)
         (void)digital_out_force_safe();
         if (digital_out_shadow() != 0 || digital_out_gpio_level() != 0
             || digital_out_closed_sample_armed()
-            || digital_out_apply_direct(bank, 1, 1, 7, bank))
+            || digital_out_apply_direct(
+                bank, 1, 1, roles.output_bank_owner, bank))
             failures |= 1ULL << bank;
     }
     (void)digital_out_prepare_clean_pill();
@@ -1657,7 +1680,10 @@ uint64_t kernel_m8_state_matrix_selftest(void)
         for (uint64_t raw = 0; raw < 32; raw++) {
             if (!digital_in_test_set_logical_bank((uint32_t)raw))
                 return UINT64_MAX;
-            tarm_force_due(3u);
+            i2_closed_process_roles_t roles;
+            if (!closed_roles_now(&roles))
+                return UINT64_MAX;
+            tarm_force_due(roles.timer_owner);
             if (kernel_run_bounded(9) != 0
                 || m7_mode() != M7_MODE_RUNNING
                 || (digital_out_state() & (1u << 3)) != 0)
@@ -1772,6 +1798,7 @@ static int i2_preflight_effects(noun candidate_gate, noun effects,
 {
     int new_timers = 0;
     int new_svcs   = 0;
+    i2_closed_process_roles_t roles;
     noun seen[2 * TARM_MAX + I2_MAX_PENDING_SERVICES];
     int seen_n = 0;
     int live_tarms = 0;
@@ -1809,9 +1836,12 @@ static int i2_preflight_effects(noun candidate_gate, noun effects,
             if (closed_process_io_authorized()) {
                 uint64_t gen, inc, owner, seq;
                 noun pending;
-                if (!token_fields(c->head, &gen, &inc, &owner, &seq)
-                    || owner != 3u
-                    || !m8_gate_pending_token(candidate_gate, 3u, &pending)
+                i2_closed_process_roles_t croles;
+                if (!i2_closed_process_roles_from_gate(candidate_gate, &croles)
+                    || !token_fields(c->head, &gen, &inc, &owner, &seq)
+                    || owner != croles.timer_owner
+                    || !m8_gate_pending_token(
+                        candidate_gate, croles.timer_owner, &pending)
                     || !noun_eq(pending, c->head))
                     return 0;
             }
@@ -1830,9 +1860,12 @@ static int i2_preflight_effects(noun candidate_gate, noun effects,
             if (closed_process_io_authorized()) {
                 uint64_t gen, inc, owner, seq;
                 noun pending;
-                if (!token_fields(data, &gen, &inc, &owner, &seq)
-                    || owner != 3u
-                    || !m8_gate_pending_token(candidate_gate, 3u, &pending)
+                i2_closed_process_roles_t croles;
+                if (!i2_closed_process_roles_from_gate(candidate_gate, &croles)
+                    || !token_fields(data, &gen, &inc, &owner, &seq)
+                    || owner != croles.timer_owner
+                    || !m8_gate_pending_token(
+                        candidate_gate, croles.timer_owner, &pending)
                     || pending != NOUN_ZERO)
                     return 0;
             }
@@ -1878,7 +1911,8 @@ static int i2_preflight_effects(noun candidate_gate, noun effects,
                 && deadline > 0 && deadline <= I2_UART_TX_MAX_NS
                 && ((closed_process_io_authorized()
                      && noun_is_direct(payload) && direct_val(payload) <= 7
-                     && owner == 7u)
+                     && closed_roles_now(&roles)
+                     && owner == roles.output_bank_owner)
                     || (!closed_process_io_authorized()
                         && i2_digital_bank(payload, &p1, &p2, &alarm)))) {
                 /* Exact fixed output grant selected by the PILL profile. */
@@ -1887,7 +1921,8 @@ static int i2_preflight_effects(noun candidate_gate, noun effects,
                 && op == I2_OP_DIGITAL_BANK_READ
                 && closed_process_io_authorized()
                 && deadline == 0 && payload == NOUN_ZERO
-                && owner == 4u) {
+                && closed_roles_now(&roles)
+                && owner == roles.input_bank_owner) {
                 /* Fixed one-register input snapshot; read only after publish. */
             } else {
                 return 0;
@@ -2901,6 +2936,10 @@ void kernel_m7_publish_prepared(noun gate, const runtime_identity_t *identity,
     noun_pill_version = 2;
     runtime_identity_set(identity);
     runtime_identity_set_capability_profile(capability_profile);
+    if (capability_profile == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO)
+        (void)i2_closed_process_roles_refresh(gate);
+    else
+        i2_closed_process_roles_clear();
 }
 
 int kernel_m7_publish(noun gate, const runtime_identity_t *identity,
@@ -3031,13 +3070,18 @@ static int m8_gate_pending_token(noun gate, uint64_t owner, noun *pending)
     if (!pending || !m8_instance_lib(gate, owner, &lib, &container))
         return 0;
     (void)container;
-    if (owner == 3u) {
-        return noun_take(lib, &ignored, &rest) && noun_is_direct(ignored)
-            && noun_take(rest, pending, &ignored);
+    {
+        i2_closed_process_roles_t roles;
+        if (!closed_roles_now(&roles))
+            return 0;
+        if (owner == roles.timer_owner) {
+            return noun_take(lib, &ignored, &rest) && noun_is_direct(ignored)
+                && noun_take(rest, pending, &ignored);
+        }
+        if (owner == roles.input_bank_owner || owner == roles.output_bank_owner)
+            return m8_lib_fields4(
+                lib, &initialized, &sequence, pending, &ignored);
     }
-    if (owner == 4u || owner == 7u)
-        return m8_lib_fields4(
-            lib, &initialized, &sequence, pending, &ignored);
     return 0;
 }
 
@@ -3067,11 +3111,13 @@ uint64_t kernel_m8_service_state(void)
     noun input, container, input_pending, freshness;
     noun output, output_pending, desired;
     uint64_t input_init, input_seq, output_init, output_seq;
+    i2_closed_process_roles_t roles;
     if (!closed_process_io_authorized()
-        || !m8_instance_lib(g_kernel, 4u, &input, &container)
+        || !closed_roles_now(&roles)
+        || !m8_instance_lib(g_kernel, roles.input_bank_owner, &input, &container)
         || !m8_lib_fields4(input, &input_init, &input_seq,
                            &input_pending, &freshness)
-        || !m8_instance_lib(g_kernel, 7u, &output, &container)
+        || !m8_instance_lib(g_kernel, roles.output_bank_owner, &output, &container)
         || !m8_lib_fields4(output, &output_init, &output_seq,
                            &output_pending, &desired))
         return UINT64_MAX;
@@ -3090,6 +3136,15 @@ uint64_t kernel_m8_profile_admission_selftest(void)
 {
     const runtime_identity_t *live = runtime_identity_get();
     uint64_t failures = 0;
+    i2_closed_process_roles_t saved;
+    int had_roles = i2_closed_process_roles_live(&saved);
+    failures |= i2_closed_process_selftest();
+    if (had_roles)
+        (void)i2_closed_process_roles_publish(&saved);
+    else
+        i2_closed_process_roles_clear();
+    if (closed_process_io_authorized())
+        (void)i2_closed_process_roles_refresh(g_kernel);
     if (!live || !closed_process_io_authorized()
         || !runtime_identity_validate_closed_process_io_gate(
             g_kernel, live, 0))
@@ -3181,10 +3236,13 @@ static int m8_checkpoint_quiescent(void)
         return 0;
     int running = m7_mode() == M7_MODE_RUNNING;
     int active = 0, delay_slot = -1;
+    i2_closed_process_roles_t roles;
+    if (!closed_roles_now(&roles))
+        return 0;
     for (int i = 0; i < TARM_MAX; i++) {
         if (!g_tarms[i].active) continue;
         active++;
-        if (g_tarms[i].id == 3u) delay_slot = i;
+        if (g_tarms[i].id == roles.timer_owner) delay_slot = i;
     }
     if ((running && (active != 1 || delay_slot < 0))
         || (!running && active != 0))
@@ -3193,7 +3251,7 @@ static int m8_checkpoint_quiescent(void)
     noun delay, delay_cell, input, input_cell, output, output_cell;
     noun pending, last_dt, in_pending, freshness, out_pending, desired;
     uint64_t delay_seq, input_init, input_seq, output_init, output_seq;
-    if (!m8_instance_lib(g_kernel, 3u, &delay, &delay_cell)
+    if (!m8_instance_lib(g_kernel, roles.timer_owner, &delay, &delay_cell)
         || !noun_take(delay, &pending, &last_dt)
         || !noun_is_direct(pending)
         || !noun_take(last_dt, &pending, &last_dt)
@@ -3209,11 +3267,11 @@ static int m8_checkpoint_quiescent(void)
     } else if (pending != NOUN_ZERO) {
         return 0;
     }
-    if (!m8_instance_lib(g_kernel, 4u, &input, &input_cell)
+    if (!m8_instance_lib(g_kernel, roles.input_bank_owner, &input, &input_cell)
         || !m8_lib_fields4(input, &input_init, &input_seq,
                            &in_pending, &freshness)
         || in_pending != NOUN_ZERO || freshness != NOUN_ZERO
-        || !m8_instance_lib(g_kernel, 7u, &output, &output_cell)
+        || !m8_instance_lib(g_kernel, roles.output_bank_owner, &output, &output_cell)
         || !m8_lib_fields4(output, &output_init, &output_seq,
                            &out_pending, &desired)
         || out_pending != NOUN_ZERO
@@ -3243,7 +3301,9 @@ static int m8_rebuild_quiescent_gate(noun gate, int running,
 {
     noun delay, delay_cell, input, input_cell, output, output_cell;
     noun seq_n, rest, pending, last_dt, n0, n1, token = NOUN_ZERO;
-    if (!m8_instance_lib(gate, 3u, &delay, &delay_cell)
+    i2_closed_process_roles_t roles;
+    if (!i2_closed_process_roles_from_gate(gate, &roles)
+        || !m8_instance_lib(gate, roles.timer_owner, &delay, &delay_cell)
         || !noun_take(delay, &seq_n, &rest) || !noun_is_direct(seq_n)
         || !noun_take(rest, &pending, &last_dt) || !noun_is_direct(last_dt))
         return 0;
@@ -3254,8 +3314,8 @@ static int m8_rebuild_quiescent_gate(noun gate, int running,
             || !token_fields(pending, &saved_gen, &saved_inc,
                              &saved_owner, &saved_seq)
             || saved_gen != generation || saved_inc != incarnation
-            || saved_owner != 3u || saved_seq != sequence
-            || !m8_make_token_checked(generation, incarnation, 3u,
+            || saved_owner != roles.timer_owner || saved_seq != sequence
+            || !m8_make_token_checked(generation, incarnation, roles.timer_owner,
                                       sequence + 1u, &token))
             return 0;
         sequence++;
@@ -3270,7 +3330,7 @@ static int m8_rebuild_quiescent_gate(noun gate, int running,
     noun old_pending, old_tail;
     uint64_t initialized, service_sequence;
     uint64_t expected_initialized = running ? 1u : 0u;
-    if (!m8_instance_lib(gate, 4u, &input, &input_cell)
+    if (!m8_instance_lib(gate, roles.input_bank_owner, &input, &input_cell)
         || !m8_lib_fields4(input, &initialized, &service_sequence,
                            &old_pending, &old_tail)
         || initialized != expected_initialized
@@ -3280,7 +3340,7 @@ static int m8_rebuild_quiescent_gate(noun gate, int running,
         || !alloc_cell_checked(direct(initialized), n1, &n0))
         return 0;
     ((cell_t *)(uintptr_t)cell_ptr(input_cell))->head = n0;
-    if (!m8_instance_lib(gate, 7u, &output, &output_cell)
+    if (!m8_instance_lib(gate, roles.output_bank_owner, &output, &output_cell)
         || !m8_lib_fields4(output, &initialized, &service_sequence,
                            &old_pending, &old_tail)
         || initialized != expected_initialized
@@ -3695,14 +3755,16 @@ static int m8_saved_checkpoint_quiescent(
     noun input, input_pending, freshness;
     noun output, output_pending, desired;
     uint64_t delay_seq, input_initialized, output_initialized, service_seq;
-    if (!m8_instance_lib(view->gate, 3u, &delay, &container)
+    i2_closed_process_roles_t roles;
+    if (!i2_closed_process_roles_from_gate(view->gate, &roles)
+        || !m8_instance_lib(view->gate, roles.timer_owner, &delay, &container)
         || !noun_take(delay, &seq_n, &rest) || !noun_is_direct(seq_n)
         || !noun_take(rest, &pending, &last_dt) || !noun_is_direct(last_dt)
-        || !m8_instance_lib(view->gate, 4u, &input, &container)
+        || !m8_instance_lib(view->gate, roles.input_bank_owner, &input, &container)
         || !m8_lib_fields4(input, &input_initialized, &service_seq,
                            &input_pending, &freshness)
         || input_pending != NOUN_ZERO || freshness != NOUN_ZERO
-        || !m8_instance_lib(view->gate, 7u, &output, &container)
+        || !m8_instance_lib(view->gate, roles.output_bank_owner, &output, &container)
         || !m8_lib_fields4(output, &output_initialized, &service_seq,
                            &output_pending, &desired)
         || output_pending != NOUN_ZERO
@@ -3720,7 +3782,7 @@ static int m8_saved_checkpoint_quiescent(
     if (direct_val(last_dt) == 0
         || !token_fields(pending, &gen, &inc, &owner, &token_seq)
         || gen != view->identity.generation || inc != view->incarnation
-        || owner != 3u || token_seq != delay_seq || view->timer_n != 1
+        || owner != roles.timer_owner || token_seq != delay_seq || view->timer_n != 1
         || !noun_is_cell(view->tarms))
         return 0;
     noun entry = ((cell_t *)(uintptr_t)cell_ptr(view->tarms))->head;
@@ -3733,7 +3795,7 @@ static int m8_saved_checkpoint_quiescent(
         && positive_direct(period_n, &period)
         && noun_take(rest, &remain_n, &timer_token)
         && positive_direct(remain_n, &remain)
-        && id == 3u && period == ns_to_cntvct_ticks(direct_val(last_dt))
+        && id == roles.timer_owner && period == ns_to_cntvct_ticks(direct_val(last_dt))
         && remain <= period && noun_eq(timer_token, pending);
 }
 
@@ -3871,7 +3933,12 @@ static int checkpoint_install_m7_candidate(
             || !make_timer_event_checked(m8_timer_token, &event_cell))
             goto m7_alloc_fail;
         candidate_tarms[0].active = 1;
-        candidate_tarms[0].id = 3u;
+        {
+            i2_closed_process_roles_t roles;
+            if (!i2_closed_process_roles_from_gate(candidate_gate, &roles))
+                goto m7_alloc_fail;
+            candidate_tarms[0].id = roles.timer_owner;
+        }
         candidate_tarms[0].period = ticks;
         candidate_tarms[0].next = now + ticks;
         candidate_tarms[0].i2_token = m8_timer_token;
@@ -4563,6 +4630,7 @@ uint64_t kernel_m8_checkpoint_restore_selftest(void)
         return UINT64_MAX;
 
     uint64_t failures = 0;
+    i2_closed_process_roles_t roles;
     noun ckpt, pair;
 
     /* A nonempty application FIFO is never normalized away. */
@@ -4638,8 +4706,11 @@ uint64_t kernel_m8_checkpoint_restore_selftest(void)
         for (int i = 0; i < 4 && shaped; i++)
             shaped = noun_take(rest, &field, &rest);
         if (!shaped || !noun_take(rest, &gate, &rest)
-            || !m8_instance_lib(gate, which == 0 ? 4u : 7u,
-                                &lib, &container)
+            || !i2_closed_process_roles_from_gate(gate, &roles)
+            || !m8_instance_lib(
+                gate,
+                which == 0 ? roles.input_bank_owner : roles.output_bank_owner,
+                &lib, &container)
             || !noun_is_cell(lib)) {
             noun_tx_abort();
             failures |= bit;
