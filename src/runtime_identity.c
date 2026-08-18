@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "runtime_identity.h"
+#include "i2_admission_policy.h"
 #include "bounded_cue.h"
 #include "blake3.h"
 #include "jam.h"
@@ -32,16 +33,6 @@ static const uint8_t g_m7_digital_out_request_grant_fingerprint[8] = {
 };
 static const uint8_t g_closed_process_io_request_grant_fingerprint[8] = {
     0x79, 0x90, 0xcd, 0xd1, 0x04, 0x7d, 0xaa, 0xc3
-};
-/* Canonical jam(program) BLAKE3 bytes for the one selector-3 graph.  The
- * published hexadecimal atom is
- * 38fc05c6ddab1ab20c0aaea87b87b242e7fa516060762e7afa47f7e8d8f3b1a8;
- * RuntimeIdentity stores that atom little-endian. */
-static const uint8_t g_closed_process_io_program_hash[32] = {
-    0xa8, 0xb1, 0xf3, 0xd8, 0xe8, 0xf7, 0x47, 0xfa,
-    0x7a, 0x2e, 0x76, 0x60, 0x60, 0x51, 0xfa, 0xe7,
-    0x42, 0xb2, 0x87, 0x7b, 0xa8, 0xae, 0x0a, 0x0c,
-    0xb2, 0x1a, 0xab, 0xdd, 0xc6, 0x05, 0xfc, 0x38
 };
 static const uint8_t g_m8_executable_domain[11] = {
     'I', '2', 'M', '8', 'E', 'X', 'E', 'C', 'v', '1', 0
@@ -354,7 +345,7 @@ int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
         || !atom_matches_hash(program_hash, id->program_hash))
         return 0;
 
-    if (bytes_eq(id->program_hash, g_closed_process_io_program_hash, 32)) {
+    if (i2_admission_program_known(id->program_hash)) {
         noun instance_states, formula;
         if (!take(dynamic, &instance_states, &formula)
             || !noun_matches_hash(battery, id->battery_hash)
@@ -392,7 +383,7 @@ int runtime_identity_validate_closed_process_io_gate(
     const uint8_t *encoded;
     uint64_t encoded_len;
     uint8_t actual[32];
-    if (!bytes_eq(id->program_hash, g_closed_process_io_program_hash, 32)
+    if (!i2_admission_program_known(id->program_hash)
         || !take(gate, &battery, &sample)
         || !take(sample, &zero, &state)
         || !take(state, &tag, &rest)
@@ -618,10 +609,15 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
         if (capability_profile != expected_profile
             || !bytes_eq(header + 248, fingerprint, 8))
             return PILL_I2_IDENTITY;
-        if (closed_io && !bytes_eq(
-                identity.program_hash,
-                g_closed_process_io_program_hash, 32))
-            return PILL_I2_IDENTITY;
+        if (closed_io) {
+            uint8_t pill_digest[32];
+            uint64_t pill_bytes = PILL_I2_HEADER_SIZE + len;
+            if (!i2_admission_pill_digest(base, pill_bytes, pill_digest)
+                || !i2_admission_match_header(
+                    identity.program_hash, identity.package_hash,
+                    pill_digest, capability_profile))
+                return PILL_I2_IDENTITY;
+        }
     } else if (capability_profile != RUNTIME_CAPABILITY_PROFILE_NONE
                || bytes_nonzero(header + 248, 8)) {
         return PILL_I2_IDENTITY;
@@ -633,6 +629,19 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
     if (cue_status != CUE_BOUNDED_OK)
         return cue_status == CUE_BOUNDED_ALLOC
             ? PILL_I2_ALLOC : PILL_I2_CUE;
+    if (closed_io) {
+        uint8_t limits_hash[32];
+        uint8_t pill_digest[32];
+        uint64_t pill_bytes = PILL_I2_HEADER_SIZE + len;
+        if (!i2_admission_limits_hash(gate, limits_hash)
+            || !i2_admission_pill_digest(base, pill_bytes, pill_digest)
+            || !i2_admission_lookup(
+                identity.program_hash, identity.package_hash,
+                pill_digest, capability_profile, limits_hash, 0)) {
+            noun_tx_abort();
+            return PILL_I2_IDENTITY;
+        }
+    }
     int gate_ok = closed_io
         ? runtime_identity_validate_closed_process_io_gate(
             gate, &identity, 0)

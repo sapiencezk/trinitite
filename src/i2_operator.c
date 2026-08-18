@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include "i2_operator.h"
+#include "i2_admission_policy.h"
 
 void *memcpy(void *dst, const void *src, size_t n);
 void *memset(void *dst, int value, size_t n);
@@ -75,7 +76,10 @@ static struct {
     uint8_t pending[FRAME_MAX];
     uint64_t pending_len;
     int mute_tx;
+    uint64_t tx_stall_start;
 } g_op;
+
+#define OP_TX_STALL_TICKS_SEC 5u
 
 static uint64_t counter_now(void)
 {
@@ -393,10 +397,15 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
             *body = reject_body("state");
             return 1;
         }
+        if (m7_stage_open()) {
+            *result = cord_from_bytes("rejected", 8);
+            *body = reject_body("busy");
+            return 1;
+        }
         if (!take(payload, &stage_n, &rest) || !take(rest, &total_n, &digest_n)
             || !direct_u64(stage_n, &stage_id) || !direct_u64(total_n, &total)
             || !noun_atom_read_fixed(digest_n, digest, 32) || stage_id == 0
-            || total == 0 || total > 131066) {
+            || total == 0 || total > I2_M10_MAX_STAGE_BYTES) {
             *result = cord_from_bytes("rejected", 8);
             *body = reject_body("bounds");
             return 1;
@@ -406,7 +415,6 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
         if (st != 0) {
             *result = cord_from_bytes("failed", 6);
             *body = fail_body("installation", (uint64_t)(uint32_t)(-st));
-            g_op.install_condition = INST_FAILED;
             return 1;
         }
         g_op.install_condition = INST_STAGING;
@@ -416,14 +424,35 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
     if (op == OP_ICHUNK) {
         noun stage_n, rest, offset_n, data_n;
         uint64_t stage_id, offset;
-        uint8_t data[4096];
+        uint8_t data[I2_M10_MAX_CHUNK_BYTES];
         size_t len = 0;
         if (!take(payload, &stage_n, &rest) || !take(rest, &offset_n, &data_n)
             || !direct_u64(stage_n, &stage_id) || !direct_u64(offset_n, &offset)
-            || !atom_bytes(data_n, data, sizeof data, &len) || len == 0) {
+            || !atom_bytes(data_n, data, sizeof data, &len) || len == 0
+            || len > I2_M10_MAX_CHUNK_BYTES) {
             *result = cord_from_bytes("rejected", 8);
             *body = reject_body("bounds");
             return 1;
+        }
+        if (!m7_stage_open() || stage_id != m7_stage_id()) {
+            *result = cord_from_bytes("rejected", 8);
+            *body = reject_body("state");
+            return 1;
+        }
+        if (m7_stage_chunks() >= I2_M10_MAX_CHUNKS
+            || offset != m7_stage_received()) {
+            *result = cord_from_bytes("rejected", 8);
+            *body = reject_body("bounds");
+            return 1;
+        }
+        {
+            uint64_t remaining = m7_stage_total() - offset;
+            int final_chunk = len == remaining;
+            if (!final_chunk && len != I2_M10_MAX_CHUNK_BYTES) {
+                *result = cord_from_bytes("rejected", 8);
+                *body = reject_body("bounds");
+                return 1;
+            }
         }
         int st = m7_deploy_chunk(stage_id, offset, data, len);
         if (st != 0) {
@@ -546,6 +575,7 @@ void i2_operator_poll(void)
 {
     expire_lease();
     g_op.scheduler_ticks++;
+    uint64_t before = g_op.tx_off;
     while (g_op.tx_off < g_op.tx_len) {
         if (g_op.mute_tx) {
             if (uart_test_tx_is_stuck())
@@ -557,10 +587,29 @@ void i2_operator_poll(void)
             break;
         g_op.tx_off++;
     }
+    if (g_op.tx_len && g_op.tx_off < g_op.tx_len) {
+        if (g_op.tx_off == before) {
+            if (!g_op.tx_stall_start)
+                g_op.tx_stall_start = counter_now();
+            if (counter_now() - g_op.tx_stall_start
+                >= counter_freq() * OP_TX_STALL_TICKS_SEC) {
+                g_op.tx_len = 0;
+                g_op.tx_off = 0;
+                g_op.pending_len = 0;
+                g_op.active = 0;
+                g_op.tx_stall_start = 0;
+            }
+        } else {
+            g_op.tx_stall_start = 0;
+        }
+    } else {
+        g_op.tx_stall_start = 0;
+    }
     if (g_op.tx_len && g_op.tx_off >= g_op.tx_len) {
         g_op.tx_len = 0;
         g_op.tx_off = 0;
         g_op.active = 0;
+        g_op.tx_stall_start = 0;
         if (g_op.pending_len) {
             (void)queue_frame(g_op.pending, g_op.pending_len);
             g_op.pending_len = 0;

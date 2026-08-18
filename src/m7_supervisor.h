@@ -128,6 +128,7 @@ int      m7_copy_stage_digest(uint8_t out[32]);
 uint64_t m7_stage_id(void);
 uint64_t m7_stage_received(void);
 uint64_t m7_stage_total(void);
+uint64_t m7_stage_chunks(void);
 int      m7_stage_open(void);
 int      m7_stage_sealed(void);
 int      m7_outputs_safe(void);

@@ -1162,8 +1162,8 @@ int m7_deploy_activate(void)
     }
     uint64_t new_incarnation = g_m7.incarnation + 1;
     noun published_gate;
-    if (!kernel_m7_gate_with_incarnation(
-            candidate_gate, new_incarnation, &published_gate)) {
+    if (!kernel_m7_gate_with_identity_incarnation(
+            candidate_gate, &identity, new_incarnation, &published_gate)) {
         noun_tx_abort();
         heap_persist_abort_tx();
         return M7_DEPLOY_CANDIDATE;
@@ -1277,6 +1277,7 @@ int m7_copy_stage_digest(uint8_t out[32])
 uint64_t m7_stage_id(void) { return g_m7.stage_id; }
 uint64_t m7_stage_received(void) { return g_m7.stage_received; }
 uint64_t m7_stage_total(void) { return g_m7.stage_total; }
+uint64_t m7_stage_chunks(void) { return g_m7.stage_chunks; }
 int m7_stage_open(void) { return g_m7.stage_open; }
 int m7_stage_sealed(void) { return g_m7.stage_sealed; }
 int m7_outputs_safe(void) { return g_m7.safe; }
