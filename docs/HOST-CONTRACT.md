@@ -1,7 +1,11 @@
 # Trinitite host contract (IEC consumers)
 
-**Status:** as built through canonical I2 Hybrid v1 Milestone 7 R&D baseline;
-M6 remains a retained historical/recovery target
+**Status:** host contract for the canonical I2 Hybrid v1 M10 bounded R&D
+product. M9 is an internal implementation layer; M8 is the bootstrap fixture;
+M0–M7 remain retained historical/regression layers. In a parent checkout, read
+`docs/I2-M10-STATUS.md`. Standalone Trinitite readers should navigate through
+the [1499kernel parent repository](https://github.com/sapiencezk/1499kernel);
+M10 is a parent-owned product contract, not a standalone Trinitite product.
 **Audience:** IEC 61499 Nock kernels / pills on this substrate  
 **Normative product freeze:** `1499kernel/docs/I1.md` (do not reopen without user)  
 **Epic log:** `1499kernel/docs/HOST-INDUSTRIAL.md`
@@ -432,12 +436,13 @@ calling it. See the
 parent `docs/I2-M7-CONTRACT.md` and `docs/I2-M7-VERDICT.md` for the exact
 profile and nonclaims.
 
-## M8 closed process-I/O canonical bounded R&D profile
+## M8 closed process-I/O retained bootstrap profile
 
-M8 is the canonical local operator profile. M7 remains available only through
-explicit historical/recovery commands. PILL selector 3 (`closed-process-io`) retains ABI family
-`(1,2)` and authorizes exactly capability 3 fixed input plus capability 2
-fixed output. Input backend selection is independent of output. Production
+M8 is the retained embedded bootstrap/profile layer used by M10, not a
+separate local operator product. M7 remains available only through explicit
+historical/recovery commands. PILL selector 3 (`closed-process-io`) retains ABI
+family `(1,2)` and authorizes exactly capability 3 fixed input plus capability
+2 fixed output. Input backend selection is independent of output. Production
 input configures GPIO 5/6/13/19/26 and performs exactly one GPLEV0 read per
 accepted request; the fake setter accepts only a logical atom 0..31. Output
 accepts a direct atom 0..7 and retains clear-before-set/safe-low.
@@ -451,8 +456,8 @@ anchor
 and the operator-commissioned 2 ms alternate must match that catalog
 completely, including execution limits. The same catalog bind applies to
 clean commissioning, PILL2 admission, checkpoint restore, and snapshot
-selection. A name or label is not authority. M8 without `I2_OPERATOR`
-remains the single-anchor canonical product.
+selection. A name or label is not authority. M8 without `I2_OPERATOR` remains
+the retained single-anchor bootstrap/regression profile.
 
 Input request is `[token 3 BANK_READ 0 0]`. Output request is
 `[token 2 BANK_WRITE deadline bank]`. Both require exact full
@@ -477,14 +482,14 @@ emulated GPSET/GPCLR/GPLEV latch observation only. It is not external-input,
 electrical, timing, physical-media, safety, certification, interoperability,
 or complete-conformance evidence.
 
-## M9 1499 Operator — candidate exclusive UART
+## M9 1499 Operator — retained M10 implementation layer
 
-The production operator build (`I2_OPERATOR=1`) owns UART exclusively. It
-does not start the Forth console. After I2FN cue, a `%i2-operator` noun is
-classified and handled by `i2_operator.c`; it is never slammed as an
-application event. Selector-3 application ingress remains fenced. The
-adapter calls the existing M7 supervisor for START/STOP and the existing
-vendor installation/snapshot seams. One request is active; TX is
-nonblocking and resumable; a five-second stage inactivity lease aborts
-only the volatile stage. Diagnostic ASCII is not emitted on the operator
-UART.
+The canonical M10 `1499` build (`I2_OPERATOR=1`) owns UART exclusively. M9
+names the retained protocol/session implementation it reuses, not a separate
+product. It does not start the Forth console. After I2FN cue, a `%i2-operator`
+noun is classified and handled by `i2_operator.c`; it is never slammed as an
+application event. Selector-3 application ingress remains fenced. The adapter
+calls the existing M7 supervisor for START/STOP and the existing vendor
+installation/snapshot seams. One request is active; TX is nonblocking and
+resumable; a five-second stage inactivity lease aborts only the volatile stage.
+Diagnostic ASCII is not emitted on the operator UART.
