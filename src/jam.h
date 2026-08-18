@@ -25,6 +25,9 @@ noun cue(noun a);   /* atom  → deserialized noun            */
  * until the next jam operation and never enter the persistent atom store. */
 int jam_encode_bytes_checked(noun n, const uint8_t **out,
                              uint64_t *out_bytes);
+/* Same writer, but backrefs only the same noun word. Matches host jam of a
+ * freshly cued ResourceProgram (structural twins stay distinct). */
+int jam_encode_bytes_identity(noun n, const uint8_t **out, uint64_t *out_bytes);
 uint64_t jam_encode_bytes_selftest(void);
 
 /* The target jam writer has a fixed 128 KiB output buffer.  This checked

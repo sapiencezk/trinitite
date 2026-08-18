@@ -40,7 +40,13 @@ static const uint8_t g_m8_executable_domain[11] = {
 static const uint8_t g_m8_formula_domain[11] = {
     'I', '2', 'M', '8', 'F', 'O', 'R', 'M', 'v', '1', 0
 };
+#ifdef I2_M11
+/* M11 specialized formulas have ~35k unique cells; 32k open-addressing
+ * fills and m8_formula_merkle returns 0, so a valid PILL is GATE-rejected. */
+#define M8_FORMULA_HASH_CACHE_CAP 65536u
+#else
 #define M8_FORMULA_HASH_CACHE_CAP 32768u
+#endif
 static noun g_m8_formula_hash_keys[M8_FORMULA_HASH_CACHE_CAP];
 static uint8_t g_m8_formula_hash_values[M8_FORMULA_HASH_CACHE_CAP][32];
 static runtime_identity_t g_live_identity;
@@ -208,6 +214,28 @@ static int noun_matches_hash(noun n, const uint8_t expected[32])
     return bytes_eq(actual, expected, sizeof actual);
 }
 
+static int jam_program_identity(noun program, const uint8_t **encoded,
+                                uint64_t *encoded_len)
+{
+    noun copy;
+    /* Gate cue may share program cells with the header. Copy the subgraph
+     * so pointer-key jam matches the host's standalone program jam. */
+    if (!noun_copy_checked(program, &copy))
+        return -1;
+    return jam_encode_bytes_identity(copy, encoded, encoded_len);
+}
+
+static int noun_matches_identity_hash(noun n, const uint8_t expected[32])
+{
+    const uint8_t *encoded;
+    uint64_t encoded_len;
+    uint8_t actual[32];
+    if (jam_program_identity(n, &encoded, &encoded_len) != 0)
+        return 0;
+    blake3_hash(encoded, (size_t)encoded_len, actual);
+    return bytes_eq(actual, expected, sizeof actual);
+}
+
 static int m8_formula_merkle(noun n, uint8_t out[32], uint32_t depth)
 {
     if (depth > 512)
@@ -295,7 +323,10 @@ static int m8_executable_matches(noun battery, noun program, noun formula,
             if (!m8_formula_merkle(value, component, 0))
                 return 0;
         } else {
-            if (jam_encode_bytes_checked(value, &encoded, &encoded_len) != 0)
+            int jammed = i == 0
+                ? jam_encode_bytes_checked(value, &encoded, &encoded_len)
+                : jam_program_identity(value, &encoded, &encoded_len);
+            if (jammed != 0)
                 return 0;
             blake3_hash(encoded, (size_t)encoded_len, component);
         }
@@ -349,7 +380,7 @@ int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
         noun instance_states, formula;
         if (!take(dynamic, &instance_states, &formula)
             || !noun_matches_hash(battery, id->battery_hash)
-            || !noun_matches_hash(program, id->program_hash)
+            || !noun_matches_identity_hash(program, id->program_hash)
             || !noun_is_cell(instance_states)
             || !m8_executable_matches(
                 battery, program, formula, id->package_hash))
@@ -389,7 +420,7 @@ int runtime_identity_validate_closed_process_io_gate(
         || !take(state, &tag, &rest)
         || !take(rest, &header, &state_tail)
         || !take(state_tail, &program, &dynamic)
-        || jam_encode_bytes_checked(program, &encoded, &encoded_len) != 0) {
+        || jam_program_identity(program, &encoded, &encoded_len) != 0) {
         return 0;
     }
     blake3_hash(encoded, (size_t)encoded_len, actual);

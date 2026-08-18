@@ -2,7 +2,13 @@
 #include <stdint.h>
 #include "bounded_cue.h"
 
+#ifdef I2_M11
+/* M11 BFB gates occupy ~70k unique jam backref slots. The 64k table
+ * linear-probes until charge() reports WORK before CACHE. */
+#define BOUNDED_CACHE_MAX       131072u
+#else
 #define BOUNDED_CACHE_MAX       65536u
+#endif
 #define BOUNDED_ATOM_LIMBS_MAX  32768u /* 256 KiB */
 
 typedef struct {
@@ -34,7 +40,11 @@ const cue_bounded_limits_t cue_i2_limits = {
     .max_nodes = 131072,
     .max_cells = 65536,
     .max_backrefs = 65536,
+#ifdef I2_M11
+    .max_cache_entries = 131072,
+#else
     .max_cache_entries = 65536,
+#endif
     .max_atom_bytes = 256u * 1024u,
     .max_total_atom_bytes = 1024u * 1024u,
     .max_work = 2000000

@@ -85,6 +85,9 @@ static void do_mat(jambuf_t *jb, noun k) {
 typedef struct { noun key; uint64_t pos; int used; } jcent_t;
 
 static jcent_t g_jcache[JAM_CACHE_SZ];
+/* 0: structural noun_eq (M8 trampoline battery digest).
+ * 1: pointer identity (host Python jam of ResourceProgram). */
+static int g_jam_identity_keys;
 
 static void jcache_init(void) {
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) g_jcache[i].used = 0;
@@ -99,7 +102,11 @@ static int jcache_get(noun n, uint64_t *pos) {
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) {
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) return 0;
-        if (noun_eq(g_jcache[idx].key, n)) { *pos = g_jcache[idx].pos; return 1; }
+        if (g_jam_identity_keys ? g_jcache[idx].key == n
+                                : noun_eq(g_jcache[idx].key, n)) {
+            *pos = g_jcache[idx].pos;
+            return 1;
+        }
     }
     return 0;
 }
@@ -110,6 +117,11 @@ static void jcache_put(noun n, uint64_t pos) {
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) {
             g_jcache[idx].key = n; g_jcache[idx].pos = pos; g_jcache[idx].used = 1;
+            return;
+        }
+        if (g_jam_identity_keys ? g_jcache[idx].key == n
+                                : noun_eq(g_jcache[idx].key, n)) {
+            g_jcache[idx].pos = pos;
             return;
         }
     }
@@ -142,6 +154,17 @@ static void do_jam(noun n) {
             jcache_put(n, g_jambuf.cur);
             jb_write(&g_jambuf, 0);     /* atom tag */
             do_mat(&g_jambuf, n);
+        } else if (g_jam_identity_keys) {
+            /* Host jam.py: re-emit the atom when value.bit_length()
+             * is strictly less than the cached bit-position. */
+            if (bn_met(n) < u64_bits(cached_pos)) {
+                jcache_put(n, g_jambuf.cur);
+                jb_write(&g_jambuf, 0);
+                do_mat(&g_jambuf, n);
+            } else {
+                jb_write(&g_jambuf, 1); jb_write(&g_jambuf, 1);
+                do_mat(&g_jambuf, direct(cached_pos));
+            }
         } else {
             /* choose shorter: direct atom encoding vs back-reference */
             uint64_t atom_bits = 1 + mat_len(n);
@@ -194,6 +217,15 @@ static void do_jam_len(noun n)
     if (!found) {
         jcache_put(n, g_jam_len);
         jam_len_add(1 + mat_len(n));
+        return;
+    }
+    if (g_jam_identity_keys) {
+        if (bn_met(n) < u64_bits(cached_pos)) {
+            jcache_put(n, g_jam_len);
+            jam_len_add(1 + mat_len(n));
+        } else {
+            jam_len_add(2 + mat_len(direct(cached_pos)));
+        }
         return;
     }
     uint64_t atom_bits = 1 + mat_len(n);
@@ -252,6 +284,14 @@ int jam_encode_bytes_checked(noun n, const uint8_t **out,
     *out = (const uint8_t *)(const void *)g_jambuf.buf;
     *out_bytes = bytes;
     return 0;
+}
+
+int jam_encode_bytes_identity(noun n, const uint8_t **out, uint64_t *out_bytes)
+{
+    g_jam_identity_keys = 1;
+    int rc = jam_encode_bytes_checked(n, out, out_bytes);
+    g_jam_identity_keys = 0;
+    return rc;
 }
 
 static int jam_byte_view_matches(noun n)
