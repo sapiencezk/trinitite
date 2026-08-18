@@ -1352,6 +1352,33 @@ int m7_checkpoint_save(void)
     return result;
 }
 
+/* Snapshot encode is structural jam, so a later cue collapses program
+ * twins. Keep the admitted PILL executable and only take instance state
+ * from the snapshot; later identity-jam checks need the original DAG. */
+static int m7_bind_snapshot_instances(noun admitted, noun snapshot)
+{
+    noun a_battery, a_sample, a_zero, a_state, a_tag, a_rest, a_header;
+    noun a_tail, a_program, a_dynamic;
+    noun s_battery, s_sample, s_zero, s_state, s_tag, s_rest, s_header;
+    noun s_tail, s_program, s_dynamic, s_states, s_formula;
+    if (!take(admitted, &a_battery, &a_sample)
+        || !take(a_sample, &a_zero, &a_state)
+        || !take(a_state, &a_tag, &a_rest)
+        || !take(a_rest, &a_header, &a_tail)
+        || !take(a_tail, &a_program, &a_dynamic)
+        || !noun_is_cell(a_dynamic)
+        || !take(snapshot, &s_battery, &s_sample)
+        || !take(s_sample, &s_zero, &s_state)
+        || !take(s_state, &s_tag, &s_rest)
+        || !take(s_rest, &s_header, &s_tail)
+        || !take(s_tail, &s_program, &s_dynamic)
+        || !take(s_dynamic, &s_states, &s_formula)
+        || !noun_is_cell(s_states))
+        return 0;
+    ((cell_t *)(uintptr_t)cell_ptr(a_dynamic))->head = s_states;
+    return 1;
+}
+
 int m7_boot_snapshot(void)
 {
     noun root = cold_snap_load();
@@ -1442,7 +1469,8 @@ int m7_boot_snapshot(void)
     int m7_was_ready = m7_ready();
     if (!kernel_m7_gate_with_identity_incarnation(
             pill_gate, &snapshot_identity, direct_val(incarnation),
-            &live_gate)) {
+            &live_gate)
+        || !m7_bind_snapshot_instances(live_gate, gate)) {
         if (noun_tx_active()) noun_tx_abort();
         return -1;
     }
@@ -1452,7 +1480,7 @@ int m7_boot_snapshot(void)
     }
     if (kernel_m7_restore_checkpoint(
             &snapshot_identity, capability, direct_val(mode),
-            gate, queue, timer,
+            live_gate, queue, timer,
             NOUN_ZERO) != 0) {
         if (!m7_was_ready)
             m7_restore_discard();
