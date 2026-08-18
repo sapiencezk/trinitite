@@ -183,8 +183,8 @@ test-build-config:
 		DIGITAL_OUT_BACKEND=bcm2838 M8_EVIDENCE=0 all
 	$(MAKE) -j8 COLD_MEDIA=fake DIGITAL_IN_BACKEND=fake \
 		DIGITAL_OUT_BACKEND=bcm2838 M8_EVIDENCE=1 all
-	test -s .build/ram-bcm2838-bcm2838-0-0/kernel8.img
-	test -s .build/fake-fake-bcm2838-1-0/kernel8.img
+	test -s .build/ram-bcm2838-bcm2838-0-0-0/kernel8.img
+	test -s .build/fake-fake-bcm2838-1-0-0/kernel8.img
 	test -s kernel8.elf
 	test -s kernel8.img
 
