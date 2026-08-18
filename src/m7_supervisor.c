@@ -1409,7 +1409,7 @@ int m7_boot_snapshot(void)
     uint64_t snapshot_gate_incarnation;
     if (!runtime_identity_from_noun(identity_noun, &snapshot_identity)
         || !m7_is_identity(&snapshot_identity)
-        || !runtime_identity_validate_gate(
+        || !runtime_identity_validate_gate_header(
             gate, &snapshot_identity, &snapshot_gate_incarnation)
         || snapshot_gate_incarnation != direct_val(incarnation))
         return -1;
@@ -1422,7 +1422,8 @@ int m7_boot_snapshot(void)
         &pill_gate, &pill_identity, &capability);
     if (status != PILL_I2_OK
         || !runtime_identity_equal(&pill_identity, &snapshot_identity)
-        || !runtime_identity_validate_gate(pill_gate, &snapshot_identity, 0)) {
+        || !runtime_identity_validate_gate(pill_gate, &snapshot_identity, 0)
+        || !runtime_identity_meanings_match(gate, pill_gate)) {
         if (noun_tx_active()) noun_tx_abort();
         return -1;
     }

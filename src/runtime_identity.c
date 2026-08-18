@@ -341,14 +341,33 @@ static int m8_executable_matches(noun battery, noun program, noun formula,
     return bytes_eq(actual, expected, sizeof actual);
 }
 
-int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
-                                   uint64_t *incarnation_out)
+static int gate_take_program_formula(noun gate, noun *battery_out,
+                                     noun *program_out, noun *formula_out)
+{
+    noun battery, sample, zero, state, tag, rest, header, state_tail;
+    noun program, dynamic, instance_states, formula;
+    if (!take(gate, &battery, &sample)
+        || !take(sample, &zero, &state)
+        || !take(state, &tag, &rest)
+        || !take(rest, &header, &state_tail)
+        || !take(state_tail, &program, &dynamic)
+        || !take(dynamic, &instance_states, &formula))
+        return 0;
+    if (battery_out)
+        *battery_out = battery;
+    if (program_out)
+        *program_out = program;
+    if (formula_out)
+        *formula_out = formula;
+    return 1;
+}
+
+static int validate_gate_common(noun gate, const runtime_identity_t *id,
+                                uint64_t *incarnation_out,
+                                int check_executable)
 {
     noun battery, sample, zero, state;
     noun tag, state_rest, header, state_tail, program, dynamic;
-    (void)battery;
-    (void)program;
-    (void)dynamic;
     if (!runtime_identity_supported(id))
         return 0;
     if (!take(gate, &battery, &sample)
@@ -380,10 +399,12 @@ int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
         noun instance_states, formula;
         if (!take(dynamic, &instance_states, &formula)
             || !noun_matches_hash(battery, id->battery_hash)
-            || !noun_matches_identity_hash(program, id->program_hash)
-            || !noun_is_cell(instance_states)
-            || !m8_executable_matches(
-                battery, program, formula, id->package_hash))
+            || !noun_is_cell(instance_states))
+            return 0;
+        if (check_executable
+            && (!noun_matches_identity_hash(program, id->program_hash)
+                || !m8_executable_matches(
+                    battery, program, formula, id->package_hash)))
             return 0;
     }
 
@@ -400,6 +421,34 @@ int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
         return 0;
     if (incarnation_out)
         *incarnation_out = direct_val(incarnation);
+    return 1;
+}
+
+int runtime_identity_validate_gate(noun gate, const runtime_identity_t *id,
+                                   uint64_t *incarnation_out)
+{
+    return validate_gate_common(gate, id, incarnation_out, 1);
+}
+
+int runtime_identity_validate_gate_header(
+    noun gate, const runtime_identity_t *id, uint64_t *incarnation_out)
+{
+    return validate_gate_common(gate, id, incarnation_out, 0);
+}
+
+int runtime_identity_meanings_match(noun live_gate, noun admitted_gate)
+{
+    noun live_prog, live_form, adm_prog, adm_form;
+    uint8_t live_d[32], adm_d[32];
+    if (!gate_take_program_formula(live_gate, 0, &live_prog, &live_form)
+        || !gate_take_program_formula(admitted_gate, 0, &adm_prog, &adm_form)
+        || !m8_formula_merkle(live_prog, live_d, 0)
+        || !m8_formula_merkle(adm_prog, adm_d, 0)
+        || !bytes_eq(live_d, adm_d, sizeof live_d)
+        || !m8_formula_merkle(live_form, live_d, 0)
+        || !m8_formula_merkle(adm_form, adm_d, 0)
+        || !bytes_eq(live_d, adm_d, sizeof live_d))
+        return 0;
     return 1;
 }
 

@@ -109,7 +109,8 @@ static int token_fields(noun token, uint64_t *gen, uint64_t *inc,
 static int closed_process_io_authorized(void);
 static int checkpoint_install_m7_candidate(
     const runtime_identity_t *identity, uint8_t capability_profile,
-    uint64_t mode, noun gate, noun queue, noun tarms, noun manager_result);
+    uint64_t mode, noun gate, noun queue, noun tarms, noun manager_result,
+    int require_jam);
 static int m8_gate_pending_token(noun gate, uint64_t owner, noun *pending);
 
 static int m7_external_event_allowed(noun event)
@@ -3404,7 +3405,7 @@ int kernel_m7_restore_checkpoint(const runtime_identity_t *identity,
 {
     return checkpoint_install_m7_candidate(
         identity, capability_profile, mode, gate, queue, tarms,
-        manager_result);
+        manager_result, 0);
 }
 
 void checkpoint_auto_every(uint64_t n)
@@ -3685,7 +3686,7 @@ static int checkpoint_validate(noun ckpt, checkpoint_view_t *view)
  * candidate to the currently running identity. */
 static int checkpoint_validate_m7_roots(checkpoint_view_t *view)
 {
-    if (!view || !runtime_identity_validate_gate(
+    if (!view || !runtime_identity_validate_gate_header(
             view->gate, &view->identity, &view->incarnation))
         return 0;
     noun tokens[EVQ_CAP + TARM_MAX];
@@ -3804,7 +3805,8 @@ static int m8_saved_checkpoint_quiescent(
  * and identity checks/copies have succeeded. */
 static int checkpoint_install_m7_candidate(
     const runtime_identity_t *identity, uint8_t capability_profile,
-    uint64_t mode, noun gate, noun queue, noun tarms, noun manager_result)
+    uint64_t mode, noun gate, noun queue, noun tarms, noun manager_result,
+    int require_jam)
 {
     if (!identity || !m7_ready() || !noun_is_cell(gate)) {
         g_checkpoint_last_result = COLD_RESULT_SHAPE;
@@ -3818,10 +3820,16 @@ static int checkpoint_install_m7_candidate(
     uint64_t incarnation;
     int m8 = capability_profile
         == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO;
-    int gate_valid = m8
-        ? runtime_identity_validate_closed_process_io_gate(
-            gate, identity, &incarnation)
-        : runtime_identity_validate_gate(gate, identity, &incarnation);
+    int gate_valid;
+    if (m8 && !require_jam)
+        gate_valid = runtime_identity_validate_gate_header(
+            gate, identity, &incarnation);
+    else if (m8)
+        gate_valid = runtime_identity_validate_closed_process_io_gate(
+            gate, identity, &incarnation);
+    else
+        gate_valid = runtime_identity_validate_gate(
+            gate, identity, &incarnation);
     if (!gate_valid || incarnation == 0) {
         g_checkpoint_last_result = COLD_RESULT_SHAPE;
         return -1;
@@ -4589,7 +4597,7 @@ static unsigned checkpoint_test_reject_m8(
             &view.identity,
             RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO,
             M7_MODE_RUNNING, view.gate, view.queue, view.tarms,
-            NOUN_ZERO) != 0;
+            NOUN_ZERO, 1) != 0;
         /* Shape/identity rejection occurs before the candidate opens its
          * persistent transaction, so the caller still owns the decoded
          * scratch transaction in that case. */

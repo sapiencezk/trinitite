@@ -46,6 +46,12 @@ int runtime_identity_equal(const runtime_identity_t *a,
                            const runtime_identity_t *b);
 int runtime_identity_validate_gate(noun gate, const runtime_identity_t *identity,
                                    uint64_t *incarnation_out);
+/* Header, versions, battery, and incarnation only. Used for a live snapshot
+ * gate whose program DAG may have been recopied by slam. */
+int runtime_identity_validate_gate_header(
+    noun gate, const runtime_identity_t *identity, uint64_t *incarnation_out);
+/* Sharing-independent program and formula identity vs an admitted PILL gate. */
+int runtime_identity_meanings_match(noun live_gate, noun admitted_gate);
 int runtime_identity_validate_closed_process_io_gate(
     noun gate, const runtime_identity_t *identity,
     uint64_t *incarnation_out);
