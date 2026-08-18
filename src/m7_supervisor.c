@@ -10,6 +10,7 @@
 #include "digital_in.h"
 #include "kernel.h"
 #include "i2_admission_policy.h"
+#include "i2_closed_process.h"
 #include "jam.h"
 #include "memory.h"
 #include "nock.h"
@@ -1352,6 +1353,137 @@ int m7_checkpoint_save(void)
     return result;
 }
 
+#define M7_SNAP_INSTANCES 16u
+#define M7_SNAP_ATOM_BYTES 256u
+#define M7_SNAP_DEPTH 32u
+
+static int m7_cord_eq(noun n, const char *s)
+{
+    size_t len = 0;
+    while (s[len])
+        len++;
+    return noun_eq(n, cord_from_bytes(s, len));
+}
+
+static int m7_atom_bounded(noun n, unsigned depth)
+{
+    uint8_t buf[M7_SNAP_ATOM_BYTES];
+    if (depth > M7_SNAP_DEPTH)
+        return 0;
+    if (!noun_is_cell(n))
+        return noun_atom_read_fixed(n, buf, sizeof buf);
+    noun h, t;
+    return take(n, &h, &t)
+        && m7_atom_bounded(h, depth + 1)
+        && m7_atom_bounded(t, depth + 1);
+}
+
+static int m7_state_kind_matches(noun fb_kind, noun state_kind)
+{
+    if (m7_cord_eq(fb_kind, "bfb"))
+        return m7_cord_eq(state_kind, "bfb-state");
+    if (m7_cord_eq(fb_kind, "efb"))
+        return m7_cord_eq(state_kind, "efb-state");
+    if (m7_cord_eq(fb_kind, "sifb"))
+        return m7_cord_eq(state_kind, "sifb-state");
+    return 0;
+}
+
+static int m7_fb_kind(noun fb_types, uint64_t ftid, noun *kind_out)
+{
+    unsigned n;
+    for (n = 0; n < 32 && noun_is_cell(fb_types); n++) {
+        noun entry, rest, id, body, kind, rest2;
+        if (!take(fb_types, &entry, &rest) || !take(entry, &id, &body)
+            || !noun_is_direct(id))
+            return 0;
+        fb_types = rest;
+        if (direct_val(id) != ftid)
+            continue;
+        if (!take(body, &kind, &rest2))
+            return 0;
+        *kind_out = kind;
+        return 1;
+    }
+    return 0;
+}
+
+static int m7_program_instances(noun program, uint64_t *ids, noun *kinds,
+                                unsigned *count)
+{
+    noun tag, rest, schema, types, fb_types, instances, more;
+    unsigned n = 0;
+    if (!take(program, &tag, &rest) || !m7_cord_eq(tag, "i2-program")
+        || !take(rest, &schema, &rest) || !take(rest, &types, &rest)
+        || !take(rest, &fb_types, &rest) || !take(rest, &instances, &more))
+        return 0;
+    (void)schema;
+    (void)types;
+    while (noun_is_cell(instances)) {
+        noun entry, tail, iid_n, body, symbol, restb, ftid_n, kind;
+        uint64_t iid;
+        unsigned i;
+        if (n >= M7_SNAP_INSTANCES)
+            return 0;
+        if (!take(instances, &entry, &tail) || !take(entry, &iid_n, &body)
+            || !noun_is_direct(iid_n) || direct_val(iid_n) == 0
+            || !take(body, &symbol, &restb) || !take(restb, &ftid_n, &restb)
+            || !noun_is_direct(ftid_n)
+            || !m7_fb_kind(fb_types, direct_val(ftid_n), &kind))
+            return 0;
+        iid = direct_val(iid_n);
+        for (i = 0; i < n; i++)
+            if (ids[i] == iid)
+                return 0;
+        ids[n] = iid;
+        kinds[n] = kind;
+        n++;
+        instances = tail;
+    }
+    if (n == 0 || instances != NOUN_ZERO)
+        return 0;
+    *count = n;
+    return 1;
+}
+
+static int m7_token_owner_inc(noun token, uint64_t *generation,
+                              uint64_t *incarnation, uint64_t *owner)
+{
+    noun gen_n, rest, inc_n, rest2, owner_n, seq_n;
+    if (!take(token, &gen_n, &rest) || !noun_is_direct(gen_n)
+        || !take(rest, &inc_n, &rest2) || !noun_is_direct(inc_n)
+        || !take(rest2, &owner_n, &seq_n) || !noun_is_direct(owner_n))
+        return 0;
+    *generation = direct_val(gen_n);
+    *incarnation = direct_val(inc_n);
+    *owner = direct_val(owner_n);
+    return 1;
+}
+
+static int m7_admit_timer_lib(noun rest, uint64_t owner, uint64_t incarnation)
+{
+    noun lib, io, seq_n, pending_dt, pending, dt_n;
+    uint64_t generation, token_inc, token_owner;
+    if (!take(rest, &lib, &io) || !take(lib, &seq_n, &pending_dt)
+        || !noun_is_direct(seq_n) || !take(pending_dt, &pending, &dt_n)
+        || !noun_is_direct(dt_n) || !m7_atom_bounded(rest, 0))
+        return 0;
+    if (pending == NOUN_ZERO)
+        return 1;
+    return m7_token_owner_inc(pending, &generation, &token_inc, &token_owner)
+        && token_inc == incarnation && token_owner == owner;
+}
+
+static int m7_admit_service_lib(noun rest)
+{
+    noun lib, io, initialized, rest_lib, sequence, pending_extra, pending, extra;
+    if (!take(rest, &lib, &io) || !take(lib, &initialized, &rest_lib)
+        || !take(rest_lib, &sequence, &pending_extra)
+        || !take(pending_extra, &pending, &extra) || !m7_atom_bounded(rest, 0))
+        return 0;
+    return pending == NOUN_ZERO;
+}
+
 /* Snapshot encode is structural jam, so a later cue collapses program
  * twins. Keep the admitted PILL executable and only take instance state
  * from the snapshot; later identity-jam checks need the original DAG. */
@@ -1361,6 +1493,14 @@ static int m7_bind_snapshot_instances(noun admitted, noun snapshot)
     noun a_tail, a_program, a_dynamic;
     noun s_battery, s_sample, s_zero, s_state, s_tag, s_rest, s_header;
     noun s_tail, s_program, s_dynamic, s_states, s_formula;
+    uint64_t prog_ids[M7_SNAP_INSTANCES];
+    uint64_t seen_ids[M7_SNAP_INSTANCES];
+    noun prog_kinds[M7_SNAP_INSTANCES];
+    unsigned prog_n = 0, seen = 0;
+    i2_closed_process_roles_t roles;
+    uint64_t incarnation;
+    noun versions, rest, rid, generation, inc_n, battery_hash, program_hash;
+    noun limits;
     if (!take(admitted, &a_battery, &a_sample)
         || !take(a_sample, &a_zero, &a_state)
         || !take(a_state, &a_tag, &a_rest)
@@ -1373,9 +1513,65 @@ static int m7_bind_snapshot_instances(noun admitted, noun snapshot)
         || !take(s_rest, &s_header, &s_tail)
         || !take(s_tail, &s_program, &s_dynamic)
         || !take(s_dynamic, &s_states, &s_formula)
-        || !noun_is_cell(s_states))
+        || !noun_is_cell(s_states)
+        || !m7_program_instances(a_program, prog_ids, prog_kinds, &prog_n)
+        || !i2_closed_process_roles_from_program(a_program, &roles)
+        || !take(a_header, &versions, &rest)
+        || !take(rest, &rid, &rest)
+        || !take(rest, &generation, &rest)
+        || !take(rest, &inc_n, &rest)
+        || !take(rest, &battery_hash, &rest)
+        || !take(rest, &program_hash, &limits)
+        || !noun_is_direct(inc_n) || direct_val(inc_n) == 0)
         return 0;
-    ((cell_t *)(uintptr_t)cell_ptr(a_dynamic))->head = s_states;
+    (void)s_battery;
+    (void)s_program;
+    (void)s_formula;
+    (void)s_header;
+    (void)versions;
+    (void)rid;
+    (void)generation;
+    (void)battery_hash;
+    (void)program_hash;
+    (void)limits;
+    incarnation = direct_val(inc_n);
+    while (noun_is_cell(s_states)) {
+        noun entry, tail, id_n, instance, kind, restb;
+        uint64_t iid;
+        unsigned i, slot = prog_n;
+        if (seen >= M7_SNAP_INSTANCES)
+            return 0;
+        if (!take(s_states, &entry, &tail) || !take(entry, &id_n, &instance)
+            || !noun_is_direct(id_n) || direct_val(id_n) == 0
+            || !take(instance, &kind, &restb) || !m7_atom_bounded(restb, 0))
+            return 0;
+        iid = direct_val(id_n);
+        for (i = 0; i < seen; i++)
+            if (seen_ids[i] == iid)
+                return 0;
+        for (i = 0; i < prog_n; i++)
+            if (prog_ids[i] == iid) {
+                slot = i;
+                break;
+            }
+        if (slot == prog_n || !m7_state_kind_matches(prog_kinds[slot], kind))
+            return 0;
+        if (iid == roles.timer_owner) {
+            if (!m7_admit_timer_lib(restb, roles.timer_owner, incarnation))
+                return 0;
+        } else if (iid == roles.input_bank_owner
+                   || iid == roles.output_bank_owner) {
+            if (!m7_admit_service_lib(restb))
+                return 0;
+        }
+        seen_ids[seen] = iid;
+        seen++;
+        s_states = tail;
+    }
+    if (s_states != NOUN_ZERO || seen != prog_n)
+        return 0;
+    ((cell_t *)(uintptr_t)cell_ptr(a_dynamic))->head =
+        ((cell_t *)(uintptr_t)cell_ptr(s_dynamic))->head;
     return 1;
 }
 
