@@ -503,8 +503,7 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
         return 1;
     }
     if (op == OP_ICANCEL) {
-        if (g_op.install_condition != INST_STAGING
-            && g_op.install_condition != INST_SEALED) {
+        if (!m7_stage_open()) {
             *result = cord_from_bytes("rejected", 8);
             *body = reject_body("state");
             return 1;
@@ -701,6 +700,20 @@ uint64_t i2_operator_selftest(void)
         (void)m7_deploy_abort();
         if (m7_stage_id() || m7_stage_total())
             failures++;
+        g_op.tx_len = 0;
+        g_op.tx_off = 0;
+        g_op.pending_len = 0;
+        g_op.active = 0;
+        /* A FAILED public condition must not trap an open stage. */
+        if (m7_deploy_begin(2, 16, digest_atom(zeros)) == 0) {
+            g_op.install_condition = INST_FAILED;
+            noun cancel = test_request(9, "install-cancel");
+            if (!i2_operator_handle(cancel))
+                failures++;
+            if (g_op.install_condition != INST_CANCELLED || m7_stage_open())
+                failures++;
+            (void)m7_deploy_abort();
+        }
     }
     uart_test_tx_stuck(0);
     g_op.tx_len = 0;

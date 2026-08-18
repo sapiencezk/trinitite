@@ -443,10 +443,16 @@ accepted request; the fake setter accepts only a logical atom 0..31. Output
 accepts a direct atom 0..7 and retains clear-before-set/safe-low.
 
 Selector-3 admission recomputes the actual battery, normalized program, and
-specialized formula before accepting the single executable anchor; a matching
-PILL header alone is insufficient. The same check is applied to clean install,
-PILL2 admission, and checkpoint restore. The published anchor is
-`acc3c06e1ab4a58b9eb7012e8fa5862deefd2e22ef734143ba4a6e0cbadcc874`.
+specialized formula before accepting a package; a matching PILL header alone
+is insufficient. The operator-enabled (`I2_OPERATOR=1`) image applies the
+fixed two-entry M10 admission catalog: both the embedded 1 ms bootstrap
+anchor
+`acc3c06e1ab4a58b9eb7012e8fa5862deefd2e22ef734143ba4a6e0cbadcc874`
+and the operator-commissioned 2 ms alternate must match that catalog
+completely, including execution limits. The same catalog bind applies to
+clean commissioning, PILL2 admission, checkpoint restore, and snapshot
+selection. A name or label is not authority. M8 without `I2_OPERATOR`
+remains the single-anchor canonical product.
 
 Input request is `[token 3 BANK_READ 0 0]`. Output request is
 `[token 2 BANK_WRITE deadline bank]`. Both require exact full

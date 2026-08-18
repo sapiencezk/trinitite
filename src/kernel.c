@@ -12,6 +12,7 @@
 #include "cold.h"
 #include "kernel.h"
 #include "runtime_identity.h"
+#include "i2_admission_policy.h"
 #include "i2_ingress.h"
 #include "runtime_stats.h"
 #include "digital_out.h"
@@ -3786,6 +3787,16 @@ static int checkpoint_install_m7_candidate(
             || !noun_eq(candidate_limits, live_limits))) {
         g_checkpoint_last_result = COLD_RESULT_IDENTITY;
         return -1;
+    }
+    if (m8) {
+        uint8_t limits_hash[32];
+        if (!i2_admission_limits_hash(view.gate, limits_hash)
+            || !i2_admission_identity_limits_match(
+                identity->program_hash, identity->package_hash,
+                capability_profile, limits_hash)) {
+            g_checkpoint_last_result = COLD_RESULT_IDENTITY;
+            return -1;
+        }
     }
 
     tarm_t candidate_tarms[TARM_MAX] = {0};

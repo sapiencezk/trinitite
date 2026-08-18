@@ -9,6 +9,7 @@
 #include "digital_out.h"
 #include "digital_in.h"
 #include "kernel.h"
+#include "i2_admission_policy.h"
 #include "jam.h"
 #include "memory.h"
 #include "nock.h"
@@ -1424,6 +1425,17 @@ int m7_boot_snapshot(void)
         || !runtime_identity_validate_gate(pill_gate, &snapshot_identity, 0)) {
         if (noun_tx_active()) noun_tx_abort();
         return -1;
+    }
+    if (capability == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO) {
+        uint8_t snap_limits[32];
+        if (!i2_admission_limits_hash(gate, snap_limits)
+            || !i2_admission_lookup(
+                snapshot_identity.program_hash,
+                snapshot_identity.package_hash,
+                expected_digest, capability, snap_limits, 0)) {
+            if (noun_tx_active()) noun_tx_abort();
+            return -1;
+        }
     }
     noun live_gate;
     int m7_was_ready = m7_ready();

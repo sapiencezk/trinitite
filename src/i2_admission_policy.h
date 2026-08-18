@@ -34,3 +34,10 @@ int i2_admission_lookup(const uint8_t program_hash[32],
 int i2_admission_limits_hash(noun gate, uint8_t out[32]);
 int i2_admission_pill_digest(const uint8_t *base, uint64_t pill_bytes,
                              uint8_t out[32]);
+/* True when program+anchor+capability name exactly one catalog entry and
+ * that entry's limits hash matches. Used to bind a restored snapshot gate
+ * to the stored PILL's catalog row before publication. */
+int i2_admission_identity_limits_match(const uint8_t program_hash[32],
+                                       const uint8_t executable_anchor[32],
+                                       uint8_t capability,
+                                       const uint8_t limits_hash[32]);

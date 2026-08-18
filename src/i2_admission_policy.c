@@ -115,3 +115,26 @@ int i2_admission_pill_digest(const uint8_t *base, uint64_t pill_bytes,
     blake3_hash(base, (size_t)pill_bytes, out);
     return 1;
 }
+
+int i2_admission_identity_limits_match(const uint8_t program_hash[32],
+                                       const uint8_t executable_anchor[32],
+                                       uint8_t capability,
+                                       const uint8_t limits_hash[32])
+{
+    if (!program_hash || !executable_anchor || !limits_hash)
+        return 0;
+    const i2_m10_catalog_entry_t *found = 0;
+    unsigned matches = 0;
+    for (unsigned i = 0; i < I2_M10_CATALOG_COUNT; i++) {
+        const i2_m10_catalog_entry_t *entry = &I2_M10_CATALOG[i];
+        if (entry->capability_profile == capability
+            && bytes_eq(entry->program_hash, program_hash, 32)
+            && bytes_eq(entry->executable_anchor, executable_anchor, 32)) {
+            found = entry;
+            matches++;
+        }
+    }
+    if (matches != 1 || !found)
+        return 0;
+    return bytes_eq(found->limits_hash, limits_hash, 32);
+}
