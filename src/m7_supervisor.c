@@ -1657,6 +1657,8 @@ int m7_boot_snapshot(void)
                 snapshot_identity.program_hash,
                 snapshot_identity.package_hash,
                 expected_digest, capability, snap_limits, 0)) {
+            i2_admission_refuse_identity(snapshot_identity.program_hash);
+            g_m7.safe = digital_out_force_safe();
             if (noun_tx_active()) noun_tx_abort();
             return -1;
         }

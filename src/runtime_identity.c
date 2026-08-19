@@ -6,6 +6,7 @@
 #include "blake3.h"
 #include "jam.h"
 #include "memory.h"
+#include "i2_admission_envelope.h"
 
 #define PILL_I2_HEADER_SIZE (256u)
 #define PILL_I2_MAX_BYTES   PILL_SCRATCH_SIZE
@@ -40,15 +41,10 @@ static const uint8_t g_m8_executable_domain[11] = {
 static const uint8_t g_m8_formula_domain[11] = {
     'I', '2', 'M', '8', 'F', 'O', 'R', 'M', 'v', '1', 0
 };
-#ifdef I2_M11
-/* M11 specialized formulas have ~35k unique cells; 32k open-addressing
- * fills and m8_formula_merkle returns 0, so a valid PILL is GATE-rejected. */
-#define M8_FORMULA_HASH_CACHE_CAP 65536u
-#else
-#define M8_FORMULA_HASH_CACHE_CAP 32768u
-#endif
+#define M8_FORMULA_HASH_CACHE_CAP I2_FORMULA_CACHE_ENTRIES
 static noun g_m8_formula_hash_keys[M8_FORMULA_HASH_CACHE_CAP];
 static uint8_t g_m8_formula_hash_values[M8_FORMULA_HASH_CACHE_CAP][32];
+static uint32_t g_m8_formula_hash_used;
 static runtime_identity_t g_live_identity;
 static int g_live_identity_valid;
 static uint8_t g_live_capability_profile;
@@ -279,6 +275,8 @@ static int m8_formula_merkle(noun n, uint8_t out[32], uint32_t depth)
             return 1;
         }
         if (g_m8_formula_hash_keys[at] == NOUN_ZERO) {
+            if (g_m8_formula_hash_used >= I2_FORMULA_CACHE_ADMITTED)
+                return 0;
             noun h, t;
             if (!take(n, &h, &t))
                 return 0;
@@ -296,6 +294,7 @@ static int m8_formula_merkle(noun n, uint8_t out[32], uint32_t depth)
             g_m8_formula_hash_keys[at] = n;
             for (size_t i = 0; i < 32; i++)
                 g_m8_formula_hash_values[at][i] = out[i];
+            g_m8_formula_hash_used++;
             return 1;
         }
     }
@@ -317,6 +316,7 @@ static int m8_executable_matches(noun battery, noun program, noun formula,
     size_t off = sizeof g_m8_executable_domain;
     for (uint32_t i = 0; i < M8_FORMULA_HASH_CACHE_CAP; i++)
         g_m8_formula_hash_keys[i] = NOUN_ZERO;
+    g_m8_formula_hash_used = 0;
     for (int i = 0; i < 3; i++) {
         noun value = i == 0 ? battery : i == 1 ? program : formula;
         if (i == 2) {
@@ -695,8 +695,10 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
             if (!i2_admission_pill_digest(base, pill_bytes, pill_digest)
                 || !i2_admission_match_header(
                     identity.program_hash, identity.package_hash,
-                    pill_digest, capability_profile))
+                    pill_digest, capability_profile)) {
+                i2_admission_refuse_identity(identity.program_hash);
                 return PILL_I2_IDENTITY;
+            }
         }
     } else if (capability_profile != RUNTIME_CAPABILITY_PROFILE_NONE
                || bytes_nonzero(header + 248, 8)) {
@@ -718,6 +720,7 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
             || !i2_admission_lookup(
                 identity.program_hash, identity.package_hash,
                 pill_digest, capability_profile, limits_hash, 0)) {
+            i2_admission_refuse_identity(identity.program_hash);
             noun_tx_abort();
             return PILL_I2_IDENTITY;
         }

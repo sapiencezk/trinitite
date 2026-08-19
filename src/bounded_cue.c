@@ -1,14 +1,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "bounded_cue.h"
+#include "i2_admission_envelope.h"
 
-#ifdef I2_M11
-/* M11 BFB gates occupy ~70k unique jam backref slots. The 64k table
- * linear-probes until charge() reports WORK before CACHE. */
-#define BOUNDED_CACHE_MAX       131072u
-#else
-#define BOUNDED_CACHE_MAX       65536u
-#endif
+#define BOUNDED_CACHE_MAX       I2_CUE_CACHE_ENTRIES
 #define BOUNDED_ATOM_LIMBS_MAX  32768u /* 256 KiB */
 
 typedef struct {
@@ -35,19 +30,15 @@ static bounded_cache_entry_t g_bounded_cache[BOUNDED_CACHE_MAX];
 static uint64_t g_bounded_atom_limbs[BOUNDED_ATOM_LIMBS_MAX];
 
 const cue_bounded_limits_t cue_i2_limits = {
-    .max_input_bytes = 1024u * 1024u,
-    .max_depth = 256,
-    .max_nodes = 131072,
-    .max_cells = 65536,
-    .max_backrefs = 65536,
-#ifdef I2_M11
-    .max_cache_entries = 131072,
-#else
-    .max_cache_entries = 65536,
-#endif
-    .max_atom_bytes = 256u * 1024u,
-    .max_total_atom_bytes = 1024u * 1024u,
-    .max_work = 2000000
+    .max_input_bytes = I2_CUE_MAX_INPUT_BYTES,
+    .max_depth = I2_CUE_MAX_DEPTH,
+    .max_nodes = I2_CUE_MAX_NODES,
+    .max_cells = I2_CUE_MAX_CELLS,
+    .max_backrefs = I2_CUE_MAX_BACKREFS,
+    .max_cache_entries = I2_CUE_CACHE_ADMITTED,
+    .max_atom_bytes = I2_CUE_MAX_ATOM_BYTES,
+    .max_total_atom_bytes = I2_CUE_MAX_TOTAL_ATOM_BYTES,
+    .max_work = I2_CUE_MAX_WORK
 };
 
 static int charge(cue_reader_t *r, uint64_t n)

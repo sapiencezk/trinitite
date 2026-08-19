@@ -3,22 +3,11 @@
 #include <stdint.h>
 #include "noun.h"
 #include "runtime_identity.h"
+#include "i2_admission_envelope.h"
 
-#define I2_M10_MAX_CHUNK_BYTES 4096u
-#define I2_M10_MAX_CHUNKS 32u
-#define I2_M10_MAX_STAGE_BYTES 131066u
-
-typedef struct {
-    const char *catalog_id;
-    const char *display_label;
-    uint8_t program_hash[32];
-    uint8_t executable_anchor[32];
-    uint8_t pill_digest[32];
-    uint8_t limits_hash[32];
-    uint8_t capability_profile;
-    uint8_t bootstrap;
-    uint32_t pill_bytes;
-} i2_m10_catalog_entry_t;
+#define I2_M10_MAX_CHUNK_BYTES I2_MAX_CHUNK_BYTES
+#define I2_M10_MAX_CHUNKS I2_MAX_CHUNKS
+#define I2_M10_MAX_STAGE_BYTES I2_MAX_STAGE_BYTES
 
 int i2_admission_program_known(const uint8_t program_hash[32]);
 int i2_admission_match_header(const uint8_t program_hash[32],
@@ -41,3 +30,7 @@ int i2_admission_identity_limits_match(const uint8_t program_hash[32],
                                        const uint8_t executable_anchor[32],
                                        uint8_t capability,
                                        const uint8_t limits_hash[32]);
+/* True when the program hash is a recorded historical M10 identity.
+ * Historical identities are never admitted. */
+int i2_admission_historical_m10(const uint8_t program_hash[32]);
+void i2_admission_refuse_identity(const uint8_t program_hash[32]);

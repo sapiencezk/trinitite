@@ -3864,6 +3864,7 @@ static int checkpoint_install_m7_candidate(
             || !i2_admission_identity_limits_match(
                 identity->program_hash, identity->package_hash,
                 capability_profile, limits_hash)) {
+            i2_admission_refuse_identity(identity->program_hash);
             g_checkpoint_last_result = COLD_RESULT_IDENTITY;
             return -1;
         }

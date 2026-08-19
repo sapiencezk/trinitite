@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include "i2_admission_policy.h"
 #include "blake3.h"
+#include "uart.h"
 #include "jam.h"
 #include "memory.h"
 
@@ -22,11 +23,7 @@ static int take(noun n, noun *head, noun *tail)
     return 1;
 }
 
-#ifdef I2_M11
-#include "i2_m11_catalog.inc"
-#else
-#include "i2_m10_catalog.inc"
-#endif
+#include "i2_admission_catalog.inc"
 
 int i2_admission_program_known(const uint8_t program_hash[32])
 {
@@ -118,6 +115,24 @@ int i2_admission_pill_digest(const uint8_t *base, uint64_t pill_bytes,
         return 0;
     blake3_hash(base, (size_t)pill_bytes, out);
     return 1;
+}
+
+int i2_admission_historical_m10(const uint8_t program_hash[32])
+{
+    if (!program_hash)
+        return 0;
+    for (unsigned i = 0; i < I2_HISTORICAL_M10_COUNT; i++)
+        if (bytes_eq(I2_HISTORICAL_M10_PROGRAMS[i], program_hash, 32))
+            return 1;
+    return 0;
+}
+
+void i2_admission_refuse_identity(const uint8_t program_hash[32])
+{
+    uart_puts("ADMISSION ENVELOPE MISMATCH");
+    if (i2_admission_historical_m10(program_hash))
+        uart_puts(" HISTORICAL-M10");
+    uart_puts("\r\n");
 }
 
 int i2_admission_identity_limits_match(const uint8_t program_hash[32],

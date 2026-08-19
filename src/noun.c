@@ -5,6 +5,7 @@
 #include "blake3.h"
 #include "uart.h"
 #include "nock.h"
+#include "i2_admission_envelope.h"
 
 /*
  * Split cell heap (see memory.h):
@@ -196,7 +197,7 @@ void cell_dec(noun n) {
  * Open-addressed map old cell_ptr → new noun. Linear scan was O(n²) and made
  * persist_reclaim of a ~7k-cell I2 gate too slow for QEMU smoke.
  */
-#define COPY_MAP_MAX  65536u
+#define COPY_MAP_MAX  I2_COPY_MAP_ENTRIES
 #define COPY_DEPTH_MAX 256u
 static uint32_t g_copy_key[COPY_MAP_MAX];
 static noun     g_copy_val[COPY_MAP_MAX];
@@ -234,6 +235,8 @@ static noun noun_copy_rec(noun n)
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
         if (!g_copy_used[i]) {
+            if (g_copy_entries >= I2_COPY_MAP_ADMITTED)
+                break;
             g_copy_key[i]  = op;
             g_copy_val[i]  = neu;
             g_copy_used[i] = 1;
@@ -291,6 +294,8 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
         if (!g_copy_used[i]) {
+            if (g_copy_entries >= I2_COPY_MAP_ADMITTED)
+                break;
             g_copy_key[i] = op;
             g_copy_val[i] = neu;
             g_copy_used[i] = 1;

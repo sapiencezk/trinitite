@@ -2,6 +2,7 @@
 #include "jam.h"
 #include "bignum.h"
 #include "nock.h"    /* nock_crash */
+#include "i2_admission_envelope.h"
 
 /* ── Bitstream writer ─────────────────────────────────────────────────────── */
 
@@ -80,7 +81,7 @@ static void do_mat(jambuf_t *jb, noun k) {
 /* ── jam cache: noun → bit position ──────────────────────────────────────── */
 
 /* Large hybrid gates need many backrefs (7k+ cells). */
-#define JAM_CACHE_SZ 65536u
+#define JAM_CACHE_SZ I2_JAM_CACHE_ENTRIES
 
 typedef struct { noun key; uint64_t pos; int used; } jcent_t;
 
@@ -88,9 +89,11 @@ static jcent_t g_jcache[JAM_CACHE_SZ];
 /* 0: structural noun_eq (M8 trampoline battery digest).
  * 1: pointer identity (host Python jam of ResourceProgram). */
 static int g_jam_identity_keys;
+static uint32_t g_jcache_used;
 
 static void jcache_init(void) {
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) g_jcache[i].used = 0;
+    g_jcache_used = 0;
 }
 
 static uint32_t jcache_hash(noun n) {
@@ -116,7 +119,10 @@ static void jcache_put(noun n, uint64_t pos) {
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) {
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) {
+            if (g_jcache_used >= I2_JAM_CACHE_ADMITTED)
+                return;
             g_jcache[idx].key = n; g_jcache[idx].pos = pos; g_jcache[idx].used = 1;
+            g_jcache_used++;
             return;
         }
         if (g_jam_identity_keys ? g_jcache[idx].key == n
