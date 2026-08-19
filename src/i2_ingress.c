@@ -3,6 +3,7 @@
 #include "i2_ingress.h"
 #include "blake3.h"
 #include "bounded_cue.h"
+#include "i2_admission_metrics.h"
 #include "memory.h"
 #include "runtime_stats.h"
 #include "uart.h"
@@ -111,6 +112,29 @@ static void reject(i2_rx_reason_t reason)
         if (g_rx.rejects[reason] != UINT64_MAX)
             g_rx.rejects[reason]++;
         g_rx.last_reason = reason;
+        g_i2_admission_metrics.ingress_rejects++;
+        switch (reason) {
+        case I2_RX_REASON_VERSION:
+            g_i2_admission_metrics.ingress_version_rejects++;
+            break;
+        case I2_RX_REASON_HEADER:
+            g_i2_admission_metrics.ingress_header_rejects++;
+            break;
+        case I2_RX_REASON_LENGTH:
+            g_i2_admission_metrics.ingress_length_rejects++;
+            break;
+        case I2_RX_REASON_DIGEST:
+            g_i2_admission_metrics.ingress_digest_rejects++;
+            break;
+        case I2_RX_REASON_CUE:
+            g_i2_admission_metrics.ingress_cue_rejects++;
+            break;
+        case I2_RX_REASON_TIMEOUT:
+            g_i2_admission_metrics.ingress_timeout_rejects++;
+            break;
+        default:
+            break;
+        }
         runtime_stats_note_ingress_reject((unsigned)reason);
     }
     reset_scan();
