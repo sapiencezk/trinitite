@@ -405,7 +405,7 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
         if (!take(payload, &stage_n, &rest) || !take(rest, &total_n, &digest_n)
             || !direct_u64(stage_n, &stage_id) || !direct_u64(total_n, &total)
             || !noun_atom_read_fixed(digest_n, digest, 32) || stage_id == 0
-            || total == 0 || total > I2_M10_MAX_STAGE_BYTES) {
+            || total == 0 || total > I2_MAX_STAGE_BYTES) {
             *result = cord_from_bytes("rejected", 8);
             *body = reject_body("bounds");
             return 1;
@@ -424,12 +424,12 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
     if (op == OP_ICHUNK) {
         noun stage_n, rest, offset_n, data_n;
         uint64_t stage_id, offset;
-        uint8_t data[I2_M10_MAX_CHUNK_BYTES];
+        uint8_t data[I2_MAX_CHUNK_BYTES];
         size_t len = 0;
         if (!take(payload, &stage_n, &rest) || !take(rest, &offset_n, &data_n)
             || !direct_u64(stage_n, &stage_id) || !direct_u64(offset_n, &offset)
             || !atom_bytes(data_n, data, sizeof data, &len) || len == 0
-            || len > I2_M10_MAX_CHUNK_BYTES) {
+            || len > I2_MAX_CHUNK_BYTES) {
             *result = cord_from_bytes("rejected", 8);
             *body = reject_body("bounds");
             return 1;
@@ -439,7 +439,7 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
             *body = reject_body("state");
             return 1;
         }
-        if (m7_stage_chunks() >= I2_M10_MAX_CHUNKS
+        if (m7_stage_chunks() >= I2_MAX_CHUNKS
             || offset != m7_stage_received()) {
             *result = cord_from_bytes("rejected", 8);
             *body = reject_body("bounds");
@@ -448,7 +448,7 @@ static int dispatch(int op, noun payload, noun *result, noun *body)
         {
             uint64_t remaining = m7_stage_total() - offset;
             int final_chunk = len == remaining;
-            if (!final_chunk && len != I2_M10_MAX_CHUNK_BYTES) {
+            if (!final_chunk && len != I2_MAX_CHUNK_BYTES) {
                 *result = cord_from_bytes("rejected", 8);
                 *body = reject_body("bounds");
                 return 1;

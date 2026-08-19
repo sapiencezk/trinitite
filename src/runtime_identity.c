@@ -7,6 +7,7 @@
 #include "jam.h"
 #include "memory.h"
 #include "i2_admission_envelope.h"
+#include "i2_admission_metrics.h"
 
 #define PILL_I2_HEADER_SIZE (256u)
 #define PILL_I2_MAX_BYTES   PILL_SCRATCH_SIZE
@@ -45,6 +46,7 @@ static const uint8_t g_m8_formula_domain[11] = {
 static noun g_m8_formula_hash_keys[M8_FORMULA_HASH_CACHE_CAP];
 static uint8_t g_m8_formula_hash_values[M8_FORMULA_HASH_CACHE_CAP][32];
 static uint32_t g_m8_formula_hash_used;
+static uint64_t g_m8_formula_nodes_current;
 static runtime_identity_t g_live_identity;
 static int g_live_identity_valid;
 static uint8_t g_live_capability_profile;
@@ -234,6 +236,10 @@ static int noun_matches_identity_hash(noun n, const uint8_t expected[32])
 
 static int m8_formula_merkle(noun n, uint8_t out[32], uint32_t depth)
 {
+    g_m8_formula_nodes_current++;
+    i2_admission_metrics_max(
+        &g_i2_admission_metrics.formula_nodes_hwm,
+        g_m8_formula_nodes_current);
     if (depth > 512)
         return 0;
     if (!noun_is_cell(n)) {
@@ -268,6 +274,9 @@ static int m8_formula_merkle(noun n, uint8_t out[32], uint32_t depth)
     uint32_t slot = (uint32_t)(((uintptr_t)n >> 4)
         & (M8_FORMULA_HASH_CACHE_CAP - 1));
     for (uint32_t probe = 0; probe < M8_FORMULA_HASH_CACHE_CAP; probe++) {
+        i2_admission_metrics_max(
+            &g_i2_admission_metrics.formula_probe_hwm,
+            (uint64_t)probe + 1u);
         uint32_t at = (slot + probe) & (M8_FORMULA_HASH_CACHE_CAP - 1);
         if (g_m8_formula_hash_keys[at] == n) {
             for (size_t i = 0; i < 32; i++)
@@ -295,6 +304,9 @@ static int m8_formula_merkle(noun n, uint8_t out[32], uint32_t depth)
             for (size_t i = 0; i < 32; i++)
                 g_m8_formula_hash_values[at][i] = out[i];
             g_m8_formula_hash_used++;
+            i2_admission_metrics_max(
+                &g_i2_admission_metrics.formula_cache_entries_hwm,
+                g_m8_formula_hash_used);
             return 1;
         }
     }
@@ -317,6 +329,11 @@ static int m8_executable_matches(noun battery, noun program, noun formula,
     for (uint32_t i = 0; i < M8_FORMULA_HASH_CACHE_CAP; i++)
         g_m8_formula_hash_keys[i] = NOUN_ZERO;
     g_m8_formula_hash_used = 0;
+    g_m8_formula_nodes_current = 0;
+    g_i2_admission_metrics.formula_passes++;
+    g_i2_admission_metrics.formula_clear_count++;
+    g_i2_admission_metrics.formula_clear_bytes +=
+        sizeof g_m8_formula_hash_keys;
     for (int i = 0; i < 3; i++) {
         noun value = i == 0 ? battery : i == 1 ? program : formula;
         if (i == 2) {

@@ -61,7 +61,7 @@ else
 $(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake))
 endif
 
-OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
+OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
 CONFIG_KEY = $(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)
 BUILD_DIR = .build/$(CONFIG_KEY)
 OBJDIR = $(BUILD_DIR)/obj
@@ -179,8 +179,11 @@ test-build-config:
 		DIGITAL_OUT_BACKEND=bcm2838 M8_EVIDENCE=0 all
 	$(MAKE) -j8 COLD_MEDIA=fake DIGITAL_IN_BACKEND=fake \
 		DIGITAL_OUT_BACKEND=bcm2838 M8_EVIDENCE=1 all
+	$(MAKE) -j8 COLD_MEDIA=rpi4-sd DIGITAL_IN_BACKEND=bcm2838 \
+		DIGITAL_OUT_BACKEND=bcm2838 M8_EVIDENCE=0 all
 	test -s .build/ram-bcm2838-bcm2838-0-0/kernel8.img
 	test -s .build/fake-fake-bcm2838-1-0/kernel8.img
+	test -s .build/rpi4-sd-bcm2838-bcm2838-0-0/kernel8.img
 	test -s kernel8.elf
 	test -s kernel8.img
 

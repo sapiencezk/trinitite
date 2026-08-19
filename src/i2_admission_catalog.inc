@@ -64,9 +64,7 @@ static const i2_admission_catalog_entry_t I2_ADMISSION_CATALOG[I2_ADMISSION_CATA
         44529u
     }
 };
-#define I2_M10_CATALOG_COUNT I2_ADMISSION_CATALOG_COUNT
-#define I2_M10_CATALOG I2_ADMISSION_CATALOG
-static const uint8_t I2_HISTORICAL_M10_PROGRAMS[I2_HISTORICAL_M10_COUNT][32] = {
+static const uint8_t I2_HISTORICAL_REFUSAL_PROGRAMS[I2_HISTORICAL_REFUSAL_COUNT][32] = {
     {
         0xa8, 0xb1, 0xf3, 0xd8, 0xe8, 0xf7, 0x47, 0xfa,
         0x7a, 0x2e, 0x76, 0x60, 0x60, 0x51, 0xfa, 0xe7,

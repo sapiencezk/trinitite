@@ -113,5 +113,7 @@ int wdt_check(void)
 
 int canary_ok(void)
 {
-    return *(volatile uint32_t *)(uintptr_t)DSTACK_GUARD == STACK_CANARY;
+    return *(volatile uint32_t *)(uintptr_t)DSTACK_GUARD == STACK_CANARY
+        && *(volatile uint64_t *)(uintptr_t)CORE0_STACK_BASE
+            == CORE0_STACK_PATTERN;
 }

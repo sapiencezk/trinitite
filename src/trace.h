@@ -42,5 +42,5 @@ void     wdt_kick(void);
 /* If expired: record T_WDT, return 1, and re-kick. Else 0. */
 int      wdt_check(void);
 
-/* Stack canary at DSTACK_GUARD */
+/* Forth-stack canary plus the fixed core-0 C-stack base guard. */
 int      canary_ok(void);

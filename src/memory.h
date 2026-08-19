@@ -11,11 +11,19 @@
 
 /*
  * C .bss (linker.ld): absolute window, NOT adjacent to the image.
- * Must not overlap Forth or arenas. ~0.7 MB used; 16 MB reserved.
+ * Must not overlap Forth or the legacy cue high-RAM table. 32 MB is
+ * reserved; linker.ld rejects every build whose .bss crosses BSS_TOP.
  */
 #define BSS_BASE            0x08000000
-#define BSS_SIZE            0x01000000  /* 16 MB reserve */
+#define BSS_SIZE            0x02000000  /* 32 MB reserve */
 #define BSS_TOP             (BSS_BASE + BSS_SIZE)
+
+/* Core 0 C stack. The boot path fills this fixed region before entering C;
+ * QEMU evidence scans it and the scheduler checks the base guard. */
+#define CORE0_STACK_BASE    0x00040000
+#define CORE0_STACK_TOP     0x00080000
+#define CORE0_STACK_SIZE    (CORE0_STACK_TOP - CORE0_STACK_BASE)
+#define CORE0_STACK_PATTERN 0xA55AC33CA55AC33CULL
 
 /*
  * Forth region: dictionary grows up, stacks grow down.
@@ -29,6 +37,9 @@
 
 #if BSS_BASE < FORTH_TOP
 #error "BSS_BASE overlaps Forth region"
+#endif
+#if CORE0_STACK_TOP > 0x00080000
+#error "core 0 stack overlaps kernel image"
 #endif
 #if FORTH_TOP > 0x00490000
 #error "Forth region overlaps ARENA_BASE"

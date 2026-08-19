@@ -6,6 +6,8 @@
  * growth cannot land on the Forth dictionary (see memory.h).
  */
 SECTIONS {
+    __core0_stack_base = 0x00040000;
+    __core0_stack_top = 0x00080000;
     . = 0x80000;
     .text.boot : { *(.text.boot) }
     .text       : { *(.text) }
@@ -19,4 +21,8 @@ SECTIONS {
         *(COMMON)
         __bss_end = .;
     }
+    ASSERT(__bss_end <= 0x09800000,
+           ".bss exceeds admitted 75% of the 32 MiB window")
+    ASSERT(__bss_end <= 0x0A000000,
+           ".bss exceeds reserved 32 MiB window")
 }

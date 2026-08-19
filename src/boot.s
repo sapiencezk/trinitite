@@ -6,6 +6,8 @@
 .set CORE1_STACK_TOP, 0x07004000
 .set CORE2_STACK_TOP, 0x07008000
 .set CORE3_STACK_TOP, 0x0700C000
+.set CORE0_STACK_BASE, 0x00040000
+.set CORE0_STACK_TOP,  0x00080000
 
 // cores_ready lives in .data so it is image-loaded as 0 (not wiped mid-race).
     .section .data
@@ -22,8 +24,18 @@ _start:
     and     x0, x0, #0xFF
     cbnz    x0, .Lpark              // should not happen; park if it does
 
-    ldr     x0, =_start
-    mov     sp, x0
+    // Fill the fixed core-0 C stack before using it. The base word is the
+    // hard guard; the remaining pattern is scanned by QEMU evidence.
+    ldr     x0, =CORE0_STACK_BASE
+    ldr     x1, =CORE0_STACK_TOP
+    ldr     x2, =0xA55AC33CA55AC33C
+.Lfill_core0_stack:
+    cmp     x0, x1
+    b.ge    .Lcore0_stack_ready
+    str     x2, [x0], #8
+    b       .Lfill_core0_stack
+.Lcore0_stack_ready:
+    mov     sp, x1
 
     // Zero BSS
     ldr     x0, =__bss_start

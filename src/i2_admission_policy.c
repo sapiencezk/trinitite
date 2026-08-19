@@ -29,8 +29,8 @@ int i2_admission_program_known(const uint8_t program_hash[32])
 {
     if (!program_hash)
         return 0;
-    for (unsigned i = 0; i < I2_M10_CATALOG_COUNT; i++)
-        if (bytes_eq(I2_M10_CATALOG[i].program_hash, program_hash, 32))
+    for (unsigned i = 0; i < I2_ADMISSION_CATALOG_COUNT; i++)
+        if (bytes_eq(I2_ADMISSION_CATALOG[i].program_hash, program_hash, 32))
             return 1;
     return 0;
 }
@@ -42,8 +42,8 @@ int i2_admission_match_header(const uint8_t program_hash[32],
 {
     if (!program_hash || !executable_anchor || !pill_digest)
         return 0;
-    for (unsigned i = 0; i < I2_M10_CATALOG_COUNT; i++) {
-        const i2_m10_catalog_entry_t *entry = &I2_M10_CATALOG[i];
+    for (unsigned i = 0; i < I2_ADMISSION_CATALOG_COUNT; i++) {
+        const i2_admission_catalog_entry_t *entry = &I2_ADMISSION_CATALOG[i];
         if (entry->capability_profile == capability
             && bytes_eq(entry->program_hash, program_hash, 32)
             && bytes_eq(entry->executable_anchor, executable_anchor, 32)
@@ -58,14 +58,14 @@ int i2_admission_lookup(const uint8_t program_hash[32],
                         const uint8_t pill_digest[32],
                         uint8_t capability,
                         const uint8_t limits_hash[32],
-                        const i2_m10_catalog_entry_t **out)
+                        const i2_admission_catalog_entry_t **out)
 {
     if (!program_hash || !executable_anchor || !pill_digest || !limits_hash)
         return 0;
-    const i2_m10_catalog_entry_t *found = 0;
+    const i2_admission_catalog_entry_t *found = 0;
     unsigned matches = 0;
-    for (unsigned i = 0; i < I2_M10_CATALOG_COUNT; i++) {
-        const i2_m10_catalog_entry_t *entry = &I2_M10_CATALOG[i];
+    for (unsigned i = 0; i < I2_ADMISSION_CATALOG_COUNT; i++) {
+        const i2_admission_catalog_entry_t *entry = &I2_ADMISSION_CATALOG[i];
         if (entry->capability_profile == capability
             && bytes_eq(entry->program_hash, program_hash, 32)
             && bytes_eq(entry->executable_anchor, executable_anchor, 32)
@@ -117,12 +117,12 @@ int i2_admission_pill_digest(const uint8_t *base, uint64_t pill_bytes,
     return 1;
 }
 
-int i2_admission_historical_m10(const uint8_t program_hash[32])
+int i2_admission_historical_refusal(const uint8_t program_hash[32])
 {
     if (!program_hash)
         return 0;
-    for (unsigned i = 0; i < I2_HISTORICAL_M10_COUNT; i++)
-        if (bytes_eq(I2_HISTORICAL_M10_PROGRAMS[i], program_hash, 32))
+    for (unsigned i = 0; i < I2_HISTORICAL_REFUSAL_COUNT; i++)
+        if (bytes_eq(I2_HISTORICAL_REFUSAL_PROGRAMS[i], program_hash, 32))
             return 1;
     return 0;
 }
@@ -130,8 +130,8 @@ int i2_admission_historical_m10(const uint8_t program_hash[32])
 void i2_admission_refuse_identity(const uint8_t program_hash[32])
 {
     uart_puts("ADMISSION ENVELOPE MISMATCH");
-    if (i2_admission_historical_m10(program_hash))
-        uart_puts(" HISTORICAL-M10");
+    if (i2_admission_historical_refusal(program_hash))
+        uart_puts(" HISTORICAL-REFUSAL");
     uart_puts("\r\n");
 }
 
@@ -142,10 +142,10 @@ int i2_admission_identity_limits_match(const uint8_t program_hash[32],
 {
     if (!program_hash || !executable_anchor || !limits_hash)
         return 0;
-    const i2_m10_catalog_entry_t *found = 0;
+    const i2_admission_catalog_entry_t *found = 0;
     unsigned matches = 0;
-    for (unsigned i = 0; i < I2_M10_CATALOG_COUNT; i++) {
-        const i2_m10_catalog_entry_t *entry = &I2_M10_CATALOG[i];
+    for (unsigned i = 0; i < I2_ADMISSION_CATALOG_COUNT; i++) {
+        const i2_admission_catalog_entry_t *entry = &I2_ADMISSION_CATALOG[i];
         if (entry->capability_profile == capability
             && bytes_eq(entry->program_hash, program_hash, 32)
             && bytes_eq(entry->executable_anchor, executable_anchor, 32)) {
