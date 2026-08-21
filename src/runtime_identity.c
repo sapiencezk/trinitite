@@ -141,13 +141,14 @@ int runtime_identity_supported(const runtime_identity_t *id)
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 1;
     int m7 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 2
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 2;
-    if (!legacy && !origin_v1 && !m7)
+    int m16 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 3
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 3;
+    if (!legacy && !origin_v1 && !m7 && !m16)
         return 0;
     /* ABI families are paired products. Do not admit a valid runtime with a
-     * host/deployment family from another product cut. M7's supervisor then
-     * has one exact (1,2) identity rather than relying on a second validator
-     * to reject mixed combinations later. */
-    if (m7) {
+     * host/deployment family from another product cut. The supervised 1.2
+     * and 1.3 runtimes both retain the exact host/deployment 1.2 family. */
+    if (m7 || m16) {
         if (!m7_host) return 0;
     } else if (!baseline_host && !digital_host) {
         return 0;

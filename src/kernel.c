@@ -118,9 +118,9 @@ static int m7_external_event_allowed(noun event)
     noun tag, rest;
     if (closed_process_io_authorized())
         return 0;
-    /* M6 is a complete, separately selected RuntimeIdentity.  The M7
+    /* M6 is a complete, separately selected RuntimeIdentity.  The supervised
      * application-origin fence is not a default-deny compatibility shim: it
-     * exists only for the exact M7 ABI/Host-ABI/deployment-schema cut. */
+     * exists only for the coordinated 1.2 and 1.3 runtime identity cuts. */
     if (!m7_identity_active())
         return 1;
     if (!m7_ready() || m7_mode() != M7_MODE_RUNNING
@@ -2255,9 +2255,21 @@ static int runtime_origin_v1(void)
 {
     const runtime_identity_t *identity = runtime_identity_get();
     return identity && identity->runtime_abi[0] == 1
-        && (identity->runtime_abi[1] == 1 || identity->runtime_abi[1] == 2)
+        && (identity->runtime_abi[1] == 1 || identity->runtime_abi[1] == 2
+            || identity->runtime_abi[1] == 3)
         && identity->formula_abi[0] == 1
         && identity->formula_abi[1] == identity->runtime_abi[1];
+}
+
+static int runtime_supervised_identity(const runtime_identity_t *identity)
+{
+    return identity && identity->runtime_abi[0] == 1
+        && (identity->runtime_abi[1] == 2 || identity->runtime_abi[1] == 3)
+        && identity->formula_abi[0] == 1
+        && identity->formula_abi[1] == identity->runtime_abi[1]
+        && identity->host_abi[0] == 1 && identity->host_abi[1] == 2
+        && identity->deployment_schema[0] == 1
+        && identity->deployment_schema[1] == 2;
 }
 
 void slam_budget_set(uint64_t max_ops)
@@ -2700,7 +2712,7 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                         ? activated - event_admit_tick : 0);
                 runtime_stats_count(RT_COUNT_COMMITS, 1);
                 if (runtime_identity_live()
-                    && runtime_identity_get()->runtime_abi[1] == 2)
+                    && runtime_supervised_identity(runtime_identity_get()))
                     uart_puts("M7 COMMIT\r\n");
                 completed++;
                 heap_set_mode(HEAP_MODE_PERSIST);
@@ -4207,8 +4219,7 @@ int checkpoint_install(noun ckpt)
 {
     /* A checkpoint is logical state only: never replay an energized bank. */
     if (runtime_identity_live()
-        && runtime_identity_get()->runtime_abi[1] == 2
-        && m7_ready()) {
+        && runtime_supervised_identity(runtime_identity_get()) && m7_ready()) {
         g_checkpoint_last_result = COLD_RESULT_SHAPE;
         if (noun_tx_active())
             noun_tx_abort();
@@ -4354,7 +4365,7 @@ int checkpoint_save(void)
         runtime_stats_count(RT_COUNT_CHECKPOINT_FAILURES, 1);
         return -1;
     }
-    if (runtime_identity_get()->runtime_abi[1] == 2 && m7_ready()) {
+    if (runtime_supervised_identity(runtime_identity_get()) && m7_ready()) {
         int result = m7_checkpoint_save();
         if (result == 0 && cold_nv_enabled()) {
             uint64_t flush_start = runtime_counter_now();
@@ -4429,7 +4440,7 @@ int checkpoint_load(void)
         g_checkpoint_last_result = COLD_RESULT_IDENTITY;
         return -1;
     }
-    if (runtime_identity_get()->runtime_abi[1] == 2 && m7_ready()) {
+    if (runtime_supervised_identity(runtime_identity_get()) && m7_ready()) {
         /* M7 snapshots contain the outer supervisor root and active PILL
          * reference; do not decode or install a generic i2-ckpt in their
          * place.  CKLOAD uses the same selected M7 restore path as KERNEL. */
@@ -5010,14 +5021,12 @@ static int install_clean_pill(noun pill_gate)
         digital_out_force_safe();
         return -1;
     }
-    /* Build the complete M7 supervisor candidate while the new semispace is
-     * still disposable.  m7_init has no partial-global failure state; after
-     * success the remaining root assignment and transaction commit cannot
-     * fail, so a clean PILL never publishes an M7 identity without its
-     * supervisor formula/tags. */
-    if (candidate_identity
-        && candidate_identity->runtime_abi[0] == 1
-        && candidate_identity->runtime_abi[1] == 2
+    /* Build the complete resource-supervisor candidate while the new
+     * semispace is still disposable.  m7_init has no partial-global failure
+     * state. After success, the remaining root assignment and transaction
+     * commit cannot fail, so a clean PILL never publishes a supervised
+     * identity without its supervisor formula/tags. */
+    if (runtime_supervised_identity(candidate_identity)
         && m7_init_clean_for_identity(candidate_gate, candidate_identity)
             != M7_STATUS_RDY) {
         heap_persist_abort_tx();
@@ -5061,11 +5070,10 @@ int kernel_prepare_pill(void)
 int kernel_boot(noun pill_gate)
 {
     if (g_pill_candidate_i2
-        && g_pill_candidate_identity.runtime_abi[0] == 1
-        && g_pill_candidate_identity.runtime_abi[1] == 2) {
+        && runtime_supervised_identity(&g_pill_candidate_identity)) {
         /* The clean PILL candidate only authorizes attempting the selected
-         * M7 pair; it is not a live identity and its decode is discarded
-         * before snapshot construction allocates its own candidate roots. */
+         * supervised pair; it is not a live identity, and its decode is
+         * discarded before snapshot construction allocates candidate roots. */
         if (noun_tx_active()) noun_tx_abort();
         heap_set_mode(HEAP_MODE_PERSIST);
         heap_scratch_reset();
