@@ -143,12 +143,14 @@ int runtime_identity_supported(const runtime_identity_t *id)
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 2;
     int m16 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 3
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 3;
-    if (!legacy && !origin_v1 && !m7 && !m16)
+    int m17 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 4
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 4;
+    if (!legacy && !origin_v1 && !m7 && !m16 && !m17)
         return 0;
     /* ABI families are paired products. Do not admit a valid runtime with a
      * host/deployment family from another product cut. The supervised 1.2
-     * and 1.3 runtimes both retain the exact host/deployment 1.2 family. */
-    if (m7 || m16) {
+     * through 1.4 runtimes retain the exact host/deployment 1.2 family. */
+    if (m7 || m16 || m17) {
         if (!m7_host) return 0;
     } else if (!baseline_host && !digital_host) {
         return 0;
