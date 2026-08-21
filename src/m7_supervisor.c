@@ -9,6 +9,7 @@
 #include "digital_out.h"
 #include "digital_in.h"
 #include "kernel.h"
+#include "i2_admission_envelope.h"
 #include "i2_admission_policy.h"
 #include "i2_closed_process.h"
 #include "jam.h"
@@ -22,12 +23,13 @@
 /* The jam writer has a 131072-byte output buffer.  A raw PILL atom of N
  * bytes needs 1 + 2*bitlen(bitlen(N*8)) + N*8 bits, so 131066 is the exact
  * conservative byte ceiling that cannot overflow that writer.  This is the
- * one end-to-end M7 deployment ceiling; larger PILL2 containers remain
- * admissible to the generic loader but not to TRI_DEPLOY. */
-#define M7_STAGE_BYTES 131066u
+ * selected image's end-to-end deployment ceiling; larger PILL2 containers
+ * remain admissible to the generic loader but not to TRI_DEPLOY.  Framing
+ * values come from the generated image admission envelope below. */
+#define M7_STAGE_BYTES I2_MAX_STAGE_BYTES
 #define M7_SNAPSHOT_BYTES 65536u
-#define M7_MAX_CHUNK 4096u
-#define M7_MAX_CHUNKS 256u
+#define M7_MAX_CHUNK I2_MAX_CHUNK_BYTES
+#define M7_MAX_CHUNKS I2_MAX_CHUNKS
 #define M7_MANAGER_BYTES 512u
 
 #define CORD_COLD 0x646c6f63ULL
