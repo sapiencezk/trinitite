@@ -4599,6 +4599,144 @@ static int checkpoint_test_reject(noun ckpt,
     return rejected && checkpoint_test_unchanged(live);
 }
 
+/* Corrupt one copied ABI-1.4 live UINT value without changing the anchored
+ * program declaration or sharing its typed-value cell.  This hostile restore
+ * candidate is deliberately type/name agnostic. */
+static int checkpoint_test_forge_first_uint(noun gate)
+{
+    noun rest;
+    noun battery, sample, zero, state, tag, state_rest, header, state_tail;
+    noun program, dynamic, states, formula;
+    if (!noun_take(gate, &battery, &sample)
+        || !noun_take(sample, &zero, &state)
+        || !noun_take(state, &tag, &state_rest)
+        || !noun_take(state_rest, &header, &state_tail)
+        || !noun_take(state_tail, &program, &dynamic)
+        || !noun_take(dynamic, &states, &formula))
+        return 0;
+    (void)battery; (void)zero; (void)tag; (void)header; (void)formula;
+
+    noun program_tag, schema, types, fb_types, instances;
+    if (!noun_take(program, &program_tag, &rest)
+        || !i2_tag_is(program_tag, "i2-program", 10)
+        || !noun_take(rest, &schema, &rest)
+        || !noun_take(rest, &types, &rest)
+        || !noun_take(rest, &fb_types, &rest)
+        || !noun_take(rest, &instances, &rest))
+        return 0;
+    (void)schema; (void)fb_types; (void)instances;
+
+    noun uint_type = NOUN_ZERO;
+    noun type_list = types;
+    for (unsigned count = 0; count < 4 && noun_is_cell(type_list); count++) {
+        noun entry, tail, type_id, descriptor, elementary, desc_rest;
+        noun symbol, kind, width, limit;
+        if (!noun_take(type_list, &entry, &tail)
+            || !noun_take(entry, &type_id, &descriptor)
+            || !noun_take(descriptor, &elementary, &desc_rest)
+            || !noun_take(desc_rest, &symbol, &desc_rest)
+            || !noun_take(desc_rest, &kind, &desc_rest)
+            || !noun_take(desc_rest, &width, &limit))
+            return 0;
+        if (i2_tag_is(kind, "uint", 4)
+            && noun_is_direct(width) && direct_val(width) == 16) {
+            uint_type = type_id;
+            break;
+        }
+        type_list = tail;
+        (void)elementary; (void)symbol; (void)limit;
+    }
+    if (uint_type == NOUN_ZERO)
+        return 0;
+
+    for (unsigned instance_count = 0;
+         instance_count < 16 && noun_is_cell(states); instance_count++) {
+        noun state_entry, state_tail, instance_id, instance_state;
+        noun state_kind, fields, ignored, inputs, outputs, internals;
+        noun tables[3];
+        unsigned table_count;
+        if (!noun_take(states, &state_entry, &state_tail)
+            || !noun_take(state_entry, &instance_id, &instance_state)
+            || !noun_take(instance_state, &state_kind, &fields))
+            return 0;
+        states = state_tail;
+        (void)instance_id;
+        if (i2_tag_is(state_kind, "bfb-state", 9)) {
+            if (!noun_take(fields, &ignored, &fields)
+                || !noun_take(fields, &inputs, &fields)
+                || !noun_take(fields, &outputs, &internals))
+                return 0;
+            tables[0] = inputs;
+            tables[1] = outputs;
+            tables[2] = internals;
+            table_count = 3;
+        } else if (i2_tag_is(state_kind, "efb-state", 9)
+                   || i2_tag_is(state_kind, "sifb-state", 10)) {
+            if (!noun_take(fields, &ignored, &fields)
+                || !noun_take(fields, &inputs, &outputs))
+                return 0;
+            tables[0] = inputs;
+            tables[1] = outputs;
+            table_count = 2;
+        } else {
+            return 0;
+        }
+        for (unsigned table_index = 0;
+             table_index < table_count; table_index++) {
+            noun table = tables[table_index];
+            for (unsigned variable_count = 0;
+                 variable_count < 16 && noun_is_cell(table);
+                 variable_count++) {
+                noun value_entry, table_tail, variable_id, typed;
+                noun type_id, payload, replacement;
+                if (!noun_take(table, &value_entry, &table_tail)
+                    || !noun_take(value_entry, &variable_id, &typed)
+                    || !noun_take(typed, &type_id, &payload))
+                    return 0;
+                if (noun_eq(type_id, uint_type)) {
+                    if (!alloc_cell_checked(
+                            type_id, direct(65536), &replacement))
+                        return 0;
+                    ((cell_t *)(uintptr_t)cell_ptr(value_entry))->tail = replacement;
+                    return 1;
+                }
+                table = table_tail;
+                (void)variable_id; (void)payload;
+            }
+        }
+    }
+    return 0;
+}
+
+uint64_t kernel_m17_typed_checkpoint_selftest(void)
+{
+    const runtime_identity_t *identity = runtime_identity_get();
+    if (!identity || identity->runtime_abi[0] != 1
+        || identity->runtime_abi[1] != 4 || !noun_is_cell(g_kernel))
+        return UINT64_MAX;
+
+    checkpoint_test_live_t live;
+    checkpoint_test_snapshot(&live);
+    heap_scratch_reset();
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return 1;
+    noun forged_gate;
+    int built = noun_copy_checked(g_kernel, &forged_gate)
+        && checkpoint_test_forge_first_uint(forged_gate);
+    int rejected = built
+        && !runtime_identity_validate_gate_header(forged_gate, identity, 0);
+    noun_tx_abort();
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_scratch_reset();
+
+    uint64_t failures = 0;
+    if (!built || !rejected)
+        failures |= 1;
+    if (!checkpoint_test_unchanged(&live))
+        failures |= 2;
+    return failures;
+}
+
 #ifdef M8_EVIDENCE
 static unsigned checkpoint_test_reject_m8(
     noun ckpt, const checkpoint_test_live_t *live)
@@ -4816,8 +4954,12 @@ uint64_t checkpoint_m2_selftest(void)
     }
 
     uint64_t incarnation = 0;
-    runtime_identity_validate_gate(
-        g_kernel, runtime_identity_get(), &incarnation);
+    /* The installed live gate was already fully executable-validated.  This
+     * self-test needs only its bound incarnation; avoid a deep program copy
+     * into persistent heap before asserting that every refusal is unchanged. */
+    if (!runtime_identity_validate_gate_header(
+            g_kernel, runtime_identity_get(), &incarnation))
+        return UINT64_MAX;
     uint64_t generation = runtime_identity_get()->generation;
 
     /* 17 valid timer entries: never skip/truncate the seventeenth. */

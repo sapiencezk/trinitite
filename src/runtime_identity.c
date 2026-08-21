@@ -197,6 +197,238 @@ static int version_is(noun n, uint16_t major, uint16_t minor)
     return take(n, &h, &t) && direct_is(h, major) && direct_is(t, minor);
 }
 
+#define M17_STATE_MAX_TYPES      4u
+#define M17_STATE_MAX_FB_TYPES  16u
+#define M17_STATE_MAX_INSTANCES 16u
+#define M17_STATE_MAX_VARS      16u
+#define M17_STATE_MAX_STATES    24u
+
+static int m17_cord_is(noun n, const char *text)
+{
+    char buffer[16];
+    size_t len = 0;
+    while (text[len])
+        len++;
+    if (len + 1 > sizeof buffer || cord_to_cstr(n, buffer, sizeof buffer) != len)
+        return 0;
+    for (size_t i = 0; i < len; i++)
+        if (buffer[i] != text[i])
+            return 0;
+    return 1;
+}
+
+static int m17_type_descriptor(noun types, noun wanted, noun *kind_out,
+                               noun *width_out)
+{
+    for (unsigned count = 0;
+         count < M17_STATE_MAX_TYPES && noun_is_cell(types); count++) {
+        noun entry, tail, type_id, descriptor;
+        if (!take(types, &entry, &tail)
+            || !take(entry, &type_id, &descriptor)
+            || !noun_is_direct(type_id) || direct_val(type_id) == 0)
+            return 0;
+        types = tail;
+        if (!noun_eq(type_id, wanted))
+            continue;
+        noun elementary, rest, symbol, kind, width, limit;
+        if (!take(descriptor, &elementary, &rest)
+            || !m17_cord_is(elementary, "elementary")
+            || !take(rest, &symbol, &rest)
+            || !take(rest, &kind, &rest)
+            || !take(rest, &width, &limit)
+            || !noun_is_direct(width))
+            return 0;
+        (void)symbol;
+        (void)limit;
+        *kind_out = kind;
+        *width_out = width;
+        return 1;
+    }
+    return 0;
+}
+
+static int m17_typed_value(noun types, noun expected_type, noun value)
+{
+    noun actual_type, payload, kind, width;
+    if (!take(value, &actual_type, &payload)
+        || !noun_eq(actual_type, expected_type)
+        || !m17_type_descriptor(types, expected_type, &kind, &width))
+        return 0;
+    if (direct_is(kind, 0x6c6f6f62ULL)) /* %bool */
+        return direct_is(width, 1)
+            && noun_is_direct(payload) && direct_val(payload) <= 1;
+    if (direct_is(kind, 0x746e6975ULL)) /* %uint */
+        return direct_is(width, 16)
+            && noun_is_direct(payload) && direct_val(payload) <= 65535;
+    if (direct_is(kind, 0x656d6974ULL)) { /* %time */
+        uint8_t bytes[8];
+        return direct_is(width, 64)
+            && noun_atom_read_fixed(payload, bytes, sizeof bytes);
+    }
+    return 0;
+}
+
+static int m17_var_table(noun declarations, noun table, noun types)
+{
+    uint64_t last = 0;
+    unsigned count = 0;
+    while (noun_is_cell(declarations) && noun_is_cell(table)) {
+        noun declaration, decl_tail, decl_id, decl_rest;
+        noun symbol, type_rest, type_id, initial;
+        noun value_entry, value_tail, value_id, value;
+        if (++count > M17_STATE_MAX_VARS
+            || !take(declarations, &declaration, &decl_tail)
+            || !take(table, &value_entry, &value_tail)
+            || !take(declaration, &decl_id, &decl_rest)
+            || !noun_is_direct(decl_id) || direct_val(decl_id) <= last
+            || !take(decl_rest, &symbol, &type_rest)
+            || !take(type_rest, &type_id, &initial)
+            || !noun_is_direct(type_id) || direct_val(type_id) == 0
+            || !take(value_entry, &value_id, &value)
+            || !noun_eq(value_id, decl_id)
+            || !m17_typed_value(types, type_id, value))
+            return 0;
+        last = direct_val(decl_id);
+        declarations = decl_tail;
+        table = value_tail;
+        (void)symbol;
+        (void)initial;
+    }
+    return declarations == NOUN_ZERO && table == NOUN_ZERO;
+}
+
+static int m17_active_state(noun states, noun active)
+{
+    int found = 0;
+    unsigned count = 0;
+    while (noun_is_cell(states)) {
+        noun declaration, tail, state_id, rest;
+        if (++count > M17_STATE_MAX_STATES
+            || !take(states, &declaration, &tail)
+            || !take(declaration, &state_id, &rest)
+            || !noun_is_direct(state_id) || direct_val(state_id) == 0)
+            return 0;
+        if (noun_eq(state_id, active))
+            found = 1;
+        states = tail;
+    }
+    return states == NOUN_ZERO && found;
+}
+
+static int m17_fb_descriptor(noun fb_types, noun wanted, noun *kind_out,
+                             noun *interface_out, noun *body_out)
+{
+    for (unsigned count = 0;
+         count < M17_STATE_MAX_FB_TYPES && noun_is_cell(fb_types); count++) {
+        noun entry, tail, type_id, descriptor;
+        if (!take(fb_types, &entry, &tail)
+            || !take(entry, &type_id, &descriptor)
+            || !noun_is_direct(type_id) || direct_val(type_id) == 0)
+            return 0;
+        fb_types = tail;
+        if (!noun_eq(type_id, wanted))
+            continue;
+        noun kind, rest, symbol, interface, body;
+        if (!take(descriptor, &kind, &rest)
+            || !take(rest, &symbol, &rest)
+            || !take(rest, &interface, &body))
+            return 0;
+        (void)symbol;
+        *kind_out = kind;
+        *interface_out = interface;
+        *body_out = body;
+        return 1;
+    }
+    return 0;
+}
+
+static int m17_instance_state(noun fb_kind, noun interface, noun fb_body,
+                              noun state, noun types)
+{
+    noun event_inputs, rest, event_outputs, data_inputs, data_outputs;
+    noun state_kind, state_rest, ignored, inputs, outputs;
+    if (!take(interface, &event_inputs, &rest)
+        || !take(rest, &event_outputs, &rest)
+        || !take(rest, &data_inputs, &data_outputs)
+        || !take(state, &state_kind, &state_rest))
+        return 0;
+    (void)event_inputs;
+    (void)event_outputs;
+    if (direct_is(fb_kind, 0x626662ULL)) { /* %bfb */
+        noun active, internals, initial, states;
+        if (!m17_cord_is(state_kind, "bfb-state")
+            || !take(state_rest, &active, &rest)
+            || !noun_is_direct(active) || direct_val(active) == 0
+            || !take(rest, &inputs, &rest)
+            || !take(rest, &outputs, &internals)
+            || !take(fb_body, &ignored, &rest)
+            || !take(rest, &initial, &rest)
+            || !take(rest, &states, &rest)
+            || !m17_active_state(states, active)
+            || !m17_var_table(data_inputs, inputs, types)
+            || !m17_var_table(data_outputs, outputs, types)
+            || !m17_var_table(ignored, internals, types))
+            return 0;
+        (void)initial;
+        return 1;
+    }
+    if (direct_is(fb_kind, 0x626665ULL)) { /* %efb */
+        if (!m17_cord_is(state_kind, "efb-state"))
+            return 0;
+    } else if (direct_is(fb_kind, 0x62666973ULL)) { /* %sifb */
+        if (!m17_cord_is(state_kind, "sifb-state"))
+            return 0;
+    } else {
+        return 0;
+    }
+    return take(state_rest, &ignored, &rest)
+        && take(rest, &inputs, &outputs)
+        && m17_var_table(data_inputs, inputs, types)
+        && m17_var_table(data_outputs, outputs, types);
+}
+
+static int m17_instance_states(noun program, noun states)
+{
+    noun tag, rest, schema, types, fb_types, instances;
+    if (!take(program, &tag, &rest) || !m17_cord_is(tag, "i2-program")
+        || !take(rest, &schema, &rest)
+        || !take(rest, &types, &rest)
+        || !take(rest, &fb_types, &rest)
+        || !take(rest, &instances, &rest))
+        return 0;
+    (void)schema;
+    uint64_t last = 0;
+    unsigned count = 0;
+    while (noun_is_cell(instances) && noun_is_cell(states)) {
+        noun instance_entry, instance_tail, instance_id, instance_body;
+        noun symbol, type_rest, fb_type_id, parameters;
+        noun state_entry, state_tail, state_id, state_body;
+        noun fb_kind, interface, fb_body;
+        if (++count > M17_STATE_MAX_INSTANCES
+            || !take(instances, &instance_entry, &instance_tail)
+            || !take(states, &state_entry, &state_tail)
+            || !take(instance_entry, &instance_id, &instance_body)
+            || !noun_is_direct(instance_id)
+            || direct_val(instance_id) <= last
+            || !take(instance_body, &symbol, &type_rest)
+            || !take(type_rest, &fb_type_id, &parameters)
+            || !noun_is_direct(fb_type_id) || direct_val(fb_type_id) == 0
+            || !take(state_entry, &state_id, &state_body)
+            || !noun_eq(state_id, instance_id)
+            || !m17_fb_descriptor(
+                fb_types, fb_type_id, &fb_kind, &interface, &fb_body)
+            || !m17_instance_state(
+                fb_kind, interface, fb_body, state_body, types))
+            return 0;
+        last = direct_val(instance_id);
+        instances = instance_tail;
+        states = state_tail;
+        (void)symbol;
+        (void)parameters;
+    }
+    return count != 0 && instances == NOUN_ZERO && states == NOUN_ZERO;
+}
+
 static int atom_matches_hash(noun n, const uint8_t expected[32])
 {
     uint8_t actual[32];
@@ -415,8 +647,9 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
         || !atom_matches_hash(program_hash, id->program_hash))
         return 0;
 
+    noun instance_states = NOUN_ZERO;
     if (i2_admission_program_known(id->program_hash)) {
-        noun instance_states, formula;
+        noun formula;
         if (!take(dynamic, &instance_states, &formula)
             || !noun_matches_hash(battery, id->battery_hash)
             || !noun_is_cell(instance_states))
@@ -438,6 +671,9 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
                        id->program_schema[1])
         || !version_is(algorithm_abi, id->algorithm_abi[0],
                        id->algorithm_abi[1]))
+        return 0;
+    if (id->runtime_abi[0] == 1 && id->runtime_abi[1] == 4
+        && !m17_instance_states(program, instance_states))
         return 0;
     if (incarnation_out)
         *incarnation_out = direct_val(incarnation);

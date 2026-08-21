@@ -3169,6 +3169,13 @@ defcode "CKM2", 4, ckpt_m2_test, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// M17CKT ( -- failures ) forges UINT=65536 in a scratch copy of the live
+// ABI-1.4 gate and proves restore admission rejects it without live mutation.
+defcode "M17CKT", 6, m17_typed_checkpoint_test_word, 0
+    bl      kernel_m17_typed_checkpoint_selftest
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // ── I2 Milestone 3 bounded measurement surface ───────────────────────────
 // RSTON/RSTOFF toggle the allocation-free fixed stats block.
 // RSTCLR resets one run, preserving the enable state.

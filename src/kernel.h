@@ -211,3 +211,4 @@ uint64_t kernel_i2_output_atom(uint64_t instance_id, uint64_t variable_id);
 uint64_t kernel_tx_stuck_selftest(void);
 /* Requires kernel_prepare_pill() first; zero means restore matrix passed. */
 uint64_t checkpoint_m2_selftest(void);
+uint64_t kernel_m17_typed_checkpoint_selftest(void);
