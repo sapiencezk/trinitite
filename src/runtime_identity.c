@@ -147,12 +147,14 @@ int runtime_identity_supported(const runtime_identity_t *id)
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 4;
     int m18 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 5
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 5;
-    if (!legacy && !origin_v1 && !m7 && !m16 && !m17 && !m18)
+    int m19 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 6
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 6;
+    if (!legacy && !origin_v1 && !m7 && !m16 && !m17 && !m18 && !m19)
         return 0;
     /* ABI families are paired products. Do not admit a valid runtime with a
      * host/deployment family from another product cut. The supervised 1.2
      * through 1.4 runtimes retain the exact host/deployment 1.2 family. */
-    if (m7 || m16 || m17 || m18) {
+    if (m7 || m16 || m17 || m18 || m19) {
         if (!m7_host) return 0;
     } else if (!baseline_host && !digital_host) {
         return 0;
@@ -675,7 +677,8 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
                        id->algorithm_abi[1]))
         return 0;
     if (id->runtime_abi[0] == 1
-        && (id->runtime_abi[1] == 4 || id->runtime_abi[1] == 5)
+        && (id->runtime_abi[1] == 4 || id->runtime_abi[1] == 5
+            || id->runtime_abi[1] == 6)
         && !m17_instance_states(program, instance_states))
         return 0;
     if (incarnation_out)
@@ -934,21 +937,28 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
         && identity.deployment_schema[1] == 2;
     uint8_t capability_profile = header[25];
     int closed_io = 0;
+    int static_resource = m7_digital_identity
+        && capability_profile == RUNTIME_CAPABILITY_PROFILE_STATIC_RESOURCE;
     if (digital_identity || m7_digital_identity) {
         closed_io = m7_digital_identity
             && capability_profile == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO;
-        const uint8_t *fingerprint = closed_io
+        static const uint8_t static_resource_fingerprint[8] = {
+            0x54, 0x98, 0xab, 0xc7, 0x4f, 0xb5, 0x98, 0x33
+        };
+        const uint8_t *fingerprint = static_resource
+            ? static_resource_fingerprint : closed_io
             ? g_closed_process_io_request_grant_fingerprint
             : digital_identity ? g_digital_out_request_grant_fingerprint
                                : g_m7_digital_out_request_grant_fingerprint;
-        uint8_t expected_profile = closed_io
+        uint8_t expected_profile = static_resource
+            ? RUNTIME_CAPABILITY_PROFILE_STATIC_RESOURCE : closed_io
             ? RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO
             : digital_identity ? RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
                                : RUNTIME_CAPABILITY_PROFILE_M7_DIGITAL_OUT;
         if (capability_profile != expected_profile
             || !bytes_eq(header + 248, fingerprint, 8))
             return PILL_I2_IDENTITY;
-        if (closed_io) {
+        if (closed_io || static_resource) {
             uint8_t pill_digest[32];
             uint64_t pill_bytes = PILL_I2_HEADER_SIZE + len;
             if (!i2_admission_pill_digest(base, pill_bytes, pill_digest)
@@ -970,7 +980,7 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
     if (cue_status != CUE_BOUNDED_OK)
         return cue_status == CUE_BOUNDED_ALLOC
             ? PILL_I2_ALLOC : PILL_I2_CUE;
-    if (closed_io) {
+    if (closed_io || static_resource) {
         uint8_t limits_hash[32];
         uint8_t pill_digest[32];
         uint64_t pill_bytes = PILL_I2_HEADER_SIZE + len;

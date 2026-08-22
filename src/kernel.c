@@ -2257,7 +2257,7 @@ static int runtime_origin_v1(void)
     return identity && identity->runtime_abi[0] == 1
         && (identity->runtime_abi[1] == 1 || identity->runtime_abi[1] == 2
             || identity->runtime_abi[1] == 3 || identity->runtime_abi[1] == 4
-            || identity->runtime_abi[1] == 5)
+            || identity->runtime_abi[1] == 5 || identity->runtime_abi[1] == 6)
         && identity->formula_abi[0] == 1
         && identity->formula_abi[1] == identity->runtime_abi[1];
 }
@@ -2266,7 +2266,8 @@ static int runtime_supervised_identity(const runtime_identity_t *identity)
 {
     return identity && identity->runtime_abi[0] == 1
         && (identity->runtime_abi[1] == 2 || identity->runtime_abi[1] == 3
-            || identity->runtime_abi[1] == 4 || identity->runtime_abi[1] == 5)
+            || identity->runtime_abi[1] == 4 || identity->runtime_abi[1] == 5
+            || identity->runtime_abi[1] == 6)
         && identity->formula_abi[0] == 1
         && identity->formula_abi[1] == identity->runtime_abi[1]
         && identity->host_abi[0] == 1 && identity->host_abi[1] == 2
