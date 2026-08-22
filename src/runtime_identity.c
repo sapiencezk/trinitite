@@ -145,12 +145,14 @@ int runtime_identity_supported(const runtime_identity_t *id)
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 3;
     int m17 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 4
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 4;
-    if (!legacy && !origin_v1 && !m7 && !m16 && !m17)
+    int m18 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 5
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 5;
+    if (!legacy && !origin_v1 && !m7 && !m16 && !m17 && !m18)
         return 0;
     /* ABI families are paired products. Do not admit a valid runtime with a
      * host/deployment family from another product cut. The supervised 1.2
      * through 1.4 runtimes retain the exact host/deployment 1.2 family. */
-    if (m7 || m16 || m17) {
+    if (m7 || m16 || m17 || m18) {
         if (!m7_host) return 0;
     } else if (!baseline_host && !digital_host) {
         return 0;
@@ -672,7 +674,8 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
         || !version_is(algorithm_abi, id->algorithm_abi[0],
                        id->algorithm_abi[1]))
         return 0;
-    if (id->runtime_abi[0] == 1 && id->runtime_abi[1] == 4
+    if (id->runtime_abi[0] == 1
+        && (id->runtime_abi[1] == 4 || id->runtime_abi[1] == 5)
         && !m17_instance_states(program, instance_states))
         return 0;
     if (incarnation_out)

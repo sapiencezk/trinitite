@@ -253,7 +253,7 @@ static int m7_is_identity(const runtime_identity_t *id)
 {
     return id && id->runtime_abi[0] == 1
         && (id->runtime_abi[1] == 2 || id->runtime_abi[1] == 3
-            || id->runtime_abi[1] == 4)
+            || id->runtime_abi[1] == 4 || id->runtime_abi[1] == 5)
         && id->formula_abi[0] == 1
         && id->formula_abi[1] == id->runtime_abi[1]
         && id->host_abi[0] == 1 && id->host_abi[1] == 2

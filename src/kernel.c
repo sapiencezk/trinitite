@@ -2256,7 +2256,8 @@ static int runtime_origin_v1(void)
     const runtime_identity_t *identity = runtime_identity_get();
     return identity && identity->runtime_abi[0] == 1
         && (identity->runtime_abi[1] == 1 || identity->runtime_abi[1] == 2
-            || identity->runtime_abi[1] == 3 || identity->runtime_abi[1] == 4)
+            || identity->runtime_abi[1] == 3 || identity->runtime_abi[1] == 4
+            || identity->runtime_abi[1] == 5)
         && identity->formula_abi[0] == 1
         && identity->formula_abi[1] == identity->runtime_abi[1];
 }
@@ -2265,7 +2266,7 @@ static int runtime_supervised_identity(const runtime_identity_t *identity)
 {
     return identity && identity->runtime_abi[0] == 1
         && (identity->runtime_abi[1] == 2 || identity->runtime_abi[1] == 3
-            || identity->runtime_abi[1] == 4)
+            || identity->runtime_abi[1] == 4 || identity->runtime_abi[1] == 5)
         && identity->formula_abi[0] == 1
         && identity->formula_abi[1] == identity->runtime_abi[1]
         && identity->host_abi[0] == 1 && identity->host_abi[1] == 2
@@ -4712,7 +4713,8 @@ uint64_t kernel_m17_typed_checkpoint_selftest(void)
 {
     const runtime_identity_t *identity = runtime_identity_get();
     if (!identity || identity->runtime_abi[0] != 1
-        || identity->runtime_abi[1] != 4 || !noun_is_cell(g_kernel))
+        || (identity->runtime_abi[1] != 4 && identity->runtime_abi[1] != 5)
+        || !noun_is_cell(g_kernel))
         return UINT64_MAX;
 
     checkpoint_test_live_t live;
