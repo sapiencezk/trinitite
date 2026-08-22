@@ -1493,7 +1493,8 @@ static int m7_admit_service_lib(noun rest)
 /* Snapshot encode is structural jam, so a later cue collapses program
  * twins. Keep the admitted PILL executable and only take instance state
  * from the snapshot; later identity-jam checks need the original DAG. */
-static int m7_bind_snapshot_instances(noun admitted, noun snapshot)
+static int m7_bind_snapshot_instances(noun admitted, noun snapshot,
+                                      uint8_t capability)
 {
     noun a_battery, a_sample, a_zero, a_state, a_tag, a_rest, a_header;
     noun a_tail, a_program, a_dynamic;
@@ -1504,6 +1505,8 @@ static int m7_bind_snapshot_instances(noun admitted, noun snapshot)
     noun prog_kinds[M7_SNAP_INSTANCES];
     unsigned prog_n = 0, seen = 0;
     i2_closed_process_roles_t roles;
+    int closed_process = capability
+        == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO;
     uint64_t incarnation;
     noun versions, rest, rid, generation, inc_n, battery_hash, program_hash;
     noun limits;
@@ -1521,7 +1524,8 @@ static int m7_bind_snapshot_instances(noun admitted, noun snapshot)
         || !take(s_dynamic, &s_states, &s_formula)
         || !noun_is_cell(s_states)
         || !m7_program_instances(a_program, prog_ids, prog_kinds, &prog_n)
-        || !i2_closed_process_roles_from_program(a_program, &roles)
+        || (closed_process
+            && !i2_closed_process_roles_from_program(a_program, &roles))
         || !take(a_header, &versions, &rest)
         || !take(rest, &rid, &rest)
         || !take(rest, &generation, &rest)
@@ -1562,11 +1566,11 @@ static int m7_bind_snapshot_instances(noun admitted, noun snapshot)
             }
         if (slot == prog_n || !m7_state_kind_matches(prog_kinds[slot], kind))
             return 0;
-        if (iid == roles.timer_owner) {
+        if (closed_process && iid == roles.timer_owner) {
             if (!m7_admit_timer_lib(restb, roles.timer_owner, incarnation))
                 return 0;
-        } else if (iid == roles.input_bank_owner
-                   || iid == roles.output_bank_owner) {
+        } else if (closed_process && (iid == roles.input_bank_owner
+                   || iid == roles.output_bank_owner)) {
             if (!m7_admit_service_lib(restb))
                 return 0;
         }
@@ -1674,7 +1678,7 @@ int m7_boot_snapshot(void)
     if (!kernel_m7_gate_with_identity_incarnation(
             pill_gate, &snapshot_identity, direct_val(incarnation),
             &live_gate)
-        || !m7_bind_snapshot_instances(live_gate, gate)) {
+        || !m7_bind_snapshot_instances(live_gate, gate, capability)) {
         if (noun_tx_active()) noun_tx_abort();
         return -1;
     }

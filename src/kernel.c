@@ -173,6 +173,26 @@ static uint64_t g_m7_lifecycle_root_commits;
 static uint64_t g_m7_lifecycle_destination_commits;
 
 #define M7_LIFECYCLE_MAX_TRANSACTIONS 3u
+#ifndef I2_MAX_LIFECYCLE_TRANSACTIONS
+#define I2_MAX_LIFECYCLE_TRANSACTIONS M7_LIFECYCLE_MAX_TRANSACTIONS
+#endif
+
+/* The retained M7 and closed-process images terminate a lifecycle after its
+ * root and two destinations.  The admitted M19 static-resource image carries
+ * an explicit four-transaction envelope: root plus its three authored
+ * destinations.  Capability is published only after PILL/catalog admission,
+ * so an otherwise similar or unadmitted identity cannot widen this bound. */
+static uint64_t kernel_m7_lifecycle_transaction_limit(void)
+{
+    const runtime_identity_t *identity = runtime_identity_get();
+    if (identity
+        && identity->runtime_abi[0] == 1 && identity->runtime_abi[1] == 6
+        && identity->formula_abi[0] == 1 && identity->formula_abi[1] == 6
+        && runtime_identity_capability_profile()
+            == RUNTIME_CAPABILITY_PROFILE_STATIC_RESOURCE)
+        return I2_MAX_LIFECYCLE_TRANSACTIONS;
+    return M7_LIFECYCLE_MAX_TRANSACTIONS;
+}
 
 static void emit_swapped(uint32_t ver);
 
@@ -2321,11 +2341,9 @@ static int kernel_m7_transaction_terminal(int committed)
         } else {
             g_m7_lifecycle_destination_commits++;
         }
-        /* Refuse before selecting a fourth transaction.  A valid static
-         * graph can derive one receiver that fans out twice: its root plus
-         * first two receivers have already committed at this point, while a
-         * remaining queue entry must be retired rather than executed. */
-        if (g_m7_lifecycle_transactions >= M7_LIFECYCLE_MAX_TRANSACTIONS
+        /* At the selected image's bound, retain commits already published,
+         * retire the queued successor, and stop before selecting it. */
+        if (g_m7_lifecycle_transactions >= kernel_m7_lifecycle_transaction_limit()
             && g_evq_n != 0) {
             evq_clear();
             g_m7_lifecycle_active = 0;
