@@ -60,6 +60,14 @@ int i2_closed_process_roles_from_program(
 {
     noun tag, rest, schema, rest2, types, rest3, fb_types, rest4;
     noun instances, rest5, conn, rest6, ext;
+    /* M20 keeps the runtime flat: its wrapper only binds immutable derived
+     * route/type tables around the same closed-process ResourceProgram. */
+    if (take(program, &tag, &rest) && name_is(tag, "i2-m20-program")) {
+        noun base, tables;
+        if (!take(rest, &base, &tables) || !noun_is_cell(tables))
+            return 0;
+        program = base;
+    }
     if (!out || !take(program, &tag, &rest) || !name_is(tag, "i2-program")
         || !take(rest, &schema, &rest2)
         || !take(rest2, &types, &rest3)

@@ -178,16 +178,19 @@ static uint64_t g_m7_lifecycle_destination_commits;
 #endif
 
 /* The retained M7 and closed-process images terminate a lifecycle after its
- * root and two destinations.  The admitted M19 static-resource image carries
- * an explicit four-transaction envelope: root plus its three authored
- * destinations.  Capability is published only after PILL/catalog admission,
- * so an otherwise similar or unadmitted identity cannot widen this bound. */
+ * root and two destinations.  The admitted M19 static-resource image and its
+ * M20 generic-executor successor carry an explicit four-transaction envelope:
+ * root plus its three authored destinations.  Capability is published only
+ * after PILL/catalog admission, so an otherwise similar or unadmitted
+ * identity cannot widen this bound. */
 static uint64_t kernel_m7_lifecycle_transaction_limit(void)
 {
     const runtime_identity_t *identity = runtime_identity_get();
     if (identity
-        && identity->runtime_abi[0] == 1 && identity->runtime_abi[1] == 6
-        && identity->formula_abi[0] == 1 && identity->formula_abi[1] == 6
+        && identity->runtime_abi[0] == 1
+        && ((identity->runtime_abi[1] == 6 && identity->formula_abi[1] == 6)
+            || (identity->runtime_abi[1] == 7 && identity->formula_abi[1] == 7))
+        && identity->formula_abi[0] == 1
         && runtime_identity_capability_profile()
             == RUNTIME_CAPABILITY_PROFILE_STATIC_RESOURCE)
         return I2_MAX_LIFECYCLE_TRANSACTIONS;
@@ -2277,7 +2280,8 @@ static int runtime_origin_v1(void)
     return identity && identity->runtime_abi[0] == 1
         && (identity->runtime_abi[1] == 1 || identity->runtime_abi[1] == 2
             || identity->runtime_abi[1] == 3 || identity->runtime_abi[1] == 4
-            || identity->runtime_abi[1] == 5 || identity->runtime_abi[1] == 6)
+            || identity->runtime_abi[1] == 5 || identity->runtime_abi[1] == 6
+            || identity->runtime_abi[1] == 7)
         && identity->formula_abi[0] == 1
         && identity->formula_abi[1] == identity->runtime_abi[1];
 }
@@ -2287,7 +2291,7 @@ static int runtime_supervised_identity(const runtime_identity_t *identity)
     return identity && identity->runtime_abi[0] == 1
         && (identity->runtime_abi[1] == 2 || identity->runtime_abi[1] == 3
             || identity->runtime_abi[1] == 4 || identity->runtime_abi[1] == 5
-            || identity->runtime_abi[1] == 6)
+            || identity->runtime_abi[1] == 6 || identity->runtime_abi[1] == 7)
         && identity->formula_abi[0] == 1
         && identity->formula_abi[1] == identity->runtime_abi[1]
         && identity->host_abi[0] == 1 && identity->host_abi[1] == 2
