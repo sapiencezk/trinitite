@@ -21,7 +21,6 @@
  * session.  No framed noun supplies an epoch, floor, or policy. */
 #define M23_INITIAL_FLOOR 2u
 #define M23_INITIAL_EPOCH 3u
-#define M23_ROTATED_EPOCH 4u
 #define M23_U64_MAX UINT64_MAX
 #define M23_CHECKPOINT_MAGIC 0x4d323353ULL
 
@@ -437,7 +436,7 @@ int m23_provider_core_receive_framed(void)
         return -1;
     }
     if (g_ingress_work_count >= M23_RATE_CAP) {
-        i2_rx_discard_ready(); reject(M23_ERR_FRAME_RATE); return -1;
+        i2_rx_discard_ready(); reject(M23_ERR_INGRESS_WORK_LIMIT); return -1;
     }
     g_ingress_work_count++;
     if (!i2_rx_take_limited(&product, &M23_CUE_LIMITS)) {
@@ -576,7 +575,7 @@ int m23_provider_core_checkpoint_tamper(void)
 }
 #endif
 
-int m23_provider_core_publish(void)
+int m23_provider_core_complete_egress(void)
 {
     /* This is a synthetic post-transport egress-completion operation for the
      * framed provider-core proof; it is not target networking. */
@@ -591,7 +590,7 @@ int m23_provider_core_publish(void)
         candidate.outbound_rate_deadline = target_counter_deadline();
     }
     if (candidate.outbound_rate_count >= M23_RATE_CAP) {
-        reject(M23_ERR_FRAME_RATE); return -1;
+        reject(M23_ERR_OUTBOUND_RATE_LIMIT); return -1;
     }
     if (candidate.next_sequence == UINT64_MAX) {
         candidate.state = M23_STATE_EXHAUSTED;

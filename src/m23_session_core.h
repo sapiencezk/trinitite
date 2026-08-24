@@ -21,7 +21,7 @@ enum {
     M23_ERR_ADAPTER_ATTESTATION = 2,
     M23_ERR_NO_FRAME = 3,
     M23_ERR_FRAME_LENGTH = 4,
-    M23_ERR_FRAME_RATE = 5,
+    M23_ERR_INGRESS_WORK_LIMIT = 5,
     M23_ERR_CUE = 6,
     M23_ERR_PRODUCT_TAG = 7,
     M23_ERR_VERSION = 8,
@@ -51,7 +51,8 @@ enum {
     M23_ERR_STALE_EPOCH = 36,
     M23_ERR_EPOCH_NOT_NEWER = 37,
     M23_ERR_SEQUENCE_EXHAUSTED = 38,
-    M23_ERR_CLOSED = 39
+    M23_ERR_CLOSED = 39,
+    M23_ERR_OUTBOUND_RATE_LIMIT = 40
 };
 
 int m23_provider_core_init(void);
@@ -67,7 +68,7 @@ int m23_provider_core_checkpoint_restore(void);
 #ifdef M23_TEST_CONTROLS
 int m23_provider_core_checkpoint_tamper(void);
 #endif
-int m23_provider_core_publish(void);
+int m23_provider_core_complete_egress(void);
 #ifdef M23_TEST_CONTROLS
 int m23_provider_core_set_next_max_minus_one(void);
 #endif

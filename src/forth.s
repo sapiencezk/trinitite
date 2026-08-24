@@ -3051,7 +3051,7 @@ defcode "M23BD?", 6, m23_checkpoint_bad_word, 0
     NEXT
 
 defcode "M23PUB?", 7, m23_publish_word, 0
-    bl      m23_provider_core_publish
+    bl      m23_provider_core_complete_egress
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
