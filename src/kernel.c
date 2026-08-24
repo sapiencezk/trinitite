@@ -20,6 +20,7 @@
 #include "digital_in.h"
 #include "m7_supervisor.h"
 #include "i2_operator.h"
+#include "m21_device.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
 #define CORD_OUT     7632239ULL              /* %out      */
@@ -5232,6 +5233,20 @@ static int install_clean_pill(noun pill_gate)
 int kernel_prepare_pill(void)
 {
     noun gate = kernel_pill_load();
+    /* ABI-1.8 is the isolated fixed two-resource authority.  It consumes the
+     * normal source PILL candidate and independently validates the embedded
+     * exact sink PILL before either M21 root becomes live.  It never falls
+     * through the historical singleton installer. */
+    if (noun_is_cell(gate) && g_pill_candidate_i2
+        && g_pill_candidate_identity.runtime_abi[0] == 1
+        && g_pill_candidate_identity.runtime_abi[1] == 8) {
+        int status = m21_device_boot(
+            gate, &g_pill_candidate_identity, g_pill_candidate_capability);
+        if (status != 0 && noun_tx_active())
+            noun_tx_abort();
+        g_pill_candidate_i2 = 0;
+        return status;
+    }
     return noun_is_cell(gate) && install_clean_pill(gate) == 0 ? 0 : -1;
 }
 

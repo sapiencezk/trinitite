@@ -20,6 +20,7 @@ DIGITAL_OUT_BACKEND ?= bcm2838
 DIGITAL_IN_BACKEND ?= bcm2838
 M8_EVIDENCE ?= 0
 I2_OPERATOR ?= 0
+M21_SINK_EMBED ?= 0
 
 ifeq ($(M8_EVIDENCE),1)
 CFLAGS += -DM8_EVIDENCE=1
@@ -27,6 +28,10 @@ endif
 
 ifeq ($(I2_OPERATOR),1)
 CFLAGS += -DI2_OPERATOR=1
+endif
+
+ifeq ($(M21_SINK_EMBED),1)
+CFLAGS += -DM21_SINK_EMBED=1
 endif
 
 ifeq ($(COLD_MEDIA),ram)
@@ -61,8 +66,8 @@ else
 $(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake))
 endif
 
-OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o main.o
-CONFIG_KEY = $(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)
+OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+CONFIG_KEY = $(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)
 BUILD_DIR = .build/$(CONFIG_KEY)
 OBJDIR = $(BUILD_DIR)/obj
 OBJS = $(addprefix $(OBJDIR)/,$(OBJ_NAMES))
@@ -91,12 +96,29 @@ $(BUILD_DIR):
 $(OBJDIR)/%.o: $(SRCDIR)/%.s | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJDIR)/%.o: $(SRCDIR)/%.S | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# The second PILL is present only in the explicit ABI-1.8 two-slot image.
+# It is a real input to that object so regenerated M21 artifacts cannot leave
+# a stale embedded formula behind.
+ifeq ($(M21_SINK_EMBED),1)
+$(OBJDIR)/m21_sink_embed.o: $(SRCDIR)/m21_sink_embed.S m21_sink.pill | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $(SRCDIR)/m21_sink_embed.S -o $@
+endif
+
 # M3 fake-media test words are compiled only into the explicit fake build.
 $(OBJDIR)/forth.o: $(SRCDIR)/forth.s | $(OBJDIR)
 	$(CC) $(CFLAGS) -x assembler-with-cpp -c $< -o $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Generated admission data is a semantic target input.  The explicit edge
+# prevents an M21 artifact regeneration from linking an old policy object.
+$(OBJDIR)/i2_admission_policy.o: $(SRCDIR)/i2_admission_policy.c \
+	$(SRCDIR)/i2_admission_envelope.h $(SRCDIR)/i2_admission_catalog.inc | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $(SRCDIR)/i2_admission_policy.c -o $@
 
 # Configuration-specific directories prevent preprocessor/backend object reuse.
 $(CONFIG_ELF): $(OBJS) | $(BUILD_DIR)

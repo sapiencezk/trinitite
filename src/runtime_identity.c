@@ -151,12 +151,14 @@ int runtime_identity_supported(const runtime_identity_t *id)
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 6;
     int m20 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 7
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 7;
-    if (!legacy && !origin_v1 && !m7 && !m16 && !m17 && !m18 && !m19 && !m20)
+    int m21 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 8
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 8;
+    if (!legacy && !origin_v1 && !m7 && !m16 && !m17 && !m18 && !m19 && !m20 && !m21)
         return 0;
     /* ABI families are paired products. Do not admit a valid runtime with a
      * host/deployment family from another product cut. The supervised 1.2
      * through 1.4 runtimes retain the exact host/deployment 1.2 family. */
-    if (m7 || m16 || m17 || m18 || m19 || m20) {
+    if (m7 || m16 || m17 || m18 || m19 || m20 || m21) {
         if (!m7_host) return 0;
     } else if (!baseline_host && !digital_host) {
         return 0;
@@ -439,10 +441,12 @@ static int m17_instance_states(noun program, noun states)
  * derived immutable execution tables.  The wrapper identity remains the
  * program identity; this narrow projection is only for the retained flat
  * instance-state shape checker. */
-static int m20_base_program(noun program, noun *base_out)
+static int m20_or_m21_base_program(noun program, noun *base_out)
 {
     noun tag, rest, base, tables;
-    if (!take(program, &tag, &rest) || !m17_cord_is(tag, "i2-m20-program")
+    if (!take(program, &tag, &rest)
+        || (!m17_cord_is(tag, "i2-m20-program")
+            && !m17_cord_is(tag, "i2-m21-program"))
         || !take(rest, &base, &tables) || !noun_is_cell(tables))
         return 0;
     *base_out = base;
@@ -693,12 +697,14 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
                        id->algorithm_abi[1]))
         return 0;
     noun instance_program = program;
-    if (id->runtime_abi[0] == 1 && id->runtime_abi[1] == 7
-        && !m20_base_program(program, &instance_program))
+    if (id->runtime_abi[0] == 1
+        && (id->runtime_abi[1] == 7 || id->runtime_abi[1] == 8)
+        && !m20_or_m21_base_program(program, &instance_program))
         return 0;
     if (id->runtime_abi[0] == 1
         && (id->runtime_abi[1] == 4 || id->runtime_abi[1] == 5
-            || id->runtime_abi[1] == 6 || id->runtime_abi[1] == 7)
+            || id->runtime_abi[1] == 6 || id->runtime_abi[1] == 7
+            || id->runtime_abi[1] == 8)
         && !m17_instance_states(instance_program, instance_states))
         return 0;
     if (incarnation_out)

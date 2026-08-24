@@ -2825,6 +2825,87 @@ defcode "M2PREP", 6, m2_prepare_pill, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// M21 fixed two-slot authority probes.  The only external ingress accepts
+// two BOOL samples for the admitted source REQ; no Forth word accepts raw
+// EI, route, egress, or inter-resource carrier nouns.
+// M21IN ( a b -- status ) / M21STEP ( -- status ) / M21AIN@ ( -- bool|-1 )
+// M21BIN@ ( -- bool|-1 ) / M21Q ( slot -- count|-1 ) / M21ERR@ ( -- code )
+// M21RAW?/M21ST?/M21FL? ( -- status ) are focused hostile controls.
+// M21CKS?/M21CKR? capture/restore the fixed two-slot checkpoint noun;
+// M21BD? proves tamper refusal retains the current root.
+defcode "M21IN", 5, m21_input_word, 0
+    ldr     x1, [DSP], #8
+    ldr     x0, [DSP], #8
+    bl      m21_device_enqueue_source_bool
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21STEP", 7, m21_step_word, 0
+    bl      m21_device_step
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21AIN@", 7, m21_a_input_word, 0
+    mov     x0, #1
+    bl      m21_device_sink_input
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21BIN@", 7, m21_b_input_word, 0
+    mov     x0, #2
+    bl      m21_device_sink_input
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21Q", 4, m21_queue_word, 0
+    ldr     x0, [DSP]
+    bl      m21_device_queue_len
+    str     x0, [DSP]
+    NEXT
+
+defcode "M21ERR@", 7, m21_error_word, 0
+    bl      m21_device_last_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21RAW?", 7, m21_raw_word, 0
+    bl      m21_device_raw_ingress_refuses
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21ST?", 6, m21_stale_word, 0
+    bl      m21_device_stale_carrier_refuses
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21FL?", 6, m21_full_word, 0
+    bl      m21_device_destination_full_refuses
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21CKS?", 7, m21_checkpoint_save_word, 0
+    bl      m21_device_checkpoint_capture
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21CKR?", 7, m21_checkpoint_restore_word, 0
+    bl      m21_device_checkpoint_restore
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21BD?", 6, m21_checkpoint_bad_word, 0
+    bl      m21_device_checkpoint_tamper_refuses
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // ── M7 pure resource supervisor / trusted lab bridge ─────────────────────
 // M7INIT ( -- st )        validate the live M7 identity/gate and install the
 //                         persistent pure-Nock MANAGER formula.
