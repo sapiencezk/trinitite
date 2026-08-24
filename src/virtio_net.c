@@ -217,6 +217,7 @@ virtio_net_status_t virtio_net_receive(uint8_t *out, uint32_t out_cap,
     g_test_rx_bad = 0; g_test_rx_overadvance = 0; g_test_rx_overlong = 0;
     if (test_rx_bad) delta = 1;
     if (test_rx_overadvance) delta = RING_COUNT + 1u;
+    if (test_rx_overlong) delta = 1;
 #endif
     if (delta > RING_COUNT) {
         g_last_error = 9;
