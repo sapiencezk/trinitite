@@ -52,7 +52,16 @@ enum {
     M23_ERR_EPOCH_NOT_NEWER = 37,
     M23_ERR_SEQUENCE_EXHAUSTED = 38,
     M23_ERR_CLOSED = 39,
-    M23_ERR_OUTBOUND_RATE_LIMIT = 40
+    M23_ERR_OUTBOUND_RATE_LIMIT = 40,
+    M23_ERR_NATIVE_NO_PACKET = 41,
+    M23_ERR_NATIVE_ETHERNET = 42,
+    M23_ERR_NATIVE_IPV6 = 43,
+    M23_ERR_NATIVE_ENDPOINT = 44,
+    M23_ERR_NATIVE_CHECKSUM = 45,
+    M23_ERR_NATIVE_AUTHENTICATION = 46,
+    M23_ERR_NATIVE_CANONICAL = 47,
+    M23_ERR_NATIVE_DEVICE = 48,
+    M23_ERR_NATIVE_RING_FULL = 49
 };
 
 int m23_provider_core_init(void);
@@ -69,6 +78,11 @@ int m23_provider_core_checkpoint_restore(void);
 int m23_provider_core_checkpoint_tamper(void);
 #endif
 int m23_provider_core_complete_egress(void);
+#ifdef M24_NATIVE
+int m23_provider_core_native_init(void);
+int m23_provider_core_receive_native(void);
+int m23_provider_core_publish_native(void);
+#endif
 #ifdef M23_TEST_CONTROLS
 int m23_provider_core_set_next_max_minus_one(void);
 int m23_provider_core_test_outbound_burst(void);

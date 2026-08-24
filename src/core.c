@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "core.h"
 #include "memory.h"
+#include "platform.h"
 
 /* Defined in boot.s .data */
 extern volatile uint64_t cores_ready;
@@ -83,6 +84,10 @@ static int mbox_pop(uint64_t id, uint64_t *out)
 /* First start: free the core from the firmware spin-table. */
 static void spin_table_release(uint64_t id)
 {
+#if !PLATFORM_HAS_RPI_SPIN_TABLE
+    (void)id;
+    return;
+#else
     if (id < 1 || id >= NCORES)
         return;
     if (core_released[id])
@@ -93,6 +98,7 @@ static void spin_table_release(uint64_t id)
     dsb();
     sev();
     core_released[id] = 1;
+#endif
 }
 
 void core_start(uint64_t id)

@@ -1,6 +1,17 @@
 TARGET  = kernel8
 SRCDIR  = src
 
+PLATFORM ?= rpi4b
+ifeq ($(PLATFORM),rpi4b)
+PLATFORM_DEFINE = -DTRINITITE_PLATFORM_RPI4B=1
+LINKER_SCRIPT = $(SRCDIR)/linker.ld
+else ifeq ($(PLATFORM),qemu-virt)
+PLATFORM_DEFINE = -DTRINITITE_PLATFORM_QEMU_VIRT=1
+LINKER_SCRIPT = $(SRCDIR)/linker-qemu-virt.ld
+else
+$(error unsupported PLATFORM='$(PLATFORM)' (rpi4b, qemu-virt))
+endif
+
 CROSS   ?= aarch64-elf-
 CC       = $(CROSS)gcc
 LD       = $(CROSS)ld
@@ -12,16 +23,26 @@ VPATH   = $(SRCDIR)
 CFLAGS  = -Wall -O2 -ffreestanding -nostdlib -nostartfiles \
           -mcpu=cortex-a72 -mgeneral-regs-only \
           -fno-pic -fno-stack-protector -fno-builtin \
-          -I$(SRCDIR)
-LDFLAGS = -T $(SRCDIR)/linker.ld -nostdlib -no-pie
+          -I$(SRCDIR) $(PLATFORM_DEFINE)
+LDFLAGS = -T $(LINKER_SCRIPT) -nostdlib -no-pie
+ifeq ($(PLATFORM),qemu-virt)
+LDFLAGS += -e _start
+endif
 
 COLD_MEDIA ?= ram
+ifeq ($(PLATFORM),qemu-virt)
+DIGITAL_OUT_BACKEND ?= fake
+DIGITAL_IN_BACKEND ?= fake
+else
 DIGITAL_OUT_BACKEND ?= bcm2838
 DIGITAL_IN_BACKEND ?= bcm2838
+endif
 M8_EVIDENCE ?= 0
 I2_OPERATOR ?= 0
 M21_SINK_EMBED ?= 0
 M23_TEST_CONTROLS ?= 0
+M24_NATIVE ?= 0
+M24_NODE_ID ?= 22
 
 ifeq ($(M8_EVIDENCE),1)
 CFLAGS += -DM8_EVIDENCE=1
@@ -37,6 +58,10 @@ endif
 
 ifeq ($(M23_TEST_CONTROLS),1)
 CFLAGS += -DM23_TEST_CONTROLS=1
+endif
+
+ifeq ($(M24_NATIVE),1)
+CFLAGS += -DM24_NATIVE=1 -DM24_NODE_ID=$(M24_NODE_ID)
 endif
 
 ifeq ($(COLD_MEDIA),ram)
@@ -71,8 +96,12 @@ else
 $(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake))
 endif
 
-OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o m21_sink_embed.o main.o
-CONFIG_KEY = $(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)
+NATIVE_OBJS =
+ifeq ($(M24_NATIVE),1)
+NATIVE_OBJS = sha256.o virtio_net.o aethernet_native.o
+endif
+OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M24_NODE_ID)
 BUILD_DIR = .build/$(CONFIG_KEY)
 OBJDIR = $(BUILD_DIR)/obj
 OBJS = $(addprefix $(OBJDIR)/,$(OBJ_NAMES))
@@ -99,7 +128,7 @@ $(BUILD_DIR):
 	mkdir -p $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.s | $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -x assembler-with-cpp -c $< -o $@
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.S | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -153,7 +182,7 @@ publish-img: $(CONFIG_IMG) publish-elf FORCE
 
 run: all
 	qemu-system-aarch64 \
-	  -machine raspi4b \
+	  -machine $(if $(filter qemu-virt,$(PLATFORM)),virt,raspi4b) \
 	  -m 2G \
 	  -kernel $(TARGET).img \
 	  -display none \
@@ -166,10 +195,10 @@ run: all
 PILL ?= pill.bin
 run-pill: all
 	qemu-system-aarch64 \
-	  -machine raspi4b \
+	  -machine $(if $(filter qemu-virt,$(PLATFORM)),virt,raspi4b) \
 	  -m 2G \
 	  -kernel $(TARGET).img \
-	  -device loader,file=$(PILL),addr=0x10000000,force-raw=on \
+	  -device loader,file=$(PILL),addr=$(if $(filter qemu-virt,$(PLATFORM)),0x50000000,0x10000000),force-raw=on \
 	  -display none \
 	  -nographic
 
@@ -177,7 +206,7 @@ run-kernel: run-pill
 
 debug: all
 	qemu-system-aarch64 \
-	  -machine raspi4b \
+	  -machine $(if $(filter qemu-virt,$(PLATFORM)),virt,raspi4b) \
 	  -m 2G \
 	  -kernel $(TARGET).img \
 	  -display none \
@@ -208,9 +237,9 @@ test-build-config:
 		DIGITAL_OUT_BACKEND=bcm2838 M8_EVIDENCE=1 all
 	$(MAKE) -j8 COLD_MEDIA=rpi4-sd DIGITAL_IN_BACKEND=bcm2838 \
 		DIGITAL_OUT_BACKEND=bcm2838 M8_EVIDENCE=0 all
-	test -s .build/ram-bcm2838-bcm2838-0-0/kernel8.img
-	test -s .build/fake-fake-bcm2838-1-0/kernel8.img
-	test -s .build/rpi4-sd-bcm2838-bcm2838-0-0/kernel8.img
+	test -s .build/rpi4b-ram-bcm2838-bcm2838-0-0-0-0-0-22/kernel8.img
+	test -s .build/rpi4b-fake-fake-bcm2838-1-0-0-0-0-22/kernel8.img
+	test -s .build/rpi4b-rpi4-sd-bcm2838-bcm2838-0-0-0-0-0-22/kernel8.img
 	test -s kernel8.elf
 	test -s kernel8.img
 

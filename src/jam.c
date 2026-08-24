@@ -4,6 +4,7 @@
 #include "nock.h"    /* nock_crash */
 #include "i2_admission_envelope.h"
 #include "i2_admission_metrics.h"
+#include "platform.h"
 
 /* ── Bitstream writer ─────────────────────────────────────────────────────── */
 
@@ -417,7 +418,7 @@ static noun do_rub(noun a, uint64_t *cur) {
      * bignum limit).  Use high-RAM scratch for cue only (not .bss).
      */
 #define CUE_RUB_MAX_LIMBS  16384u   /* 128 KiB limbs */
-#define CUE_RUB_SCRATCH    0x0C000000u
+#define CUE_RUB_SCRATCH    PLATFORM_CUE_RUB_SCRATCH
     if (limb_count == 0) return NOUN_ZERO;
     if (limb_count > CUE_RUB_MAX_LIMBS) nock_crash("cue: atom too large");
     uint64_t *scratch;
@@ -439,7 +440,7 @@ static noun do_rub(noun a, uint64_t *cur) {
  * .bss array would overlay FORTH_BASE (~0x90000); keep the table in high RAM.
  */
 #define CUE_CACHE_SZ   1048576u      /* 1M slots — hoonc jams are dense */
-#define CUE_CACHE_BASE 0x0A000000u   /* high RAM; not .bss (Forth overlap) */
+#define CUE_CACHE_BASE PLATFORM_CUE_CACHE_BASE
 
 typedef struct { uint64_t pos; noun val; int used; } ccent_t;
 

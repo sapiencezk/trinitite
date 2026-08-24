@@ -27,16 +27,28 @@
 //
 // ── Memory map (must match memory.h) ─────────────────────────────────────────
 
+#if defined(TRINITITE_PLATFORM_QEMU_VIRT)
+.set DICT_BASE,    0x40100000          /* must match FORTH_BASE in memory.h */
+.set DSTACK_TOP,   0x40480000
+.set RSTACK_TOP,   0x40490000
+.set TIB_BASE,     0x400FF000          /* just below FORTH_BASE */
+#else
 .set DICT_BASE,    0x00100000          /* must match FORTH_BASE in memory.h */
 .set DSTACK_TOP,   0x00480000
 .set RSTACK_TOP,   0x00490000
 .set TIB_BASE,     0x000FF000          /* just below FORTH_BASE */
+#endif
 .set TIB_SIZE,     256
 
 // ── UART (PL011) ─────────────────────────────────────────────────────────────
-// RPi 4 / QEMU raspi4b: PL011 at 0xFE201000
+// The named build-time platform selects the concrete PL011 console.
+#if defined(TRINITITE_PLATFORM_QEMU_VIRT)
+.set UART_DR,   0x09000000
+.set UART_FR,   0x09000018
+#else
 .set UART_DR,   0xFE201000
 .set UART_FR,   0xFE201018
+#endif
 
 // ── Register aliases ─────────────────────────────────────────────────────────
 
@@ -3111,6 +3123,93 @@ defcode "M23SEQ@", 7, m23_indication_sequence_word, 0
     bl      m23_provider_core_indication_sequence
     str     x0, [DSP, #-8]!
     NEXT
+
+#ifdef M24_NATIVE
+// M24 native target controls are image-owned test operations.  M23PUB? is
+// deliberately retained as the historical synthetic egress witness;
+// M24PUB? commits only after virtio-net reports a used-ring completion.
+defcode "M24INIT", 7, m24_init_word, 0
+    bl      m23_provider_core_native_init
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24RX?", 6, m24_receive_word, 0
+    bl      m23_provider_core_receive_native
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24PUB?", 7, m24_publish_word, 0
+    bl      m23_provider_core_publish_native
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24ERR@", 7, m24_error_word, 0
+    bl      m24_native_last_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24VERR@", 8, m24_virtio_error_word, 0
+    bl      virtio_net_last_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24MAG@", 7, m24_virtio_magic_word, 0
+    mov     x0, #0
+    bl      virtio_net_debug_reg
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24VER@", 7, m24_virtio_version_word, 0
+    mov     x0, #4
+    bl      virtio_net_debug_reg
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24DID@", 7, m24_virtio_device_word, 0
+    mov     x0, #8
+    bl      virtio_net_debug_reg
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24STA@", 7, m24_virtio_status_word, 0
+    bl      virtio_net_debug_status
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24Q0R@", 7, m24_virtio_rx_ready_word, 0
+    mov     x0, #0
+    bl      virtio_net_debug_queue_ready
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24Q1R@", 7, m24_virtio_tx_ready_word, 0
+    mov     x0, #1
+    bl      virtio_net_debug_queue_ready
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24TUA@", 7, m24_virtio_tx_avail_word, 0
+    bl      virtio_net_debug_tx_avail
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24TUU@", 7, m24_virtio_tx_used_word, 0
+    bl      virtio_net_debug_tx_used
+    str     x0, [DSP, #-8]!
+    NEXT
+
+#ifdef M23_TEST_CONTROLS
+defcode "M24HOLD", 7, m24_virtio_test_hold_tx_plain_word, 0
+    bl      virtio_net_test_hold_tx
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
+#endif
 
 #endif
 

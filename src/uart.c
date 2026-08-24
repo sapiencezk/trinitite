@@ -1,6 +1,7 @@
 #include <stdint.h>
+#include "platform.h"
 
-#define PL011_BASE  0xFE201000   /* RPi 4 */
+#define PL011_BASE  PLATFORM_UART_BASE
 #define UART_DR     (*(volatile uint32_t*)(PL011_BASE + 0x00))
 #define UART_FR     (*(volatile uint32_t*)(PL011_BASE + 0x18))
 #define UART_IBRD   (*(volatile uint32_t*)(PL011_BASE + 0x24))

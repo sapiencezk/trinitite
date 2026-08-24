@@ -3,9 +3,14 @@
 
 #include "bounded_cue.h"
 #include "i2_ingress.h"
+#include "jam.h"
 #include "m23_session_core.h"
 #include "memory.h"
 #include "uart.h"
+#ifdef M24_NATIVE
+#include "aethernet_native.h"
+#include "sha256.h"
+#endif
 
 #define M23_FIFO_CAP 16u
 #define M23_RATE_CAP 64u
@@ -23,6 +28,24 @@
 #define M23_INITIAL_EPOCH 3u
 #define M23_U64_MAX UINT64_MAX
 #define M23_CHECKPOINT_MAGIC 0x4d323353ULL
+
+#ifdef M24_NATIVE
+#define M24_WIRE_HEADER_LEN 128u
+#define M24_WIRE_MAX_DATAGRAM 1200u
+#define M24_WIRE_MAX_PAYLOAD 512u
+#define M24_AUTH_TAG_LEN 32u
+static const uint8_t M24_PSK[] = "m22-test-psk-0123456789abcdef";
+static const uint8_t M24_TRUE_PAYLOAD[39] = {
+    0x01,0x68,0x83,0xab,0x13,0x63,0x4b,0x1b,0x0b,0xa3,0x4b,0x7b,0x73,
+    0x6b,0x29,0x73,0xb3,0x2b,0x63,0x7b,0x83,0x2b,0x6b,0xb1,0x8b,0xe3,
+    0x00,0x1a,0x50,0x55,0x42,0x4c,0x49,0x53,0x48,0x5f,0x71,0x1c,0x0b
+};
+static const uint8_t M24_FALSE_PAYLOAD[39] = {
+    0x01,0x68,0x83,0xab,0x13,0x63,0x4b,0x1b,0x0b,0xa3,0x4b,0x7b,0x73,
+    0x6b,0x29,0x73,0xb3,0x2b,0x63,0x7b,0x83,0x2b,0x6b,0xb1,0x8b,0xe3,
+    0x00,0x1a,0x50,0x55,0x42,0x4c,0x49,0x53,0x48,0x5f,0x71,0x9c,0x02
+};
+#endif
 
 static const uint8_t M23_BINDING[16] = {
     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
@@ -118,6 +141,8 @@ static const cue_bounded_limits_t M23_CUE_LIMITS = {
     .max_work = 4096
 };
 
+static void reject(uint64_t error);
+
 static int take(noun n, noun *head, noun *tail)
 {
     if (!noun_is_cell(n) || !head || !tail)
@@ -142,6 +167,29 @@ static int atom_is_bytes(noun n, const uint8_t *expected, size_t len)
         if (actual[i] != expected[i])
             return 0;
     return 1;
+}
+
+static int admit_sequence_value(uint64_t sequence, uint64_t epoch, uint64_t value)
+{
+    if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+    if (g_state == M23_STATE_UNARMED) { reject(M23_ERR_SESSION_UNARMED); return -1; }
+    if (g_state == M23_STATE_EXHAUSTED || g_state == M23_STATE_CLOSED) {
+        reject(g_state == M23_STATE_EXHAUSTED ? M23_ERR_SEQUENCE_EXHAUSTED : M23_ERR_CLOSED);
+        return -1;
+    }
+    if (epoch != g_epoch) { reject(M23_ERR_STALE_EPOCH); return -1; }
+    if (g_high_water_valid && sequence <= g_high_water) { reject(M23_ERR_REPLAY); return -1; }
+    if (g_queue_count >= M23_FIFO_CAP) { reject(M23_ERR_FIFO_FULL); return -1; }
+    m23_session_root_t candidate = g_root;
+    uint32_t slot = (candidate.queue_head + candidate.queue_count) % M23_FIFO_CAP;
+    candidate.queue_value[slot] = value;
+    candidate.queue_sequence[slot] = sequence;
+    candidate.queue_count++;
+    candidate.high_water = sequence;
+    candidate.high_water_valid = 1;
+    g_root = candidate;
+    g_last_error = M23_ERR_NONE;
+    return 0;
 }
 
 static int noun_u64(noun n, uint64_t *out)
@@ -309,6 +357,9 @@ int m23_provider_core_arm(void)
 int m23_provider_core_cold(void)
 {
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+#ifdef M24_NATIVE
+    if (m24_native_tx_pending()) { reject(M23_ERR_NATIVE_RING_FULL); return -1; }
+#endif
     m23_session_root_t candidate = g_root;
     candidate.authority_floor = g_epoch;
     candidate.state = M23_STATE_UNARMED;
@@ -332,6 +383,9 @@ int m23_provider_core_cold(void)
 int m23_provider_core_restart_clean(void)
 {
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+#ifdef M24_NATIVE
+    if (m24_native_tx_pending()) { reject(M23_ERR_NATIVE_RING_FULL); return -1; }
+#endif
     if (g_state != M23_STATE_ARMED || g_queue_count != 0 || !g_checkpoint_valid) {
         reject(M23_ERR_CHECKPOINT_BUSY); return -1;
     }
@@ -364,21 +418,8 @@ static int admit_attested_framed_product(noun product,
     }
     if (!attestation_valid(attestation)) { reject(M23_ERR_ADAPTER_ATTESTATION); return -1; }
     if (!parse_product(product, &sequence, &epoch, &value)) return -1;
-    if (epoch != g_epoch) { reject(M23_ERR_STALE_EPOCH); return -1; }
-    if (g_high_water_valid && sequence <= g_high_water) { reject(M23_ERR_REPLAY); return -1; }
-    if (g_queue_count >= M23_FIFO_CAP) { reject(M23_ERR_FIFO_FULL); return -1; }
-    /* The reservation boundary is intentionally absent in M23's target
-     * positive path; all checks still precede this single root publication. */
-    m23_session_root_t candidate = g_root;
-    uint32_t slot = (candidate.queue_head + candidate.queue_count) % M23_FIFO_CAP;
-    candidate.queue_value[slot] = value;
-    candidate.queue_sequence[slot] = sequence;
-    candidate.queue_count++;
-    candidate.high_water = sequence;
-    candidate.high_water_valid = 1;
-    g_root = candidate;
-    g_last_error = M23_ERR_NONE;
-    return 0;
+    /* The admission helper is the one M23 root linearization point. */
+    return admit_sequence_value(sequence, epoch, value);
 }
 
 static uint64_t target_counter_deadline(void)
@@ -467,6 +508,9 @@ int m23_provider_core_step(void)
 int m23_provider_core_rotate(void)
 {
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+#ifdef M24_NATIVE
+    if (m24_native_tx_pending()) { reject(M23_ERR_NATIVE_RING_FULL); return -1; }
+#endif
     if (g_state != M23_STATE_ARMED || g_queue_count != 0) {
         reject(g_queue_count ? M23_ERR_CHECKPOINT_BUSY : M23_ERR_EPOCH_NOT_NEWER);
         return -1;
@@ -579,6 +623,207 @@ int m23_provider_core_checkpoint_tamper(void)
 }
 #endif
 
+#ifdef M24_NATIVE
+static uint16_t native_be16(const uint8_t *p)
+{
+    volatile const uint8_t *q = (volatile const uint8_t *)p;
+    return ((uint16_t)q[0] << 8) | q[1];
+}
+
+static uint32_t native_be32(const uint8_t *p)
+{
+    volatile const uint8_t *q = (volatile const uint8_t *)p;
+    return ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16)
+        | ((uint32_t)q[2] << 8) | q[3];
+}
+
+static uint64_t native_be64(const uint8_t *p)
+{
+    volatile const uint8_t *q = (volatile const uint8_t *)p;
+    uint64_t value = 0;
+    for (uint32_t i = 0; i < 8; i++) value = (value << 8) | q[i];
+    return value;
+}
+
+static void native_put16(uint8_t *p, uint16_t value)
+{
+    p[0] = (uint8_t)(value >> 8); p[1] = (uint8_t)value;
+}
+
+static void native_put32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value >> 24); p[1] = (uint8_t)(value >> 16);
+    p[2] = (uint8_t)(value >> 8); p[3] = (uint8_t)value;
+}
+
+static void native_put64(uint8_t *p, uint64_t value)
+{
+    for (uint32_t i = 0; i < 8; i++) p[7u - i] = (uint8_t)(value >> (8u * i));
+}
+
+static int native_bytes_equal(const uint8_t *left, const uint8_t *right, uint32_t len)
+{
+    volatile const uint8_t *q = (volatile const uint8_t *)left;
+    uint8_t different = 0;
+    for (uint32_t i = 0; i < len; i++) different |= q[i] ^ right[i];
+    return different == 0;
+}
+
+static int native_make_wire(uint8_t *wire, uint32_t *wire_len,
+                            uint64_t epoch, uint64_t sequence, uint64_t value)
+{
+    const uint8_t *payload = value ? M24_TRUE_PAYLOAD : M24_FALSE_PAYLOAD;
+    if (!wire || !wire_len || value > 1 || M24_WIRE_HEADER_LEN + sizeof M24_TRUE_PAYLOAD > M24_WIRE_MAX_DATAGRAM)
+        return 0;
+    for (uint32_t i = 0; i < M24_WIRE_HEADER_LEN + sizeof M24_TRUE_PAYLOAD; i++) wire[i] = 0;
+    wire[0] = 'A'; wire[1] = 'E'; wire[2] = 'T'; wire[3] = '0';
+    wire[4] = M23_WIRE_MAJOR; wire[5] = M23_WIRE_MINOR;
+    wire[6] = M23_PROFILE; wire[7] = M23_MESSAGE_KIND;
+    native_put16(wire + 8, M24_WIRE_HEADER_LEN);
+    native_put16(wire + 10, sizeof M24_TRUE_PAYLOAD);
+    native_put64(wire + 12, M23_SENDER_DEVICE);
+    native_put64(wire + 20, M23_RECEIVER_DEVICE);
+    for (uint32_t i = 0; i < sizeof M23_BINDING; i++) wire[28 + i] = M23_BINDING[i];
+    for (uint32_t i = 0; i < sizeof M23_SCHEMA; i++) wire[44 + i] = M23_SCHEMA[i];
+    native_put32(wire + 76, M23_KEY_ID);
+    native_put64(wire + 80, epoch); native_put64(wire + 88, sequence);
+    for (uint32_t i = 0; i < sizeof M24_TRUE_PAYLOAD; i++) wire[M24_WIRE_HEADER_LEN + i] = payload[i];
+    uint8_t auth_input[M24_WIRE_HEADER_LEN + sizeof M24_TRUE_PAYLOAD];
+    uint8_t digest[M24_AUTH_TAG_LEN];
+    for (uint32_t i = 0; i < sizeof auth_input; i++) auth_input[i] = wire[i];
+    for (uint32_t i = 96; i < 128; i++) auth_input[i] = 0;
+    hmac_sha256(M24_PSK, sizeof M24_PSK - 1u, auth_input, sizeof auth_input, digest);
+    for (uint32_t i = 0; i < M24_AUTH_TAG_LEN; i++) wire[96 + i] = digest[i];
+    *wire_len = M24_WIRE_HEADER_LEN + sizeof M24_TRUE_PAYLOAD;
+    return 1;
+}
+
+static uint64_t native_transport_error(m24_native_status_t status)
+{
+    switch (status) {
+    case M24_NATIVE_NO_PACKET: return M23_ERR_NATIVE_NO_PACKET;
+    case M24_NATIVE_MALFORMED_ETHERNET: return M23_ERR_NATIVE_ETHERNET;
+    case M24_NATIVE_MALFORMED_IPV6: return M23_ERR_NATIVE_IPV6;
+    case M24_NATIVE_ENDPOINT: return M23_ERR_NATIVE_ENDPOINT;
+    case M24_NATIVE_CHECKSUM: return M23_ERR_NATIVE_CHECKSUM;
+    case M24_NATIVE_RING_FULL: return M23_ERR_NATIVE_RING_FULL;
+    default: return M23_ERR_NATIVE_DEVICE;
+    }
+}
+
+int m23_provider_core_native_init(void)
+{
+    int result = m23_provider_core_init();
+    if (result != 0) return result;
+    if (m24_native_init() != 0) { reject(M23_ERR_NATIVE_DEVICE); return -1; }
+    return 0;
+}
+
+int m23_provider_core_receive_native(void)
+{
+    m24_native_datagram_t datagram;
+    m24_native_status_t transport = M24_NATIVE_NO_PACKET;
+    if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+    if (g_state != M23_STATE_ARMED) {
+        reject(g_state == M23_STATE_UNARMED ? M23_ERR_SESSION_UNARMED
+            : g_state == M23_STATE_EXHAUSTED ? M23_ERR_SEQUENCE_EXHAUSTED : M23_ERR_CLOSED);
+        return -1;
+    }
+    if (g_ingress_work_count >= M23_RATE_CAP) {
+        reject(M23_ERR_INGRESS_WORK_LIMIT); return -1;
+    }
+    for (uint32_t i = 0; i < 64u; i++) {
+        transport = m24_native_receive(&datagram);
+        if (transport != M24_NATIVE_NO_PACKET) break;
+    }
+    if (transport != M24_NATIVE_OK) { reject(native_transport_error(transport)); return -1; }
+    const uint8_t *wire = datagram.payload;
+    uint32_t wire_len = datagram.payload_len;
+    if (!wire || wire_len < M24_WIRE_HEADER_LEN || wire_len > M24_WIRE_MAX_DATAGRAM) {
+        reject(M23_ERR_NATIVE_ETHERNET); return -1;
+    }
+    uint16_t header_len = native_be16(wire + 8), payload_len = native_be16(wire + 10);
+    if (wire[0] != 'A' || wire[1] != 'E' || wire[2] != 'T' || wire[3] != '0'
+        || wire[4] != M23_WIRE_MAJOR || wire[5] != M23_WIRE_MINOR
+        || wire[6] != M23_PROFILE || wire[7] != M23_MESSAGE_KIND
+        || header_len != M24_WIRE_HEADER_LEN || payload_len == 0
+        || payload_len > M24_WIRE_MAX_PAYLOAD || wire_len != header_len + payload_len) {
+        reject(M23_ERR_NATIVE_ETHERNET); return -1;
+    }
+    if (native_be64(wire + 12) != M23_SENDER_DEVICE
+        || native_be64(wire + 20) != M23_RECEIVER_DEVICE
+        || !native_bytes_equal(wire + 28, M23_BINDING, sizeof M23_BINDING)
+        || !native_bytes_equal(wire + 44, M23_SCHEMA, sizeof M23_SCHEMA)
+        || native_be32(wire + 76) != M23_KEY_ID
+        || native_be64(wire + 80) == 0 || native_be64(wire + 88) == 0) {
+        reject(M23_ERR_NATIVE_ENDPOINT); return -1;
+    }
+    uint8_t auth_input[M24_WIRE_HEADER_LEN + M24_WIRE_MAX_PAYLOAD];
+    uint8_t expected[M24_AUTH_TAG_LEN];
+    for (uint32_t i = 0; i < wire_len; i++) auth_input[i] = wire[i];
+    for (uint32_t i = 96; i < 128; i++) auth_input[i] = 0;
+    hmac_sha256(M24_PSK, sizeof M24_PSK - 1u, auth_input, wire_len, expected);
+    if (!native_bytes_equal(wire + 96, expected, M24_AUTH_TAG_LEN)) {
+        reject(M23_ERR_NATIVE_AUTHENTICATION); return -1;
+    }
+    noun publication;
+    cue_bounded_status_t cue_status = cue_bounded_bytes(
+        wire + M24_WIRE_HEADER_LEN, payload_len, &M23_CUE_LIMITS,
+        HEAP_MODE_SCRATCH, &publication);
+    if (cue_status != CUE_BOUNDED_OK) {
+        reject(M23_ERR_NATIVE_CANONICAL); return -1;
+    }
+    const uint8_t *canonical; uint64_t canonical_len;
+    if (jam_encode_bytes_checked(publication, &canonical, &canonical_len) != 0
+        || canonical_len != payload_len
+        || !native_bytes_equal(canonical, wire + M24_WIRE_HEADER_LEN, payload_len)) {
+        if (noun_tx_active()) noun_tx_abort();
+        reject(M23_ERR_NATIVE_CANONICAL); return -1;
+    }
+    uint64_t value, sequence = native_be64(wire + 88), epoch = native_be64(wire + 80);
+    if (!parse_publication(publication, &value)) {
+        if (noun_tx_active()) noun_tx_abort();
+        return -1;
+    }
+    int result = admit_sequence_value(sequence, epoch, value);
+    if (result == 0) g_ingress_work_count++;
+    if (noun_tx_active()) noun_tx_abort();
+    return result;
+}
+
+int m23_provider_core_publish_native(void)
+{
+    if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+    if (g_state == M23_STATE_UNARMED) { reject(M23_ERR_SESSION_UNARMED); return -1; }
+    if (g_state == M23_STATE_EXHAUSTED) { reject(M23_ERR_SEQUENCE_EXHAUSTED); return -1; }
+    if (g_state == M23_STATE_CLOSED) { reject(M23_ERR_CLOSED); return -1; }
+    uint64_t now = target_counter_now();
+    m23_session_root_t candidate = g_root;
+    if (candidate.outbound_rate_deadline == 0 || now >= candidate.outbound_rate_deadline) {
+        candidate.outbound_rate_count = 0;
+        candidate.outbound_rate_deadline = target_counter_deadline();
+    }
+    if (candidate.outbound_rate_count >= M23_RATE_CAP) {
+        reject(M23_ERR_OUTBOUND_RATE_LIMIT); return -1;
+    }
+    if (candidate.next_sequence == 0) { reject(M23_ERR_SEQUENCE_EXHAUSTED); return -1; }
+    uint8_t wire[M24_WIRE_MAX_DATAGRAM]; uint32_t wire_len;
+    if (!native_make_wire(wire, &wire_len, candidate.epoch, candidate.next_sequence, 1)) {
+        reject(M23_ERR_NATIVE_ETHERNET); return -1;
+    }
+    m24_native_status_t status = m24_native_send(wire, wire_len);
+    if (status != M24_NATIVE_OK) {
+        reject(native_transport_error(status)); return -1;
+    }
+    if (candidate.next_sequence == UINT64_MAX) candidate.state = M23_STATE_EXHAUSTED;
+    else candidate.next_sequence++;
+    candidate.outbound_rate_count++;
+    g_root = candidate;
+    g_last_error = M23_ERR_NONE;
+    return 0;
+}
+#endif
+
 int m23_provider_core_complete_egress(void)
 {
     /* This is a synthetic post-transport egress-completion operation for the
@@ -659,6 +904,9 @@ int m23_provider_core_set_next_max_minus_one(void)
 int m23_provider_core_close(void)
 {
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+#ifdef M24_NATIVE
+    if (m24_native_tx_pending()) { reject(M23_ERR_NATIVE_RING_FULL); return -1; }
+#endif
     if (g_state == M23_STATE_CLOSED) return 0;
     m23_session_root_t candidate = g_root;
     candidate.state = M23_STATE_CLOSED;

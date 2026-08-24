@@ -1,5 +1,7 @@
 #pragma once
 
+#include "platform.h"
+
 /*
  * Trinitite physical memory map
  * RPi 3: 1GB RAM (0x00000000 - 0x3FFFFFFF)
@@ -14,14 +16,14 @@
  * Must not overlap Forth or the legacy cue high-RAM table. 32 MB is
  * reserved; linker.ld rejects every build whose .bss crosses BSS_TOP.
  */
-#define BSS_BASE            0x08000000
+#define BSS_BASE            PLATFORM_BSS_BASE
 #define BSS_SIZE            0x02000000  /* 32 MB reserve */
 #define BSS_TOP             (BSS_BASE + BSS_SIZE)
 
 /* Core 0 C stack. The boot path fills this fixed region before entering C;
  * QEMU evidence scans it and the scheduler checks the base guard. */
-#define CORE0_STACK_BASE    0x00040000
-#define CORE0_STACK_TOP     0x00080000
+#define CORE0_STACK_BASE    PLATFORM_CORE0_STACK_BASE
+#define CORE0_STACK_TOP     PLATFORM_CORE0_STACK_TOP
 #define CORE0_STACK_SIZE    (CORE0_STACK_TOP - CORE0_STACK_BASE)
 #define CORE0_STACK_PATTERN 0xA55AC33CA55AC33CULL
 
@@ -31,17 +33,17 @@
  * the old 0x90000 boundary without stomping the dictionary / TIB.
  * Ends at ARENA_BASE (0x490000).
  */
-#define FORTH_BASE          0x00100000
+#define FORTH_BASE          PLATFORM_FORTH_BASE
 #define FORTH_SIZE          0x00390000  /* → 0x00490000 = ARENA_BASE */
 #define FORTH_TOP           (FORTH_BASE + FORTH_SIZE)
 
 #if BSS_BASE < FORTH_TOP
 #error "BSS_BASE overlaps Forth region"
 #endif
-#if CORE0_STACK_TOP > 0x00080000
+#if CORE0_STACK_TOP > FORTH_BASE
 #error "core 0 stack overlaps kernel image"
 #endif
-#if FORTH_TOP > 0x00490000
+#if FORTH_TOP > PLATFORM_ARENA_BASE
 #error "Forth region overlaps ARENA_BASE"
 #endif
 
@@ -57,7 +59,7 @@
 #define DICT_TOP            DSTACK_GUARD  /* must not cross this */
 
 /* Noun event arena: bump allocator, reset after each +poke */
-#define ARENA_BASE          0x00490000
+#define ARENA_BASE          PLATFORM_ARENA_BASE
 #define ARENA_SIZE          0x02000000  /* 32MB */
 #define ARENA_TOP           (ARENA_BASE + ARENA_SIZE)
 
@@ -68,7 +70,7 @@
  *                                            after each event (host ArenaHost)
  * HEAP_TOP ≤ ATOM_INDEX_BASE (hard ceiling; silent overrun stomped atom index).
  */
-#define HEAP_BASE           0x02490000
+#define HEAP_BASE           PLATFORM_HEAP_BASE
 #define HEAP_SIZE           0x04000000  /* 64MB total */
 #define HEAP_TOP            (HEAP_BASE + HEAP_SIZE)
 /*
@@ -87,9 +89,9 @@
  * Data:  atom structs for interned content atoms.
  * Phase 6 adds SD card cold store behind this hot cache.
  */
-#define ATOM_INDEX_BASE     0x06490000
+#define ATOM_INDEX_BASE     PLATFORM_ATOM_INDEX_BASE
 #define ATOM_INDEX_SIZE     0x00100000  /* 1MB — hash table */
-#define ATOM_DATA_BASE      0x06590000
+#define ATOM_DATA_BASE      PLATFORM_ATOM_DATA_BASE
 #define ATOM_DATA_SIZE      0x00400000  /* 4MB — atom struct storage */
 #define ATOM_DATA_TOP       (ATOM_DATA_BASE + ATOM_DATA_SIZE)
 
@@ -107,7 +109,7 @@
 #if (ATOM_INDEX_BASE + ATOM_INDEX_SIZE) > ATOM_DATA_BASE
 #error "atom index overlaps atom data"
 #endif
-#if ATOM_DATA_TOP > 0x3F000000
+#if ATOM_DATA_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
 #error "Atom store region overlaps MMIO"
 #endif
 
@@ -119,7 +121,7 @@
  *
  * 256 MB: safely above all allocators and below MMIO (0x3F000000).
  */
-#define PILL_BASE  0x10000000
+#define PILL_BASE  PLATFORM_PILL_BASE
 
 /*
  * Scratch for pill_load jam limbs. MUST NOT live in .bss under FORTH_BASE
@@ -127,7 +129,7 @@
  * if anything touches past the first few KB).  Place between cold store and
  * PILL_BASE.
  */
-#define PILL_SCRATCH_BASE  0x07900000
+#define PILL_SCRATCH_BASE  PLATFORM_PILL_SCRATCH_BASE
 #define PILL_SCRATCH_SIZE  0x00100000   /* 1 MB */
 #if (PILL_SCRATCH_BASE + PILL_SCRATCH_SIZE) > PILL_BASE
 #error "pill scratch overlaps PILL_BASE"
@@ -138,9 +140,9 @@
  * 56-byte incremental frame header admits an exact payload length. I1 keeps
  * the isolated legacy uart_recv_noun path.
  */
-#define UART_RXBUF_BASE  0x000F8000
+#define UART_RXBUF_BASE  PLATFORM_UART_RXBUF_BASE
 #define UART_RXBUF_SIZE  0x00007000
-#if (UART_RXBUF_BASE + UART_RXBUF_SIZE) > 0x000FF000
+#if (UART_RXBUF_BASE + UART_RXBUF_SIZE) > (PLATFORM_DRAM_BASE + 0x000FF000ULL)
 #error "UART_RXBUF overlaps TIB"
 #endif
 
@@ -148,11 +150,11 @@
  * Phase 4 — secondary core C stacks (between atom store and PILL).
  * Grow down from TOP. Core 0 keeps the boot stack below 0x80000.
  */
-#define NCORES              4
+#define NCORES              PLATFORM_NCORES
 #define CORE_STACK_SIZE     0x4000      /* 16 KB each */
-#define CORE1_STACK_TOP     0x07004000
-#define CORE2_STACK_TOP     0x07008000
-#define CORE3_STACK_TOP     0x0700C000
+#define CORE1_STACK_TOP     PLATFORM_CORE1_STACK_TOP
+#define CORE2_STACK_TOP     PLATFORM_CORE2_STACK_TOP
+#define CORE3_STACK_TOP     PLATFORM_CORE3_STACK_TOP
 
 /*
  * Phase 5 — cold store (content-addressed jam blobs) at fixed PA.
@@ -161,6 +163,6 @@
  *   -device loader,file=cold.img,addr=0x07100000,force-raw=on
  * SDHCI can replace flush later without moving the window.
  */
-#define COLD_BASE           0x07100000
+#define COLD_BASE           PLATFORM_COLD_BASE
 #define COLD_SIZE           0x00800000  /* 8 MB */
 #define COLD_TOP            (COLD_BASE + COLD_SIZE)

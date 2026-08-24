@@ -2,12 +2,22 @@
 .global _start
 .global secondary_entry
 
-// Stack tops for secondaries (must match memory.h)
+// Stack tops for secondaries (must match memory.h).  qemu-virt starts RAM at
+// 0x40000000 and deliberately boots one core; the RPi spin-table addresses
+// remain the default board-owned path.
+#if defined(TRINITITE_PLATFORM_QEMU_VIRT)
+.set CORE1_STACK_TOP, 0x47004000
+.set CORE2_STACK_TOP, 0x47008000
+.set CORE3_STACK_TOP, 0x4700C000
+.set CORE0_STACK_BASE, 0x40040000
+.set CORE0_STACK_TOP,  0x40080000
+#else
 .set CORE1_STACK_TOP, 0x07004000
 .set CORE2_STACK_TOP, 0x07008000
 .set CORE3_STACK_TOP, 0x0700C000
 .set CORE0_STACK_BASE, 0x00040000
 .set CORE0_STACK_TOP,  0x00080000
+#endif
 
 // cores_ready lives in .data so it is image-loaded as 0 (not wiped mid-race).
     .section .data

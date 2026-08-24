@@ -1,5 +1,5 @@
 /*
- * Image load: contiguous .text/.rodata/.data from 0x80000.
+ * Image load: contiguous .text/.rodata/.data from 0x80000 on rpi4b.
  * Must stay below UART_RXBUF (0xF8000) / TIB (0xFF000) / FORTH (0x100000).
  *
  * .bss lives at BSS_BASE (0x08000000) — not adjacent to the image — so
