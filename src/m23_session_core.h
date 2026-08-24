@@ -71,6 +71,7 @@ int m23_provider_core_checkpoint_tamper(void);
 int m23_provider_core_complete_egress(void);
 #ifdef M23_TEST_CONTROLS
 int m23_provider_core_set_next_max_minus_one(void);
+int m23_provider_core_test_outbound_burst(void);
 #endif
 uint64_t m23_provider_core_queue_len(void);
 uint64_t m23_provider_core_high_water(void);

@@ -608,6 +608,41 @@ int m23_provider_core_complete_egress(void)
 }
 
 #ifdef M23_TEST_CONTROLS
+static int m23_root_equal(const m23_session_root_t *left,
+                          const m23_session_root_t *right)
+{
+    if (left->queue_head != right->queue_head
+        || left->queue_count != right->queue_count
+        || left->high_water != right->high_water
+        || left->high_water_valid != right->high_water_valid
+        || left->epoch != right->epoch
+        || left->next_sequence != right->next_sequence
+        || left->authority_floor != right->authority_floor
+        || left->outbound_rate_count != right->outbound_rate_count
+        || left->outbound_rate_deadline != right->outbound_rate_deadline
+        || left->state != right->state) return 0;
+    for (size_t i = 0; i < M23_FIFO_CAP; i++) {
+        if (left->queue_value[i] != right->queue_value[i]
+            || left->queue_sequence[i] != right->queue_sequence[i]) return 0;
+    }
+    return 1;
+}
+
+int m23_provider_core_test_outbound_burst(void)
+{
+    if (!g_active || g_state != M23_STATE_ARMED) {
+        reject(M23_ERR_SESSION_UNARMED); return -1;
+    }
+    for (uint64_t i = 0; i < M23_RATE_CAP; i++) {
+        if (m23_provider_core_complete_egress() != 0) return -1;
+    }
+    m23_session_root_t before = g_root;
+    if (m23_provider_core_complete_egress() == 0
+        || g_last_error != M23_ERR_OUTBOUND_RATE_LIMIT
+        || !m23_root_equal(&before, &g_root)) return -1;
+    return 0;
+}
+
 int m23_provider_core_set_next_max_minus_one(void)
 {
     if (g_state != M23_STATE_ARMED) { reject(M23_ERR_SESSION_UNARMED); return -1; }

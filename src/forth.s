@@ -3056,6 +3056,12 @@ defcode "M23PUB?", 7, m23_publish_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "M23B64?", 7, m23_outbound_burst_word, 0
+    bl      m23_provider_core_test_outbound_burst
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "M23MAX?", 7, m23_max_word, 0
     bl      m23_provider_core_set_next_max_minus_one
     sxtw    x0, w0
