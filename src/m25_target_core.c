@@ -472,7 +472,7 @@ int m25_target_checkpoint_restore(void)
         || !take(checkpoint, &tag, &rest)
         || !noun_eq(tag, cord_from_bytes("m25-checkpoint-v2", 17))) goto reject;
     for (unsigned i = 0; i < 5; i++) if (!take(rest, &values[i], &rest)) goto reject;
-    if (!direct_is(rest) || !noun_is_direct(values[1]) || !noun_is_direct(values[2])
+    if (!direct_is(rest, 0) || !noun_is_direct(values[1]) || !noun_is_direct(values[2])
         || !noun_is_direct(values[3]) || !noun_is_direct(values[4])
         || direct_val(values[1]) == 0
         || direct_val(values[4]) > 1
