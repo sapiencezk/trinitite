@@ -19,6 +19,7 @@
 #define M23_INITIAL_EPOCH 3u
 #define M23_ROTATED_EPOCH 4u
 #define M23_U64_MAX UINT64_MAX
+#define M23_CHECKPOINT_MAGIC 0x4d323353ULL
 
 static const uint8_t M23_BINDING[16] = {
     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
@@ -61,6 +62,14 @@ static uint64_t g_state;
 static int g_indication_valid;
 static int g_active;
 static int g_checkpoint_valid;
+static uint64_t g_checkpoint_magic;
+static uint64_t g_checkpoint_version;
+static uint64_t g_checkpoint_profile;
+static uint64_t g_checkpoint_local_device;
+static uint64_t g_checkpoint_peer_device;
+static uint64_t g_checkpoint_key_id;
+static uint8_t g_checkpoint_binding[16];
+static uint8_t g_checkpoint_schema[32];
 static uint64_t g_checkpoint_epoch;
 static uint64_t g_checkpoint_high_water;
 static uint64_t g_checkpoint_next_sequence;
@@ -309,10 +318,6 @@ int m23_provider_core_receive_framed(void)
     uint64_t rejects_before;
     noun product;
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
-    if (g_state != M23_STATE_ARMED) {
-        reject(g_state == M23_STATE_UNARMED ? M23_ERR_SESSION_UNARMED : M23_ERR_CLOSED);
-        return -1;
-    }
     rejects_before = i2_rx_reject_total();
     uint64_t now = target_counter_now();
     uint64_t deadline = target_counter_deadline();
@@ -393,6 +398,16 @@ int m23_provider_core_checkpoint_save(void)
         reject(M23_ERR_CHECKPOINT_BUSY); return -1;
     }
     g_checkpoint_epoch = g_epoch;
+    g_checkpoint_magic = M23_CHECKPOINT_MAGIC;
+    g_checkpoint_version = M23_VERSION;
+    g_checkpoint_profile = M23_PROFILE;
+    g_checkpoint_local_device = M23_RECEIVER_DEVICE;
+    g_checkpoint_peer_device = M23_SENDER_DEVICE;
+    g_checkpoint_key_id = M23_KEY_ID;
+    for (size_t i = 0; i < sizeof M23_BINDING; i++)
+        g_checkpoint_binding[i] = M23_BINDING[i];
+    for (size_t i = 0; i < sizeof M23_SCHEMA; i++)
+        g_checkpoint_schema[i] = M23_SCHEMA[i];
     g_checkpoint_high_water = g_high_water;
     g_checkpoint_next_sequence = g_next_sequence;
     g_checkpoint_rate_count = g_rate_count;
@@ -405,10 +420,24 @@ int m23_provider_core_checkpoint_restore(void)
 {
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
     if (g_state != M23_STATE_UNARMED || !g_checkpoint_valid
+        || g_checkpoint_magic != M23_CHECKPOINT_MAGIC
+        || g_checkpoint_version != M23_VERSION
+        || g_checkpoint_profile != M23_PROFILE
+        || g_checkpoint_local_device != M23_RECEIVER_DEVICE
+        || g_checkpoint_peer_device != M23_SENDER_DEVICE
+        || g_checkpoint_key_id != M23_KEY_ID
         || g_checkpoint_epoch == 0 || g_checkpoint_next_sequence == 0
         || g_checkpoint_rate_count > M23_RATE_CAP) {
         reject(M23_ERR_CHECKPOINT_INVALID); return -1;
     }
+    for (size_t i = 0; i < sizeof M23_BINDING; i++)
+        if (g_checkpoint_binding[i] != M23_BINDING[i]) {
+            reject(M23_ERR_CHECKPOINT_INVALID); return -1;
+        }
+    for (size_t i = 0; i < sizeof M23_SCHEMA; i++)
+        if (g_checkpoint_schema[i] != M23_SCHEMA[i]) {
+            reject(M23_ERR_CHECKPOINT_INVALID); return -1;
+        }
     g_epoch = g_checkpoint_epoch;
     g_high_water = g_checkpoint_high_water;
     g_high_water_valid = g_checkpoint_high_water != 0;
@@ -422,7 +451,7 @@ int m23_provider_core_checkpoint_restore(void)
 int m23_provider_core_checkpoint_tamper(void)
 {
     if (!g_checkpoint_valid) { reject(M23_ERR_CHECKPOINT_INVALID); return -1; }
-    g_checkpoint_epoch = 0;
+    g_checkpoint_version = M23_VERSION + 1u;
     return 0;
 }
 
@@ -467,4 +496,3 @@ uint64_t m23_provider_core_indication_sequence(void)
 }
 uint64_t m23_provider_core_last_error(void) { return g_last_error; }
 uint64_t m23_provider_core_cue_calls(void) { return i2_rx_cue_calls(); }
-
