@@ -399,6 +399,9 @@ int m25_target_step(void)
     if (!g_active) return -1;
     if (g_is_source) {
         if (g_pending_event == NOUN_ZERO) return 0;
+        /* UINT64_MAX is a terminal fence: never serialize a sequence that
+         * would wrap to zero after the coherent send commit. */
+        if (g_next_sequence == UINT64_MAX) { g_last_error = 8; return -1; }
         heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
         noun candidate, causes; uint64_t value;
         uint8_t frame[M25_HEADER_BYTES + M25_MAX_PAYLOAD]; uint32_t frame_len;
@@ -448,7 +451,7 @@ static int checkpoint_noun(noun *out)
 int m25_target_checkpoint_capture(void)
 {
     if (!g_active || g_pending_event != NOUN_ZERO || g_fifo_count != 0
-        || m25_native_tx_pending()) return -1;
+        || g_next_sequence == UINT64_MAX || m25_native_tx_pending()) return -1;
     noun checkpoint; const uint8_t *bytes; uint64_t length;
     heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
     if (!checkpoint_noun(&checkpoint)
@@ -469,8 +472,9 @@ int m25_target_checkpoint_restore(void)
         || !take(checkpoint, &tag, &rest)
         || !noun_eq(tag, cord_from_bytes("m25-checkpoint-v2", 17))) goto reject;
     for (unsigned i = 0; i < 5; i++) if (!take(rest, &values[i], &rest)) goto reject;
-    if (!direct_is(rest, 0) || !noun_is_direct(values[1]) || !noun_is_direct(values[2])
+    if (!direct_is(rest) || !noun_is_direct(values[1]) || !noun_is_direct(values[2])
         || !noun_is_direct(values[3]) || !noun_is_direct(values[4])
+        || direct_val(values[1]) == 0
         || direct_val(values[4]) > 1
         || !runtime_identity_validate_gate(values[0], &g_identity, 0)
         || !noun_copy_checked(values[0], &staged)) goto reject;
