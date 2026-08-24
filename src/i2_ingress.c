@@ -35,6 +35,7 @@ static struct {
     uint64_t frame_deadline;
     uint64_t byte_deadline;
     uint64_t rejects[I2_RX_REASON_COUNT];
+    uint64_t cue_calls;
     i2_rx_reason_t last_reason;
 } g_rx;
 
@@ -144,6 +145,7 @@ void i2_rx_init(void)
 {
     for (int i = 0; i < I2_RX_REASON_COUNT; i++)
         g_rx.rejects[i] = 0;
+    g_rx.cue_calls = 0;
     g_rx.last_reason = I2_RX_REASON_NONE;
     reset_scan();
 }
@@ -253,15 +255,16 @@ int i2_rx_poll(uint32_t byte_budget)
     return 0;
 }
 
-int i2_rx_take(noun *out)
+int i2_rx_take_limited(noun *out, const cue_bounded_limits_t *limits)
 {
-    if (!out || g_rx.state != RX_READY)
+    if (!out || !limits || g_rx.state != RX_READY
+        || limits->max_input_bytes == 0
+        || g_rx.payload_len > limits->max_input_bytes)
         return 0;
-    cue_bounded_limits_t limits = cue_i2_limits;
-    limits.max_input_bytes = I2_FRAME_MAX_PAYLOAD;
+    g_rx.cue_calls++;
     cue_bounded_status_t status = cue_bounded_bytes(
         (const uint8_t *)(uintptr_t)UART_RXBUF_BASE, g_rx.payload_len,
-        &limits, HEAP_MODE_SCRATCH, out);
+        limits, HEAP_MODE_SCRATCH, out);
     if (status != CUE_BOUNDED_OK) {
         reject(I2_RX_REASON_CUE);
         return 0;
@@ -275,6 +278,40 @@ int i2_rx_take(noun *out)
     }
     reset_scan();
     return 1;
+}
+
+int i2_rx_take(noun *out)
+{
+    cue_bounded_limits_t limits = cue_i2_limits;
+    limits.max_input_bytes = I2_FRAME_MAX_PAYLOAD;
+    return i2_rx_take_limited(out, &limits);
+}
+
+uint64_t i2_rx_payload_len(void)
+{
+    return g_rx.state == RX_READY ? g_rx.payload_len : 0;
+}
+
+uint64_t i2_rx_reject_total(void)
+{
+    uint64_t total = 0;
+    for (int i = 1; i < I2_RX_REASON_COUNT; i++) {
+        if (UINT64_MAX - total < g_rx.rejects[i])
+            return UINT64_MAX;
+        total += g_rx.rejects[i];
+    }
+    return total;
+}
+
+uint64_t i2_rx_cue_calls(void)
+{
+    return g_rx.cue_calls;
+}
+
+void i2_rx_discard_ready(void)
+{
+    if (g_rx.state == RX_READY)
+        reset_scan();
 }
 
 int i2_rx_ready(void)

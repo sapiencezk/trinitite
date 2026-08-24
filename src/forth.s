@@ -2912,6 +2912,74 @@ defcode "M21BD?", 6, m21_checkpoint_bad_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// M22 framed provider-core seam.  The frame carries only the post-transport
+// product; the C path supplies the image-owned adapter attestation.
+defcode "M22INIT", 7, m22_init_word, 0
+    bl      m22_provider_core_init
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22RX?", 6, m22_receive_word, 0
+    bl      m22_provider_core_receive_framed
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22STEP", 7, m22_step_word, 0
+    bl      m22_provider_core_step
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22IND@", 7, m22_indication_word, 0
+    bl      m22_provider_core_indication
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22SEQ@", 7, m22_indication_sequence_word, 0
+    bl      m22_provider_core_indication_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22Q", 4, m22_queue_word, 0
+    bl      m22_provider_core_queue_len
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22HWM@", 7, m22_high_water_word, 0
+    bl      m22_provider_core_high_water
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22ERR@", 7, m22_error_word, 0
+    bl      m22_provider_core_last_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22CUE@", 7, m22_cue_calls_word, 0
+    bl      m22_provider_core_cue_calls
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22CK?", 6, m22_checkpoint_word, 0
+    bl      m22_provider_core_checkpoint
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22RF?", 6, m22_reservation_fault_word, 0
+    bl      m22_provider_core_reservation_fault_once
+    mov     x0, #0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M22UA?", 6, m22_unattested_word, 0
+    bl      m22_provider_core_unattested_probe
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // ── M7 pure resource supervisor / trusted lab bridge ─────────────────────
 // M7INIT ( -- st )        validate the live M7 identity/gate and install the
 //                         persistent pure-Nock MANAGER formula.

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "noun.h"
+#include "bounded_cue.h"
 
 typedef enum {
     I2_RX_REASON_NONE = 0,
@@ -20,6 +21,14 @@ void i2_rx_init(void);
 int i2_rx_poll(uint32_t byte_budget);
 /* Decode the ready payload into SCRATCH. Success leaves noun_tx active. */
 int i2_rx_take(noun *out);
+/* M22 uses the same framed scanner with a stricter, caller-supplied Cue
+ * profile.  The caller must keep the ready frame bounded before invoking it. */
+int i2_rx_take_limited(noun *out, const cue_bounded_limits_t *limits);
+uint64_t i2_rx_payload_len(void);
+uint64_t i2_rx_reject_total(void);
+uint64_t i2_rx_cue_calls(void);
+/* Drop a ready frame without Cue; used only after an adapter-side cheap check. */
+void i2_rx_discard_ready(void);
 
 /* Deterministic parser hooks used by focused tests. */
 void i2_rx_feed_byte(uint8_t byte, uint64_t now);

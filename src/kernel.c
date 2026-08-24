@@ -21,6 +21,7 @@
 #include "m7_supervisor.h"
 #include "i2_operator.h"
 #include "m21_device.h"
+#include "m22_provider_core.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
 #define CORD_OUT     7632239ULL              /* %out      */
