@@ -17,6 +17,8 @@
 #define M23_SENDER_DEVICE 11u
 #define M23_RECEIVER_DEVICE 22u
 #define M23_KEY_ID 7u
+/* These fixed values are image/deployment authority for the one proof
+ * session.  No framed noun supplies an epoch, floor, or policy. */
 #define M23_INITIAL_FLOOR 2u
 #define M23_INITIAL_EPOCH 3u
 #define M23_ROTATED_EPOCH 4u
@@ -576,6 +578,8 @@ int m23_provider_core_checkpoint_tamper(void)
 
 int m23_provider_core_publish(void)
 {
+    /* This is a synthetic post-transport egress-completion operation for the
+     * framed provider-core proof; it is not target networking. */
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
     if (g_state == M23_STATE_UNARMED) { reject(M23_ERR_SESSION_UNARMED); return -1; }
     if (g_state == M23_STATE_EXHAUSTED) { reject(M23_ERR_SEQUENCE_EXHAUSTED); return -1; }
