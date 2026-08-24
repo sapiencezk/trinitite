@@ -2980,8 +2980,10 @@ defcode "M22UA?", 6, m22_unattested_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
-// M23 restart-safe session authority.  These words are fixed local image
-// operations; framed nouns can only attempt post-transport admission.
+#ifdef M23_TEST_CONTROLS
+// M23 restart-safe session authority.  These words are test-build-only
+// image-owned operations; framed nouns can only attempt post-transport
+// admission.  The provider core remains present without this surface.
 defcode "M23INIT", 7, m23_init_word, 0
     bl      m23_provider_core_init
     sxtw    x0, w0
@@ -3042,7 +3044,6 @@ defcode "M23CKR?", 7, m23_checkpoint_restore_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
-#ifdef M23_TEST_CONTROLS
 defcode "M23BD?", 6, m23_checkpoint_bad_word, 0
     bl      m23_provider_core_checkpoint_tamper
     sxtw    x0, w0
@@ -3060,8 +3061,6 @@ defcode "M23MAX?", 7, m23_max_word, 0
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
-#endif
-
 defcode "M23Q", 4, m23_queue_word, 0
     bl      m23_provider_core_queue_len
     str     x0, [DSP, #-8]!
@@ -3106,6 +3105,8 @@ defcode "M23SEQ@", 7, m23_indication_sequence_word, 0
     bl      m23_provider_core_indication_sequence
     str     x0, [DSP, #-8]!
     NEXT
+
+#endif
 
 // ── M7 pure resource supervisor / trusted lab bridge ─────────────────────
 // M7INIT ( -- st )        validate the live M7 identity/gate and install the
