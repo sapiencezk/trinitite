@@ -10,6 +10,8 @@
 #define M23_FIFO_CAP 16u
 #define M23_RATE_CAP 64u
 #define M23_VERSION 1u
+#define M23_WIRE_MAJOR 0u
+#define M23_WIRE_MINOR 1u
 #define M23_PROFILE 0u
 #define M23_MESSAGE_KIND 1u
 #define M23_SENDER_DEVICE 11u
@@ -45,23 +47,41 @@ static noun g_publication_tag;
 static noun g_publish_event_tag;
 static noun g_raw_carrier_tag;
 static noun g_bare_ei_tag;
-static noun g_queue_value[M23_FIFO_CAP];
-static uint64_t g_queue_sequence[M23_FIFO_CAP];
-static uint32_t g_queue_head;
-static uint32_t g_queue_count;
-static uint64_t g_high_water;
-static int g_high_water_valid;
-static uint64_t g_epoch;
-static uint64_t g_next_sequence;
-static uint64_t g_authority_floor;
-/* Ingress work and outbound publication admission are separate budgets. */
-static uint64_t g_ingress_rate_count;
-static uint64_t g_outbound_rate_count;
-static uint64_t g_outbound_rate_deadline;
+/* One bounded target session root.  Candidate copies are published only
+ * after admission has completed; diagnostics remain outside this root. */
+typedef struct {
+    noun queue_value[M23_FIFO_CAP];
+    uint64_t queue_sequence[M23_FIFO_CAP];
+    uint32_t queue_head;
+    uint32_t queue_count;
+    uint64_t high_water;
+    int high_water_valid;
+    uint64_t epoch;
+    uint64_t next_sequence;
+    uint64_t authority_floor;
+    uint64_t ingress_rate_count;
+    uint64_t outbound_rate_count;
+    uint64_t outbound_rate_deadline;
+    uint64_t state;
+} m23_session_root_t;
+
+static m23_session_root_t g_root;
+#define g_queue_value (g_root.queue_value)
+#define g_queue_sequence (g_root.queue_sequence)
+#define g_queue_head (g_root.queue_head)
+#define g_queue_count (g_root.queue_count)
+#define g_high_water (g_root.high_water)
+#define g_high_water_valid (g_root.high_water_valid)
+#define g_epoch (g_root.epoch)
+#define g_next_sequence (g_root.next_sequence)
+#define g_authority_floor (g_root.authority_floor)
+#define g_ingress_rate_count (g_root.ingress_rate_count)
+#define g_outbound_rate_count (g_root.outbound_rate_count)
+#define g_outbound_rate_deadline (g_root.outbound_rate_deadline)
+#define g_state (g_root.state)
 static uint64_t g_last_indication;
 static uint64_t g_last_indication_sequence;
 static uint64_t g_last_error;
-static uint64_t g_state;
 static int g_indication_valid;
 static int g_active;
 static int g_checkpoint_valid;
@@ -78,6 +98,10 @@ static uint64_t g_checkpoint_high_water;
 static uint64_t g_checkpoint_next_sequence;
 static uint64_t g_checkpoint_rate_count;
 static uint64_t g_checkpoint_rate_remaining;
+static uint64_t g_checkpoint_state;
+static uint64_t g_checkpoint_wire_major;
+static uint64_t g_checkpoint_wire_minor;
+static uint64_t g_checkpoint_message_kind;
 
 static const cue_bounded_limits_t M23_CUE_LIMITS = {
     .max_input_bytes = 512,
@@ -330,12 +354,14 @@ int m23_provider_core_admit(noun product,
     if (g_queue_count >= M23_FIFO_CAP) { reject(M23_ERR_FIFO_FULL); return -1; }
     /* The reservation boundary is intentionally absent in M23's target
      * positive path; all checks still precede this single root publication. */
-    uint32_t slot = (g_queue_head + g_queue_count) % M23_FIFO_CAP;
-    g_queue_value[slot] = value;
-    g_queue_sequence[slot] = sequence;
-    g_queue_count++;
-    g_high_water = sequence;
-    g_high_water_valid = 1;
+    m23_session_root_t candidate = g_root;
+    uint32_t slot = (candidate.queue_head + candidate.queue_count) % M23_FIFO_CAP;
+    candidate.queue_value[slot] = value;
+    candidate.queue_sequence[slot] = sequence;
+    candidate.queue_count++;
+    candidate.high_water = sequence;
+    candidate.high_water_valid = 1;
+    g_root = candidate;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
@@ -384,6 +410,16 @@ int m23_provider_core_receive_framed(void)
     if (i2_rx_payload_len() > M23_CUE_LIMITS.max_input_bytes) {
         i2_rx_discard_ready(); reject(M23_ERR_FRAME_LENGTH); return -1;
     }
+    /* Lifecycle refusal precedes Cue and all session admission work.  A
+     * remote DATA frame cannot make an unarmed target spend codec budget or
+     * alter its session root. */
+    if (g_state != M23_STATE_ARMED) {
+        i2_rx_discard_ready();
+        reject(g_state == M23_STATE_UNARMED ? M23_ERR_SESSION_UNARMED
+            : g_state == M23_STATE_EXHAUSTED ? M23_ERR_SEQUENCE_EXHAUSTED
+            : M23_ERR_CLOSED);
+        return -1;
+    }
     if (g_ingress_rate_count >= M23_RATE_CAP) {
         i2_rx_discard_ready(); reject(M23_ERR_FRAME_RATE); return -1;
     }
@@ -401,12 +437,14 @@ int m23_provider_core_step(void)
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
     if (g_state != M23_STATE_ARMED) { reject(M23_ERR_CLOSED); return -1; }
     if (g_queue_count == 0) return 0;
-    uint32_t slot = g_queue_head;
+    m23_session_root_t candidate = g_root;
+    uint32_t slot = candidate.queue_head;
     g_last_indication = g_queue_value[slot];
     g_last_indication_sequence = g_queue_sequence[slot];
     g_indication_valid = 1;
-    g_queue_head = (g_queue_head + 1u) % M23_FIFO_CAP;
-    g_queue_count--;
+    candidate.queue_head = (candidate.queue_head + 1u) % M23_FIFO_CAP;
+    candidate.queue_count--;
+    g_root = candidate;
     g_last_error = M23_ERR_NONE;
     return 1;
 }
@@ -451,9 +489,15 @@ int m23_provider_core_checkpoint_save(void)
         g_checkpoint_schema[i] = M23_SCHEMA[i];
     g_checkpoint_high_water = g_high_water;
     g_checkpoint_next_sequence = g_next_sequence;
-    g_checkpoint_rate_count = g_outbound_rate_count;
+    g_checkpoint_state = g_state;
+    g_checkpoint_wire_major = M23_WIRE_MAJOR;
+    g_checkpoint_wire_minor = M23_WIRE_MINOR;
+    g_checkpoint_message_kind = M23_MESSAGE_KIND;
+    uint64_t checkpoint_now = target_counter_now();
     g_checkpoint_rate_remaining = target_counter_remaining(
-        g_outbound_rate_deadline, target_counter_now());
+        g_outbound_rate_deadline, checkpoint_now);
+    g_checkpoint_rate_count = g_checkpoint_rate_remaining == 0
+        ? 0 : g_outbound_rate_count;
     g_checkpoint_valid = 1;
     g_last_error = M23_ERR_NONE;
     return 0;
@@ -469,8 +513,13 @@ int m23_provider_core_checkpoint_restore(void)
         || g_checkpoint_local_device != M23_RECEIVER_DEVICE
         || g_checkpoint_peer_device != M23_SENDER_DEVICE
         || g_checkpoint_key_id != M23_KEY_ID
+        || g_checkpoint_state != M23_STATE_ARMED
+        || g_checkpoint_wire_major != M23_WIRE_MAJOR
+        || g_checkpoint_wire_minor != M23_WIRE_MINOR
+        || g_checkpoint_message_kind != M23_MESSAGE_KIND
         || g_checkpoint_epoch == 0 || g_checkpoint_next_sequence == 0
         || g_checkpoint_rate_count > M23_RATE_CAP
+        || (g_checkpoint_rate_count == 0 && g_checkpoint_rate_remaining != 0)
         || g_checkpoint_rate_remaining > target_counter_freq()) {
         reject(M23_ERR_CHECKPOINT_INVALID); return -1;
     }
@@ -491,7 +540,9 @@ int m23_provider_core_checkpoint_restore(void)
     g_outbound_rate_deadline = g_checkpoint_rate_remaining == 0
         ? 0 : (now > UINT64_MAX - g_checkpoint_rate_remaining
             ? UINT64_MAX : now + g_checkpoint_rate_remaining);
-    g_state = g_next_sequence == UINT64_MAX ? M23_STATE_EXHAUSTED : M23_STATE_ARMED;
+    /* An ARMED checkpoint with next==UINT64_MAX still permits that final
+     * sequence.  EXHAUSTED is entered only by the successful send itself. */
+    g_state = M23_STATE_ARMED;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
@@ -519,12 +570,14 @@ int m23_provider_core_publish(void)
     if (g_outbound_rate_count >= M23_RATE_CAP) {
         reject(M23_ERR_FRAME_RATE); return -1;
     }
-    if (g_next_sequence == UINT64_MAX) {
-        g_state = M23_STATE_EXHAUSTED;
+    m23_session_root_t candidate = g_root;
+    if (candidate.next_sequence == UINT64_MAX) {
+        candidate.state = M23_STATE_EXHAUSTED;
     } else {
-        g_next_sequence++;
+        candidate.next_sequence++;
     }
-    g_outbound_rate_count++;
+    candidate.outbound_rate_count++;
+    g_root = candidate;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
