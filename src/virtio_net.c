@@ -78,10 +78,18 @@ static vring_avail_t g_tx_avail __attribute__((aligned(4096)));
 static vring_used_t g_tx_used __attribute__((aligned(4096)));
 static uint8_t g_tx_buf[RX_BUFFER_BYTES] __attribute__((aligned(16)));
 static uint16_t g_rx_used_seen;
+static uint16_t g_rx_posted_mask;
 static uint16_t g_tx_used_seen;
 static uint16_t g_tx_avail_idx;
 static int g_ready;
 static int g_tx_busy;
+#ifdef M23_TEST_CONTROLS
+static int g_tx_completion_hidden;
+static int g_test_rx_bad;
+static int g_test_rx_overadvance;
+static int g_test_tx_bad;
+static int g_test_tx_overlong;
+#endif
 static uint64_t g_rx_packets;
 static uint64_t g_tx_packets;
 static uint64_t g_last_error;
@@ -108,7 +116,10 @@ static void notify(uint32_t queue) { barrier(); MMIO(REG_QUEUE_NOTIFY) = queue; 
 static void status_fail(uint64_t error)
 {
     g_last_error = error;
-    MMIO(REG_STATUS) = MMIO(REG_STATUS) | STATUS_FAILED;
+    /* The build gate rejects native-on-rpi4b, but keep this failure path
+     * non-destructive if a test calls the driver without an MMIO aperture. */
+    if (PLATFORM_VIRTIO_MMIO_BASE != 0)
+        MMIO(REG_STATUS) = MMIO(REG_STATUS) | STATUS_FAILED;
 }
 
 static int configure_queue(uint32_t queue)
@@ -121,7 +132,13 @@ static int configure_queue(uint32_t queue)
 int virtio_net_init(void)
 {
     g_ready = 0; g_tx_busy = 0; g_rx_used_seen = 0; g_tx_used_seen = 0;
+    g_rx_posted_mask = 0;
     g_tx_avail_idx = 0; g_rx_packets = 0; g_tx_packets = 0; g_last_error = 0;
+#ifdef M23_TEST_CONTROLS
+    g_tx_completion_hidden = 0;
+    g_test_rx_bad = 0; g_test_rx_overadvance = 0;
+    g_test_tx_bad = 0; g_test_tx_overlong = 0;
+#endif
     if (PLATFORM_VIRTIO_MMIO_BASE == 0 || MMIO(REG_MAGIC) != 0x74726976u
         || MMIO(REG_VERSION) != 2u || MMIO(REG_DEVICE_ID) != 1u) {
         status_fail(1); return -1;
@@ -143,6 +160,7 @@ int virtio_net_init(void)
         g_rx_desc[i].len = RX_BUFFER_BYTES; g_rx_desc[i].flags = DESC_F_WRITE; g_rx_desc[i].next = 0;
         g_rx_avail.ring[i] = (uint16_t)i;
     }
+    g_rx_posted_mask = (uint16_t)((1u << RING_COUNT) - 1u);
     g_rx_avail.flags = 0; g_rx_avail.idx = RING_COUNT; g_rx_used.flags = 0; g_rx_used.idx = 0;
     for (uint32_t i = 0; i < RING_COUNT; i++) { g_rx_used.ring[i].id = 0; g_rx_used.ring[i].len = 0; }
     queue_address(0, g_rx_desc, &g_rx_avail, &g_rx_used); notify(0);
@@ -162,12 +180,18 @@ int virtio_net_config_mac(uint8_t out[6])
     return 0;
 }
 
-static void recycle_rx(uint32_t id)
+static int recycle_rx(uint32_t id)
 {
-    if (id >= RING_COUNT) return;
+    if (id >= RING_COUNT || (g_rx_posted_mask & (uint16_t)(1u << id)) != 0) {
+        g_last_error = 10;
+        g_ready = 0;
+        return -1;
+    }
     g_rx_avail.ring[g_rx_avail.idx % RING_COUNT] = (uint16_t)id;
     g_rx_avail.idx++;
+    g_rx_posted_mask |= (uint16_t)(1u << id);
     notify(0);
+    return 0;
 }
 
 virtio_net_status_t virtio_net_receive(uint8_t *out, uint32_t out_cap,
@@ -176,16 +200,55 @@ virtio_net_status_t virtio_net_receive(uint8_t *out, uint32_t out_cap,
     if (!g_ready) return VIRTIO_NET_NOT_READY;
     uint16_t used = g_rx_used.idx;
     barrier();
+#ifdef M23_TEST_CONTROLS
+    if (used == g_rx_used_seen && !g_test_rx_bad && !g_test_rx_overadvance) {
+        cpu_relax_rx(); return VIRTIO_NET_NO_PACKET;
+    }
+#else
     if (used == g_rx_used_seen) { cpu_relax_rx(); return VIRTIO_NET_NO_PACKET; }
+#endif
+    uint16_t delta = (uint16_t)(used - g_rx_used_seen);
+#ifdef M23_TEST_CONTROLS
+    int test_rx_bad = g_test_rx_bad;
+    int test_rx_overadvance = g_test_rx_overadvance;
+    g_test_rx_bad = 0; g_test_rx_overadvance = 0;
+    if (test_rx_bad) delta = 1;
+    if (test_rx_overadvance) delta = RING_COUNT + 1u;
+#endif
+    if (delta > RING_COUNT) {
+        g_last_error = 9;
+        g_ready = 0;
+        return VIRTIO_NET_MALFORMED;
+    }
+    uint16_t batch_ids = 0;
+    for (uint16_t offset = 0; offset < delta; offset++) {
+        vring_used_elem_t candidate = g_rx_used.ring[
+            (g_rx_used_seen + offset) % RING_COUNT];
+#ifdef M23_TEST_CONTROLS
+        if (test_rx_bad && offset == 0) {
+            candidate.id = RING_COUNT;
+            candidate.len = 0;
+        }
+#endif
+        uint16_t bit = candidate.id < RING_COUNT
+            ? (uint16_t)(1u << candidate.id) : 0;
+        if (candidate.id >= RING_COUNT || bit == 0
+            || (g_rx_posted_mask & bit) == 0 || (batch_ids & bit) != 0
+            || candidate.len < RX_NET_HEADER_BYTES
+            || candidate.len - RX_NET_HEADER_BYTES > out_cap) {
+            g_last_error = 5;
+            g_ready = 0;
+            return VIRTIO_NET_MALFORMED;
+        }
+        batch_ids |= bit;
+    }
     vring_used_elem_t elem = g_rx_used.ring[g_rx_used_seen % RING_COUNT];
     g_rx_used_seen++;
-    if (elem.id >= RING_COUNT || elem.len < RX_NET_HEADER_BYTES
-        || elem.len - RX_NET_HEADER_BYTES > out_cap) {
-        recycle_rx(elem.id); g_last_error = 5; return VIRTIO_NET_MALFORMED;
-    }
+    g_rx_posted_mask &= (uint16_t)~(uint16_t)(1u << elem.id);
     uint32_t len = elem.len - RX_NET_HEADER_BYTES;
     for (uint32_t i = 0; i < len; i++) out[i] = g_rx_buf[elem.id][RX_NET_HEADER_BYTES + i];
-    recycle_rx(elem.id); barrier();
+    if (recycle_rx(elem.id) != 0) return VIRTIO_NET_MALFORMED;
+    barrier();
     if (out_len) *out_len = len;
     g_rx_packets++;
     return VIRTIO_NET_OK;
@@ -196,8 +259,25 @@ static int reap_tx(void)
     uint16_t used = g_tx_used.idx;
     barrier();
     if (used == g_tx_used_seen) return 0;
-    if ((uint16_t)(used - g_tx_used_seen) != 1u
-        || g_tx_used.ring[g_tx_used_seen % RING_COUNT].id != 0u) {
+    if (!g_tx_busy) {
+        g_last_error = 8;
+        g_ready = 0;
+        return -1;
+    }
+#ifdef M23_TEST_CONTROLS
+    if (g_tx_completion_hidden) return 0;
+#endif
+    vring_used_elem_t elem = g_tx_used.ring[g_tx_used_seen % RING_COUNT];
+#ifdef M23_TEST_CONTROLS
+    int test_tx_bad = g_test_tx_bad;
+    int test_tx_overlong = g_test_tx_overlong;
+    g_test_tx_bad = 0; g_test_tx_overlong = 0;
+    if (test_tx_bad) { elem.id = 1; elem.len = 0; }
+    if (test_tx_overlong) { elem.id = 0; elem.len = g_tx_desc[0].len + 1u; }
+#endif
+    if ((uint16_t)(used - g_tx_used_seen) > RING_COUNT
+        || (uint16_t)(used - g_tx_used_seen) != 1u
+        || elem.id != 0u || elem.len > g_tx_desc[0].len) {
         g_last_error = 8;
         g_ready = 0;
         return -1;
@@ -243,11 +323,48 @@ uint64_t virtio_net_debug_queue_ready(uint32_t queue)
 }
 uint64_t virtio_net_debug_tx_used(void) { return g_tx_used.idx; }
 uint64_t virtio_net_debug_tx_avail(void) { return g_tx_avail.idx; }
+uint64_t virtio_net_debug_tx_packets(void) { return g_tx_packets; }
 #ifdef M23_TEST_CONTROLS
 int virtio_net_test_hold_tx(void)
 {
     if (!g_ready) return -1;
-    g_tx_busy = 1;
+    if (g_tx_busy) { g_last_error = 6; return -1; }
+    g_tx_completion_hidden = 1;
+    return 0;
+}
+
+int virtio_net_test_release_tx(void)
+{
+    if (!g_ready) return -1;
+    g_tx_completion_hidden = 0;
+    return 0;
+}
+
+int virtio_net_test_corrupt_rx_used(void)
+{
+    if (!g_ready) return -1;
+    g_test_rx_bad = 1;
+    return 0;
+}
+
+int virtio_net_test_overadvance_rx_used(void)
+{
+    if (!g_ready) return -1;
+    g_test_rx_overadvance = 1;
+    return 0;
+}
+
+int virtio_net_test_corrupt_tx_used(void)
+{
+    if (!g_ready || !g_tx_busy) return -1;
+    g_test_tx_bad = 1;
+    return 0;
+}
+
+int virtio_net_test_overlong_tx_used(void)
+{
+    if (!g_ready || !g_tx_busy) return -1;
+    g_test_tx_overlong = 1;
     return 0;
 }
 #endif

@@ -86,6 +86,9 @@ int m23_provider_core_publish_native(void);
 #ifdef M23_TEST_CONTROLS
 int m23_provider_core_set_next_max_minus_one(void);
 int m23_provider_core_test_outbound_burst(void);
+#ifdef M24_NATIVE
+int m23_provider_core_test_native_rate_burst(void);
+#endif
 #endif
 uint64_t m23_provider_core_queue_len(void);
 uint64_t m23_provider_core_high_water(void);
@@ -96,3 +99,4 @@ uint64_t m23_provider_core_indication(void);
 uint64_t m23_provider_core_indication_sequence(void);
 uint64_t m23_provider_core_last_error(void);
 uint64_t m23_provider_core_cue_calls(void);
+uint64_t m23_provider_core_outbound_rate_count(void);

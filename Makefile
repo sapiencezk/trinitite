@@ -12,6 +12,12 @@ else
 $(error unsupported PLATFORM='$(PLATFORM)' (rpi4b, qemu-virt))
 endif
 
+ifeq ($(M24_NATIVE),1)
+ifneq ($(PLATFORM),qemu-virt)
+$(error M24_NATIVE=1 requires PLATFORM=qemu-virt; refusing native MMIO on $(PLATFORM))
+endif
+endif
+
 CROSS   ?= aarch64-elf-
 CC       = $(CROSS)gcc
 LD       = $(CROSS)ld

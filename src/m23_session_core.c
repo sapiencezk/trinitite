@@ -307,6 +307,12 @@ static int parse_product(noun product, uint64_t *sequence, uint64_t *epoch,
 
 int m23_provider_core_init(void)
 {
+#ifdef M24_NATIVE
+    /* A native descriptor may already be visible to the device.  Resetting
+     * the session here would discard its identity and let a late completion
+     * commit against a different root. */
+    if (m24_native_tx_pending()) { reject(M23_ERR_NATIVE_RING_FULL); return -1; }
+#endif
     m23_session_root_t initial = {0};
     g_product_tag = cord_from_bytes("aethernet-0-adapter-product-v1", 30);
     g_publication_tag = cord_from_bytes("publication-envelope-v1", 23);
@@ -534,6 +540,9 @@ int m23_provider_core_rotate(void)
 int m23_provider_core_checkpoint_save(void)
 {
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+#ifdef M24_NATIVE
+    if (m24_native_tx_pending()) { reject(M23_ERR_NATIVE_RING_FULL); return -1; }
+#endif
     if (g_state != M23_STATE_ARMED || g_queue_count != 0) {
         reject(M23_ERR_CHECKPOINT_BUSY); return -1;
     }
@@ -567,6 +576,9 @@ int m23_provider_core_checkpoint_save(void)
 int m23_provider_core_checkpoint_restore(void)
 {
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+#ifdef M24_NATIVE
+    if (m24_native_tx_pending()) { reject(M23_ERR_NATIVE_RING_FULL); return -1; }
+#endif
     if (g_state != M23_STATE_UNARMED || !g_checkpoint_valid
         || g_checkpoint_magic != M23_CHECKPOINT_MAGIC
         || g_checkpoint_version != M23_VERSION
@@ -713,6 +725,9 @@ static uint64_t native_transport_error(m24_native_status_t status)
 
 int m23_provider_core_native_init(void)
 {
+#ifdef M24_NATIVE
+    if (m24_native_tx_pending()) { reject(M23_ERR_NATIVE_RING_FULL); return -1; }
+#endif
     int result = m23_provider_core_init();
     if (result != 0) return result;
     if (m24_native_init() != 0) { reject(M23_ERR_NATIVE_DEVICE); return -1; }
@@ -888,6 +903,21 @@ int m23_provider_core_test_outbound_burst(void)
     return 0;
 }
 
+#ifdef M24_NATIVE
+int m23_provider_core_test_native_rate_burst(void)
+{
+    if (!g_active || g_state != M23_STATE_ARMED) {
+        reject(M23_ERR_SESSION_UNARMED); return -1;
+    }
+    /* Compact test control: every iteration still uses the real native
+     * frame build, virtio submission, used completion, and root commit. */
+    for (uint64_t i = g_outbound_rate_count; i < M23_RATE_CAP; i++) {
+        if (m23_provider_core_publish_native() != 0) return -1;
+    }
+    return 0;
+}
+#endif
+
 int m23_provider_core_set_next_max_minus_one(void)
 {
     if (g_state != M23_STATE_ARMED) { reject(M23_ERR_SESSION_UNARMED); return -1; }
@@ -930,3 +960,4 @@ uint64_t m23_provider_core_indication_sequence(void)
 }
 uint64_t m23_provider_core_last_error(void) { return g_last_error; }
 uint64_t m23_provider_core_cue_calls(void) { return i2_rx_cue_calls(); }
+uint64_t m23_provider_core_outbound_rate_count(void) { return g_outbound_rate_count; }

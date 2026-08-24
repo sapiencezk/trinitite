@@ -25,6 +25,12 @@ uint64_t virtio_net_debug_status(void);
 uint64_t virtio_net_debug_queue_ready(uint32_t queue);
 uint64_t virtio_net_debug_tx_used(void);
 uint64_t virtio_net_debug_tx_avail(void);
+uint64_t virtio_net_debug_tx_packets(void);
 #ifdef M23_TEST_CONTROLS
 int virtio_net_test_hold_tx(void);
+int virtio_net_test_release_tx(void);
+int virtio_net_test_corrupt_rx_used(void);
+int virtio_net_test_overadvance_rx_used(void);
+int virtio_net_test_corrupt_tx_used(void);
+int virtio_net_test_overlong_tx_used(void);
 #endif

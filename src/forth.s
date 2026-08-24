@@ -3109,6 +3109,11 @@ defcode "M23ERR@", 7, m23_error_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "M23RC@", 6, m23_rate_count_word, 0
+    bl      m23_provider_core_outbound_rate_count
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "M23CUE@", 7, m23_cue_calls_word, 0
     bl      m23_provider_core_cue_calls
     str     x0, [DSP, #-8]!
@@ -3201,9 +3206,50 @@ defcode "M24TUU@", 7, m24_virtio_tx_used_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "M24TXP@", 7, m24_virtio_tx_packets_word, 0
+    bl      virtio_net_debug_tx_packets
+    str     x0, [DSP, #-8]!
+    NEXT
+
 #ifdef M23_TEST_CONTROLS
 defcode "M24HOLD", 7, m24_virtio_test_hold_tx_plain_word, 0
     bl      virtio_net_test_hold_tx
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24REL", 6, m24_virtio_test_release_tx_word, 0
+    bl      virtio_net_test_release_tx
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24RXBAD", 8, m24_virtio_test_corrupt_rx_used_word, 0
+    bl      virtio_net_test_corrupt_rx_used
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24RXOVR", 8, m24_virtio_test_overadvance_rx_used_word, 0
+    bl      virtio_net_test_overadvance_rx_used
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24TXBAD", 8, m24_virtio_test_corrupt_tx_used_word, 0
+    bl      virtio_net_test_corrupt_tx_used
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24TXLEN", 8, m24_virtio_test_overlong_tx_used_word, 0
+    bl      virtio_net_test_overlong_tx_used
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M24B64?", 7, m24_native_rate_burst_word, 0
+    bl      m23_provider_core_test_native_rate_burst
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
