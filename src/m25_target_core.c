@@ -336,7 +336,8 @@ int m25_target_active(void) { return g_active; }
 
 int m25_target_init(void)
 {
-    if (!g_active) return -1;
+    if (!g_active || g_pending_event != NOUN_ZERO || g_fifo_count != 0
+        || m25_native_tx_pending()) return -1;
     if (m25_native_init() != 0) return -1;
     return 0;
 }
@@ -431,11 +432,12 @@ uint64_t m25_target_last_error(void) { return g_last_error; }
 
 static int checkpoint_noun(noun *out)
 {
-    noun tail = NOUN_ZERO, values[4];
+    noun tail = NOUN_ZERO, values[5];
     values[0] = g_gate; values[1] = direct(g_next_sequence);
     values[2] = direct(g_high_water); values[3] = direct(g_last_indication);
-    for (int i = 3; i >= 0; i--) if (!cons(values[i], tail, &tail)) return 0;
-    return cons(cord_from_bytes("m25-checkpoint-v1", 17), tail, out);
+    values[4] = direct(g_indication_valid ? 1 : 0);
+    for (int i = 4; i >= 0; i--) if (!cons(values[i], tail, &tail)) return 0;
+    return cons(cord_from_bytes("m25-checkpoint-v2", 17), tail, out);
 }
 
 int m25_target_checkpoint_capture(void)
@@ -455,19 +457,22 @@ int m25_target_checkpoint_restore(void)
 {
     if (!g_active || !g_checkpoint_valid || g_pending_event != NOUN_ZERO || g_fifo_count != 0
         || m25_native_tx_pending()) return -1;
-    noun checkpoint, tag, rest, values[4], staged;
+    noun checkpoint, tag, rest, values[5], staged;
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
     if (cue_bounded_bytes(g_checkpoint, g_checkpoint_len, &cue_i2_limits,
                           HEAP_MODE_PERSIST, &checkpoint) != CUE_BOUNDED_OK
         || !take(checkpoint, &tag, &rest)
-        || !noun_eq(tag, cord_from_bytes("m25-checkpoint-v1", 17))) goto reject;
-    for (unsigned i = 0; i < 4; i++) if (!take(rest, &values[i], &rest)) goto reject;
+        || !noun_eq(tag, cord_from_bytes("m25-checkpoint-v2", 17))) goto reject;
+    for (unsigned i = 0; i < 5; i++) if (!take(rest, &values[i], &rest)) goto reject;
     if (!direct_is(rest, 0) || !noun_is_direct(values[1]) || !noun_is_direct(values[2])
-        || !noun_is_direct(values[3]) || !runtime_identity_validate_gate(values[0], &g_identity, 0)
+        || !noun_is_direct(values[3]) || !noun_is_direct(values[4])
+        || direct_val(values[4]) > 1
+        || !runtime_identity_validate_gate(values[0], &g_identity, 0)
         || !noun_copy_checked(values[0], &staged)) goto reject;
     g_gate = staged; g_next_sequence = direct_val(values[1]);
     g_high_water = direct_val(values[2]); g_last_indication = direct_val(values[3]);
-    g_indication_valid = 1; noun_tx_commit(); heap_persist_commit_tx(); return 0;
+    g_indication_valid = direct_val(values[4]) != 0;
+    noun_tx_commit(); heap_persist_commit_tx(); return 0;
 reject:
     if (noun_tx_active()) noun_tx_abort();
     heap_persist_abort_tx();
