@@ -100,6 +100,11 @@ static void put32(volatile uint8_t *p, uint32_t value)
     p[2] = (uint8_t)(value >> 8); p[3] = (uint8_t)value;
 }
 
+static void put64(volatile uint8_t *p, uint64_t value)
+{
+    for (unsigned i = 0; i < 8; i++) p[i] = (uint8_t)(value >> (56u - 8u * i));
+}
+
 static uint16_t get16(const volatile uint8_t *p)
 {
     return ((uint16_t)p[0] << 8) | p[1];
@@ -222,8 +227,8 @@ static int build_publication(uint64_t value, uint64_t sequence,
     put32(frame + 20, 0); put32(frame + 24, M25_TARGET_DEVICE);
     for (unsigned i = 0; i < sizeof M25_BINDING; i++) frame[28+i] = M25_BINDING[i];
     for (unsigned i = 0; i < sizeof M25_SCHEMA; i++) frame[44+i] = M25_SCHEMA[i];
-    put32(frame + 76, M25_KEY_ID); put32(frame + 80, 0); put32(frame + 84, M25_PLAN_EPOCH);
-    put32(frame + 88, 0); put32(frame + 92, (uint32_t)sequence);
+    put32(frame + 76, M25_KEY_ID); put64(frame + 80, M25_PLAN_EPOCH);
+    put64(frame + 88, sequence);
     for (unsigned i = 96; i < 128; i++) frame[i] = 0;
     uint8_t auth[32]; hmac_sha256(M25_PSK, sizeof M25_PSK - 1u,
                                   frame, M25_HEADER_BYTES + payload_len, auth);
