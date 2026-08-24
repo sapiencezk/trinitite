@@ -66,7 +66,7 @@ else
 $(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake))
 endif
 
-OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o ska.o forth.o pill_embed.o m21_sink_embed.o main.o
 CONFIG_KEY = $(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)
 BUILD_DIR = .build/$(CONFIG_KEY)
 OBJDIR = $(BUILD_DIR)/obj

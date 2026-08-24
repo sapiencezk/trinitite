@@ -2980,6 +2980,119 @@ defcode "M22UA?", 6, m22_unattested_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+// M23 restart-safe session authority.  These words are fixed local image
+// operations; framed nouns can only attempt post-transport admission.
+defcode "M23INIT", 7, m23_init_word, 0
+    bl      m23_provider_core_init
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23ARM", 6, m23_arm_word, 0
+    bl      m23_provider_core_arm
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23COLD", 7, m23_cold_word, 0
+    bl      m23_provider_core_cold
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23RX?", 6, m23_receive_word, 0
+    bl      m23_provider_core_receive_framed
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23STEP", 7, m23_step_word, 0
+    bl      m23_provider_core_step
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23ROT", 6, m23_rotate_word, 0
+    bl      m23_provider_core_rotate
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23CKS?", 7, m23_checkpoint_save_word, 0
+    bl      m23_provider_core_checkpoint_save
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23CKR?", 7, m23_checkpoint_restore_word, 0
+    bl      m23_provider_core_checkpoint_restore
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23BD?", 6, m23_checkpoint_bad_word, 0
+    bl      m23_provider_core_checkpoint_tamper
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23PUB?", 7, m23_publish_word, 0
+    bl      m23_provider_core_publish
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23MAX?", 7, m23_max_word, 0
+    bl      m23_provider_core_set_next_max_minus_one
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23Q", 4, m23_queue_word, 0
+    bl      m23_provider_core_queue_len
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23HWM@", 7, m23_high_water_word, 0
+    bl      m23_provider_core_high_water
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23NEXT@", 8, m23_next_word, 0
+    bl      m23_provider_core_next_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23E@", 5, m23_epoch_word, 0
+    bl      m23_provider_core_epoch
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23S@", 5, m23_state_word, 0
+    bl      m23_provider_core_state
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23ERR@", 7, m23_error_word, 0
+    bl      m23_provider_core_last_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23CUE@", 7, m23_cue_calls_word, 0
+    bl      m23_provider_core_cue_calls
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23IND@", 7, m23_indication_word, 0
+    bl      m23_provider_core_indication
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23SEQ@", 7, m23_indication_sequence_word, 0
+    bl      m23_provider_core_indication_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
 // ── M7 pure resource supervisor / trusted lab bridge ─────────────────────
 // M7INIT ( -- st )        validate the live M7 identity/gate and install the
 //                         persistent pure-Nock MANAGER formula.
