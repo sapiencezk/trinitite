@@ -153,13 +153,19 @@ int runtime_identity_supported(const runtime_identity_t *id)
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 7;
     int m21 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 8
         && id->formula_abi[0] == 1 && id->formula_abi[1] == 8;
-    if (!legacy && !origin_v1 && !m7 && !m16 && !m17 && !m18 && !m19 && !m20 && !m21)
+    int m25 = id->runtime_abi[0] == 1 && id->runtime_abi[1] == 9
+        && id->formula_abi[0] == 1 && id->formula_abi[1] == 9;
+    if (!legacy && !origin_v1 && !m7 && !m16 && !m17 && !m18 && !m19 && !m20 && !m21 && !m25)
         return 0;
     /* ABI families are paired products. Do not admit a valid runtime with a
      * host/deployment family from another product cut. The supervised 1.2
      * through 1.4 runtimes retain the exact host/deployment 1.2 family. */
     if (m7 || m16 || m17 || m18 || m19 || m20 || m21) {
         if (!m7_host) return 0;
+    } else if (m25) {
+        if (id->host_abi[0] != 1 || id->host_abi[1] != 3
+            || id->deployment_schema[0] != 1 || id->deployment_schema[1] != 3)
+            return 0;
     } else if (!baseline_host && !digital_host) {
         return 0;
     }
@@ -446,7 +452,8 @@ static int m20_or_m21_base_program(noun program, noun *base_out)
     noun tag, rest, base, tables;
     if (!take(program, &tag, &rest)
         || (!m17_cord_is(tag, "i2-m20-program")
-            && !m17_cord_is(tag, "i2-m21-program"))
+            && !m17_cord_is(tag, "i2-m21-program")
+            && !m17_cord_is(tag, "i2-m25-program"))
         || !take(rest, &base, &tables) || !noun_is_cell(tables))
         return 0;
     *base_out = base;
@@ -672,7 +679,8 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
         return 0;
 
     noun instance_states = NOUN_ZERO;
-    if (i2_admission_program_known(id->program_hash)) {
+    if (i2_admission_program_known(id->program_hash)
+        || m25_admission_program_known(id->program_hash)) {
         noun formula;
         if (!take(dynamic, &instance_states, &formula)
             || !noun_matches_hash(battery, id->battery_hash)
@@ -698,13 +706,14 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
         return 0;
     noun instance_program = program;
     if (id->runtime_abi[0] == 1
-        && (id->runtime_abi[1] == 7 || id->runtime_abi[1] == 8)
+        && (id->runtime_abi[1] == 7 || id->runtime_abi[1] == 8
+            || id->runtime_abi[1] == 9)
         && !m20_or_m21_base_program(program, &instance_program))
         return 0;
     if (id->runtime_abi[0] == 1
         && (id->runtime_abi[1] == 4 || id->runtime_abi[1] == 5
             || id->runtime_abi[1] == 6 || id->runtime_abi[1] == 7
-            || id->runtime_abi[1] == 8)
+            || id->runtime_abi[1] == 8 || id->runtime_abi[1] == 9)
         && !m17_instance_states(instance_program, instance_states))
         return 0;
     if (incarnation_out)
@@ -965,32 +974,46 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
     int closed_io = 0;
     int static_resource = m7_digital_identity
         && capability_profile == RUNTIME_CAPABILITY_PROFILE_STATIC_RESOURCE;
-    if (digital_identity || m7_digital_identity) {
+    int m25_identity = identity.host_abi[0] == 1 && identity.host_abi[1] == 3
+        && identity.deployment_schema[0] == 1
+        && identity.deployment_schema[1] == 3
+        && capability_profile == RUNTIME_CAPABILITY_PROFILE_M25;
+    if (digital_identity || m7_digital_identity || m25_identity) {
         closed_io = m7_digital_identity
             && capability_profile == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO;
         static const uint8_t static_resource_fingerprint[8] = {
             0x54, 0x98, 0xab, 0xc7, 0x4f, 0xb5, 0x98, 0x33
         };
+        static const uint8_t m25_fingerprint[8] = {
+            0x1f, 0x4e, 0x4d, 0x25, 0x3a, 0x65, 0x74, 0x68
+        };
         const uint8_t *fingerprint = static_resource
             ? static_resource_fingerprint : closed_io
             ? g_closed_process_io_request_grant_fingerprint
+            : m25_identity ? m25_fingerprint
             : digital_identity ? g_digital_out_request_grant_fingerprint
                                : g_m7_digital_out_request_grant_fingerprint;
         uint8_t expected_profile = static_resource
             ? RUNTIME_CAPABILITY_PROFILE_STATIC_RESOURCE : closed_io
             ? RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO
+            : m25_identity ? RUNTIME_CAPABILITY_PROFILE_M25
             : digital_identity ? RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
                                : RUNTIME_CAPABILITY_PROFILE_M7_DIGITAL_OUT;
         if (capability_profile != expected_profile
             || !bytes_eq(header + 248, fingerprint, 8))
             return PILL_I2_IDENTITY;
-        if (closed_io || static_resource) {
+        if (closed_io || static_resource || m25_identity) {
             uint8_t pill_digest[32];
             uint64_t pill_bytes = PILL_I2_HEADER_SIZE + len;
-            if (!i2_admission_pill_digest(base, pill_bytes, pill_digest)
-                || !i2_admission_match_header(
+            int header_admitted = !i2_admission_pill_digest(base, pill_bytes, pill_digest)
+                ? 0
+                : m25_identity
+                ? m25_admission_lookup(identity.program_hash, identity.package_hash,
+                                       pill_digest, 0, 0)
+                : i2_admission_match_header(
                     identity.program_hash, identity.package_hash,
-                    pill_digest, capability_profile)) {
+                    pill_digest, capability_profile);
+            if (!header_admitted) {
                 i2_admission_refuse_identity(identity.program_hash);
                 return PILL_I2_IDENTITY;
             }
@@ -1006,15 +1029,20 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
     if (cue_status != CUE_BOUNDED_OK)
         return cue_status == CUE_BOUNDED_ALLOC
             ? PILL_I2_ALLOC : PILL_I2_CUE;
-    if (closed_io || static_resource) {
+    if (closed_io || static_resource || m25_identity) {
         uint8_t limits_hash[32];
         uint8_t pill_digest[32];
         uint64_t pill_bytes = PILL_I2_HEADER_SIZE + len;
-        if (!i2_admission_limits_hash(gate, limits_hash)
+        const i2_admission_catalog_entry_t *entry = 0;
+        int admitted = !i2_admission_limits_hash(gate, limits_hash)
             || !i2_admission_pill_digest(base, pill_bytes, pill_digest)
-            || !i2_admission_lookup(
-                identity.program_hash, identity.package_hash,
-                pill_digest, capability_profile, limits_hash, 0)) {
+            ? 0
+            : m25_identity
+            ? m25_admission_lookup(identity.program_hash, identity.package_hash,
+                                   pill_digest, limits_hash, &entry)
+            : i2_admission_lookup(identity.program_hash, identity.package_hash,
+                                  pill_digest, capability_profile, limits_hash, &entry);
+        if (!admitted) {
             i2_admission_refuse_identity(identity.program_hash);
             noun_tx_abort();
             return PILL_I2_IDENTITY;

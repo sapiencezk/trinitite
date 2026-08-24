@@ -26,6 +26,14 @@ int i2_admission_identity_limits_match(const uint8_t program_hash[32],
                                        const uint8_t executable_anchor[32],
                                        uint8_t capability,
                                        const uint8_t limits_hash[32]);
+
+/* M25's exact two-image catalog is separate from the frozen M21 envelope. */
+int m25_admission_lookup(const uint8_t program_hash[32],
+                         const uint8_t executable_anchor[32],
+                         const uint8_t pill_digest[32],
+                         const uint8_t limits_hash[32],
+                         const i2_admission_catalog_entry_t **out);
+int m25_admission_program_known(const uint8_t program_hash[32]);
 /* True when the program hash reaches the isolated historical refusal fence.
  * Historical identities are never admitted. */
 int i2_admission_historical_refusal(const uint8_t program_hash[32]);

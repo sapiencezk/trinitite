@@ -2837,6 +2837,83 @@ defcode "M2PREP", 6, m2_prepare_pill, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+#ifdef M25_TARGET
+// M25 target runner: M25IN injects only the admitted external BOOL samples;
+// M25STEP executes the local ResourceProgram/service/provider transaction,
+// and M25POLL admits one authenticated native frame into the SUBSCRIBE FIFO.
+// M25RST is a clean source-application restart for the finite M16 trace; it
+// does not reset the M25 session sequence, FIFO, or native state.
+defcode "M25INIT", 7, m25_init_word, 0
+    bl      m25_target_init
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25RST", 6, m25_restart_word, 0
+    bl      m25_target_restart_source
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25IN", 5, m25_input_word, 0
+    ldr     x1, [DSP]           // b (top)
+    ldr     x0, [DSP, #8]       // a
+    add     DSP, DSP, #16
+    bl      m25_target_input
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25POLL", 7, m25_poll_word, 0
+    bl      m25_target_poll
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25STEP", 7, m25_step_word, 0
+    bl      m25_target_step
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25Q", 4, m25_queue_word, 0
+    bl      m25_target_queue_len
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25IND@", 7, m25_indication_word, 0
+    bl      m25_target_sink_value
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25SEQ@", 7, m25_sequence_word, 0
+    bl      m25_target_next_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25HWM@", 7, m25_high_water_word, 0
+    bl      m25_target_high_water
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25ERR@", 7, m25_error_word, 0
+    bl      m25_target_last_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25CKS?", 7, m25_checkpoint_save_word, 0
+    bl      m25_target_checkpoint_capture
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25CKR?", 7, m25_checkpoint_restore_word, 0
+    bl      m25_target_checkpoint_restore
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
 // M21 fixed two-slot authority probes.  The only external ingress accepts
 // two BOOL samples for the admitted source REQ; no Forth word accepts raw
 // EI, route, egress, or inter-resource carrier nouns.

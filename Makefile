@@ -17,6 +17,11 @@ ifneq ($(PLATFORM),qemu-virt)
 $(error M24_NATIVE=1 requires PLATFORM=qemu-virt; refusing native MMIO on $(PLATFORM))
 endif
 endif
+ifeq ($(M25_TARGET),1)
+ifneq ($(PLATFORM),qemu-virt)
+$(error M25_TARGET=1 requires PLATFORM=qemu-virt; refusing native MMIO on $(PLATFORM))
+endif
+endif
 
 CROSS   ?= aarch64-elf-
 CC       = $(CROSS)gcc
@@ -49,6 +54,7 @@ M21_SINK_EMBED ?= 0
 M23_TEST_CONTROLS ?= 0
 M24_NATIVE ?= 0
 M24_NODE_ID ?= 22
+M25_TARGET ?= 0
 
 ifeq ($(M8_EVIDENCE),1)
 CFLAGS += -DM8_EVIDENCE=1
@@ -68,6 +74,10 @@ endif
 
 ifeq ($(M24_NATIVE),1)
 CFLAGS += -DM24_NATIVE=1 -DM24_NODE_ID=$(M24_NODE_ID)
+endif
+
+ifeq ($(M25_TARGET),1)
+CFLAGS += -DM25_TARGET=1 -DM24_NODE_ID=$(M24_NODE_ID)
 endif
 
 ifeq ($(COLD_MEDIA),ram)
@@ -106,8 +116,11 @@ NATIVE_OBJS =
 ifeq ($(M24_NATIVE),1)
 NATIVE_OBJS = sha256.o virtio_net.o aethernet_native.o
 endif
-OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
-CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M24_NODE_ID)
+ifeq ($(M25_TARGET),1)
+NATIVE_OBJS += sha256.o virtio_net.o m25_aethernet_native.o
+endif
+OBJ_NAMES = boot.o freestanding.o uart.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o m25_admission.o m25_target_core.o i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M25_TARGET)-$(M24_NODE_ID)
 BUILD_DIR = .build/$(CONFIG_KEY)
 OBJDIR = $(BUILD_DIR)/obj
 OBJS = $(addprefix $(OBJDIR)/,$(OBJ_NAMES))
