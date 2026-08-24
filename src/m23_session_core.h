@@ -57,14 +57,20 @@ enum {
 int m23_provider_core_init(void);
 int m23_provider_core_arm(void);
 int m23_provider_core_cold(void);
+int m23_provider_core_restart_clean(void);
+int m23_provider_core_close(void);
 int m23_provider_core_receive_framed(void);
 int m23_provider_core_step(void);
 int m23_provider_core_rotate(void);
 int m23_provider_core_checkpoint_save(void);
 int m23_provider_core_checkpoint_restore(void);
+#ifdef M23_TEST_CONTROLS
 int m23_provider_core_checkpoint_tamper(void);
+#endif
 int m23_provider_core_publish(void);
+#ifdef M23_TEST_CONTROLS
 int m23_provider_core_set_next_max_minus_one(void);
+#endif
 uint64_t m23_provider_core_queue_len(void);
 uint64_t m23_provider_core_high_water(void);
 uint64_t m23_provider_core_next_sequence(void);
@@ -74,4 +80,3 @@ uint64_t m23_provider_core_indication(void);
 uint64_t m23_provider_core_indication_sequence(void);
 uint64_t m23_provider_core_last_error(void);
 uint64_t m23_provider_core_cue_calls(void);
-

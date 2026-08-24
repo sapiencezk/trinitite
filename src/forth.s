@@ -3000,6 +3000,18 @@ defcode "M23COLD", 7, m23_cold_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "M23RST", 6, m23_clean_restart_word, 0
+    bl      m23_provider_core_restart_clean
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M23CLS", 6, m23_close_word, 0
+    bl      m23_provider_core_close
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "M23RX?", 6, m23_receive_word, 0
     bl      m23_provider_core_receive_framed
     sxtw    x0, w0
@@ -3030,6 +3042,7 @@ defcode "M23CKR?", 7, m23_checkpoint_restore_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+#ifdef M23_TEST_CONTROLS
 defcode "M23BD?", 6, m23_checkpoint_bad_word, 0
     bl      m23_provider_core_checkpoint_tamper
     sxtw    x0, w0
@@ -3047,6 +3060,7 @@ defcode "M23MAX?", 7, m23_max_word, 0
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
+#endif
 
 defcode "M23Q", 4, m23_queue_word, 0
     bl      m23_provider_core_queue_len

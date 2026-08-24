@@ -54,7 +54,10 @@ static int g_high_water_valid;
 static uint64_t g_epoch;
 static uint64_t g_next_sequence;
 static uint64_t g_authority_floor;
-static uint64_t g_rate_count;
+/* Ingress work and outbound publication admission are separate budgets. */
+static uint64_t g_ingress_rate_count;
+static uint64_t g_outbound_rate_count;
+static uint64_t g_outbound_rate_deadline;
 static uint64_t g_last_indication;
 static uint64_t g_last_indication_sequence;
 static uint64_t g_last_error;
@@ -74,6 +77,7 @@ static uint64_t g_checkpoint_epoch;
 static uint64_t g_checkpoint_high_water;
 static uint64_t g_checkpoint_next_sequence;
 static uint64_t g_checkpoint_rate_count;
+static uint64_t g_checkpoint_rate_remaining;
 
 static const cue_bounded_limits_t M23_CUE_LIMITS = {
     .max_input_bytes = 512,
@@ -230,7 +234,9 @@ int m23_provider_core_init(void)
     g_epoch = 0;
     g_next_sequence = 0;
     g_authority_floor = M23_INITIAL_FLOOR;
-    g_rate_count = 0;
+    g_ingress_rate_count = 0;
+    g_outbound_rate_count = 0;
+    g_outbound_rate_deadline = 0;
     g_last_indication = 0;
     g_last_indication_sequence = 0;
     g_last_error = M23_ERR_NONE;
@@ -257,7 +263,9 @@ int m23_provider_core_arm(void)
     g_next_sequence = 1;
     g_high_water = 0;
     g_high_water_valid = 0;
-    g_rate_count = 0;
+    g_ingress_rate_count = 0;
+    g_outbound_rate_count = 0;
+    g_outbound_rate_deadline = 0;
     g_state = M23_STATE_ARMED;
     g_last_error = M23_ERR_NONE;
     return 0;
@@ -274,7 +282,33 @@ int m23_provider_core_cold(void)
     g_high_water_valid = 0;
     g_queue_head = 0;
     g_queue_count = 0;
-    g_rate_count = 0;
+    g_ingress_rate_count = 0;
+    g_outbound_rate_count = 0;
+    g_outbound_rate_deadline = 0;
+    /* A cold/unclean restart has no usable clean checkpoint. */
+    g_checkpoint_valid = 0;
+    g_checkpoint_magic = 0;
+    g_last_error = M23_ERR_NONE;
+    return 0;
+}
+
+int m23_provider_core_restart_clean(void)
+{
+    if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+    if (g_state != M23_STATE_ARMED || g_queue_count != 0 || !g_checkpoint_valid) {
+        reject(M23_ERR_CHECKPOINT_BUSY); return -1;
+    }
+    g_authority_floor = g_epoch;
+    g_state = M23_STATE_UNARMED;
+    g_epoch = 0;
+    g_next_sequence = 0;
+    g_high_water = 0;
+    g_high_water_valid = 0;
+    g_queue_head = 0;
+    g_queue_count = 0;
+    g_ingress_rate_count = 0;
+    g_outbound_rate_count = 0;
+    g_outbound_rate_deadline = 0;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
@@ -313,6 +347,11 @@ static uint64_t target_counter_deadline(void)
     return now > UINT64_MAX - freq ? UINT64_MAX : now + freq;
 }
 
+static uint64_t target_counter_remaining(uint64_t deadline, uint64_t now)
+{
+    return deadline > now ? deadline - now : 0;
+}
+
 int m23_provider_core_receive_framed(void)
 {
     uint64_t rejects_before;
@@ -345,10 +384,10 @@ int m23_provider_core_receive_framed(void)
     if (i2_rx_payload_len() > M23_CUE_LIMITS.max_input_bytes) {
         i2_rx_discard_ready(); reject(M23_ERR_FRAME_LENGTH); return -1;
     }
-    if (g_rate_count >= M23_RATE_CAP) {
+    if (g_ingress_rate_count >= M23_RATE_CAP) {
         i2_rx_discard_ready(); reject(M23_ERR_FRAME_RATE); return -1;
     }
-    g_rate_count++;
+    g_ingress_rate_count++;
     if (!i2_rx_take_limited(&product, &M23_CUE_LIMITS)) {
         reject(M23_ERR_CUE); return -1;
     }
@@ -386,7 +425,9 @@ int m23_provider_core_rotate(void)
     g_next_sequence = 1;
     g_high_water = 0;
     g_high_water_valid = 0;
-    g_rate_count = 0;
+    g_ingress_rate_count = 0;
+    g_outbound_rate_count = 0;
+    g_outbound_rate_deadline = 0;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
@@ -410,7 +451,9 @@ int m23_provider_core_checkpoint_save(void)
         g_checkpoint_schema[i] = M23_SCHEMA[i];
     g_checkpoint_high_water = g_high_water;
     g_checkpoint_next_sequence = g_next_sequence;
-    g_checkpoint_rate_count = g_rate_count;
+    g_checkpoint_rate_count = g_outbound_rate_count;
+    g_checkpoint_rate_remaining = target_counter_remaining(
+        g_outbound_rate_deadline, target_counter_now());
     g_checkpoint_valid = 1;
     g_last_error = M23_ERR_NONE;
     return 0;
@@ -427,7 +470,8 @@ int m23_provider_core_checkpoint_restore(void)
         || g_checkpoint_peer_device != M23_SENDER_DEVICE
         || g_checkpoint_key_id != M23_KEY_ID
         || g_checkpoint_epoch == 0 || g_checkpoint_next_sequence == 0
-        || g_checkpoint_rate_count > M23_RATE_CAP) {
+        || g_checkpoint_rate_count > M23_RATE_CAP
+        || g_checkpoint_rate_remaining > target_counter_freq()) {
         reject(M23_ERR_CHECKPOINT_INVALID); return -1;
     }
     for (size_t i = 0; i < sizeof M23_BINDING; i++)
@@ -442,18 +486,24 @@ int m23_provider_core_checkpoint_restore(void)
     g_high_water = g_checkpoint_high_water;
     g_high_water_valid = g_checkpoint_high_water != 0;
     g_next_sequence = g_checkpoint_next_sequence;
-    g_rate_count = g_checkpoint_rate_count;
+    g_outbound_rate_count = g_checkpoint_rate_count;
+    uint64_t now = target_counter_now();
+    g_outbound_rate_deadline = g_checkpoint_rate_remaining == 0
+        ? 0 : (now > UINT64_MAX - g_checkpoint_rate_remaining
+            ? UINT64_MAX : now + g_checkpoint_rate_remaining);
     g_state = g_next_sequence == UINT64_MAX ? M23_STATE_EXHAUSTED : M23_STATE_ARMED;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
 
+#ifdef M23_TEST_CONTROLS
 int m23_provider_core_checkpoint_tamper(void)
 {
     if (!g_checkpoint_valid) { reject(M23_ERR_CHECKPOINT_INVALID); return -1; }
     g_checkpoint_version = M23_VERSION + 1u;
     return 0;
 }
+#endif
 
 int m23_provider_core_publish(void)
 {
@@ -461,22 +511,41 @@ int m23_provider_core_publish(void)
     if (g_state == M23_STATE_UNARMED) { reject(M23_ERR_SESSION_UNARMED); return -1; }
     if (g_state == M23_STATE_EXHAUSTED) { reject(M23_ERR_SEQUENCE_EXHAUSTED); return -1; }
     if (g_state == M23_STATE_CLOSED) { reject(M23_ERR_CLOSED); return -1; }
-    if (g_rate_count >= M23_RATE_CAP) { reject(M23_ERR_FRAME_RATE); return -1; }
-    g_rate_count++;
+    uint64_t now = target_counter_now();
+    if (g_outbound_rate_deadline == 0 || now >= g_outbound_rate_deadline) {
+        g_outbound_rate_count = 0;
+        g_outbound_rate_deadline = target_counter_deadline();
+    }
+    if (g_outbound_rate_count >= M23_RATE_CAP) {
+        reject(M23_ERR_FRAME_RATE); return -1;
+    }
     if (g_next_sequence == UINT64_MAX) {
         g_state = M23_STATE_EXHAUSTED;
     } else {
         g_next_sequence++;
     }
+    g_outbound_rate_count++;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
 
+#ifdef M23_TEST_CONTROLS
 int m23_provider_core_set_next_max_minus_one(void)
 {
     if (g_state != M23_STATE_ARMED) { reject(M23_ERR_SESSION_UNARMED); return -1; }
     g_next_sequence = UINT64_MAX - 1u;
-    g_rate_count = 0;
+    g_outbound_rate_count = 0;
+    g_outbound_rate_deadline = 0;
+    g_last_error = M23_ERR_NONE;
+    return 0;
+}
+#endif
+
+int m23_provider_core_close(void)
+{
+    if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
+    if (g_state == M23_STATE_CLOSED) return 0;
+    g_state = M23_STATE_CLOSED;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
