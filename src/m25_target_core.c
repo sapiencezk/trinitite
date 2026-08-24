@@ -475,6 +475,7 @@ int m25_target_checkpoint_restore(void)
     if (!direct_is(rest, 0) || !noun_is_direct(values[1]) || !noun_is_direct(values[2])
         || !noun_is_direct(values[3]) || !noun_is_direct(values[4])
         || direct_val(values[1]) == 0
+        || direct_val(values[1]) == UINT64_MAX
         || direct_val(values[4]) > 1
         || !runtime_identity_validate_gate(values[0], &g_identity, 0)
         || !noun_copy_checked(values[0], &staged)) goto reject;
