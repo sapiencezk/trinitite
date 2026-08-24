@@ -326,6 +326,14 @@ int m22_provider_core_receive_framed(void)
             return -1;
         }
     }
+    /* The idle/deadline exit is also the terminal poll for a partial frame.
+     * Force the ingress deadline check so the M22 seam reports and clears a
+     * truncated frame rather than leaving scanner state resident. */
+    i2_rx_check_timeout(UINT64_MAX);
+    if (i2_rx_reject_total() != rejects_before) {
+        reject(framed_reject_error());
+        return -1;
+    }
     if (!i2_rx_ready()) {
         reject(M22_ERR_NO_FRAME);
         return -1;
@@ -335,7 +343,9 @@ int m22_provider_core_receive_framed(void)
         reject(M22_ERR_FRAME_LENGTH);
         return -1;
     }
-    /* This bounded rate gate is before Cue, matching the host adapter order. */
+    /* This bounded per-initialized-test-epoch budget is before Cue.  The
+     * framed target seam has no wall-clock network provider; the host UDP
+     * adapter owns the live one-second rate window. */
     if (g_rate_count >= M22_RATE_CAP) {
         i2_rx_discard_ready();
         reject(M22_ERR_FRAME_RATE);
