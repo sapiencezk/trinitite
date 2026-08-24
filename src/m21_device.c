@@ -39,6 +39,10 @@ static uint64_t g_sequence;
 static uint64_t g_faults;
 static uint64_t g_last_error;
 static int g_active;
+/* Target-only hostile control: fail exactly the next root reservation before
+ * it starts.  It verifies the terminal retirement path without weakening the
+ * real allocator or treating a test hook as a runtime policy. */
+static int g_test_publish_reservation_fail_once;
 static uint8_t g_checkpoint_bytes[M21_CHECKPOINT_MAX_BYTES];
 static uint64_t g_checkpoint_len;
 static int g_checkpoint_valid;
@@ -49,8 +53,20 @@ static noun g_plan_anchor;
 static int live_instance(noun gate, uint64_t wanted, noun *out);
 static int source_samples_match_candidate(noun gate, uint64_t event,
                                           uint64_t ordinal, noun samples);
-static int root_unchanged(noun gate0, noun gate1, noun queue0, noun queue1,
-                          uint64_t n0, uint64_t n1, uint64_t sequence);
+
+typedef struct {
+    noun gate0, gate1, queue0, queue1;
+    uint64_t n0, n1, cursor, sequence, faults, last_error;
+} root_snapshot_t;
+
+static root_snapshot_t root_snapshot(void);
+static int root_unchanged(const root_snapshot_t *before);
+static int root_restore(const root_snapshot_t *before);
+static int publish_root(noun next_gate0, noun next_gate1,
+                        noun next_queue0, noun next_queue1,
+                        uint64_t next_queue_n0, uint64_t next_queue_n1,
+                        uint64_t next_sequence, uint64_t next_cursor,
+                        uint64_t next_faults, uint64_t next_error);
 
 static int take(noun n, noun *head, noun *tail)
 {
@@ -319,6 +335,10 @@ static int publish_root(noun next_gate0, noun next_gate1,
                         uint64_t next_faults, uint64_t next_error)
 {
     noun gate0, gate1, queue0, queue1;
+    if (g_test_publish_reservation_fail_once) {
+        g_test_publish_reservation_fail_once = 0;
+        return 0;
+    }
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
     if (!noun_copy_checked(next_gate0, &gate0)
         || !noun_copy_checked(next_gate1, &gate1)
@@ -363,6 +383,19 @@ static int retire_head(unsigned slot, noun tail, uint64_t error)
     return publish_root(g_gate[0], g_gate[1], next_queue0, next_queue1,
                         next_n0, next_n1, g_sequence, 1u - slot,
                         g_faults + 1u, error);
+}
+
+/* A bridge/product fault must never retry its source event.  The normal
+ * bounded path retires that head through a fresh complete device root.  If
+ * that root itself cannot be copied (persistent exhaustion), no second
+ * mutable attempt is safe: fence this authority with the old root intact.
+ * This is fail-closed supervisor fencing, not a claim of power-loss atomicity.
+ */
+static int terminal_retire_or_fence(unsigned slot, noun tail, uint64_t error)
+{
+    if (retire_head(slot, tail, error)) return 1;
+    g_active = 0;
+    return 0;
 }
 
 static int publish_no_egress(unsigned slot, noun candidate, noun old_tail)
@@ -438,6 +471,7 @@ int m21_device_boot(noun source_gate, const runtime_identity_t *source_id,
     g_queue[0] = g_queue[1] = NOUN_ZERO; g_queue_n[0] = g_queue_n[1] = 0;
     g_identity[0] = *source_id; g_identity[1] = sink_id;
     g_cursor = 0; g_sequence = 0; g_faults = 0; g_last_error = 0;
+    g_test_publish_reservation_fail_once = 0;
     g_tag_external = cord_from_bytes("i2-external", 11);
     g_tag_ei = cord_from_bytes("i2-ei", 5);
     g_tag_device_ei = cord_from_bytes("i2-device-ei", 12);
@@ -480,17 +514,17 @@ int m21_device_step(void)
     if (slot == 1) {
         heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
         if (!carrier_to_device_ei(head, &event, g_sequence)) {
-            (void)retire_head(slot, tail, 1);
+            (void)terminal_retire_or_fence(slot, tail, 1);
             return -1;
         }
     } else event = head;
     if (!slam_slot(slot, event, slot == 0, &candidate, &causes)) {
-        (void)retire_head(slot, tail, 2);
+        (void)terminal_retire_or_fence(slot, tail, 2);
         return -1;
     }
     if (slot == 1) {
         if (!direct_is(causes, 0) || !publish_no_egress(slot, candidate, tail)) {
-            (void)retire_head(slot, tail, 3);
+            (void)terminal_retire_or_fence(slot, tail, 3);
             return -1;
         }
         return 1;
@@ -508,7 +542,7 @@ int m21_device_step(void)
                           g_sequence + 1u, 1, 1, &carrier)
         || !publish_egress(candidate, tail, carrier)) {
         /* Post-slam bridge failure: retire source head, publish no candidate. */
-        (void)retire_head(0, tail, 4);
+        (void)terminal_retire_or_fence(0, tail, 4);
         return -1;
     }
     return 1;
@@ -693,13 +727,12 @@ int m21_device_checkpoint_restore(void)
 
 int m21_device_checkpoint_tamper_refuses(void)
 {
-    noun gate0 = g_gate[0], gate1 = g_gate[1], queue0 = g_queue[0], queue1 = g_queue[1];
-    uint64_t n0 = g_queue_n[0], n1 = g_queue_n[1], sequence = g_sequence;
+    root_snapshot_t before = root_snapshot();
     if (!g_checkpoint_valid || g_checkpoint_len == 0) return -1;
     g_checkpoint_bytes[0] ^= 1u;
     int rejected = m21_device_checkpoint_restore() != 0;
     g_checkpoint_bytes[0] ^= 1u;
-    return rejected && root_unchanged(gate0, gate1, queue0, queue1, n0, n1, sequence)
+    return rejected && root_unchanged(&before)
         ? 0 : -1;
 }
 
@@ -713,19 +746,39 @@ static int test_link1_samples(noun *out)
         && cons(second, NOUN_ZERO, &list) && cons(first, list, out);
 }
 
-static int root_unchanged(noun gate0, noun gate1, noun queue0, noun queue1,
-                          uint64_t n0, uint64_t n1, uint64_t sequence)
+static root_snapshot_t root_snapshot(void)
 {
-    return noun_eq(g_gate[0], gate0) && noun_eq(g_gate[1], gate1)
-        && noun_eq(g_queue[0], queue0) && noun_eq(g_queue[1], queue1)
-        && g_queue_n[0] == n0 && g_queue_n[1] == n1
-        && g_sequence == sequence;
+    root_snapshot_t snapshot = {
+        g_gate[0], g_gate[1], g_queue[0], g_queue[1],
+        g_queue_n[0], g_queue_n[1], g_cursor, g_sequence,
+        g_faults, g_last_error,
+    };
+    return snapshot;
+}
+
+static int root_unchanged(const root_snapshot_t *before)
+{
+    return before && noun_eq(g_gate[0], before->gate0)
+        && noun_eq(g_gate[1], before->gate1)
+        && noun_eq(g_queue[0], before->queue0)
+        && noun_eq(g_queue[1], before->queue1)
+        && g_queue_n[0] == before->n0 && g_queue_n[1] == before->n1
+        && g_cursor == before->cursor && g_sequence == before->sequence
+        && g_faults == before->faults && g_last_error == before->last_error;
+}
+
+static int root_restore(const root_snapshot_t *before)
+{
+    return before && publish_root(before->gate0, before->gate1,
+                                  before->queue0, before->queue1,
+                                  before->n0, before->n1, before->sequence,
+                                  before->cursor, before->faults,
+                                  before->last_error);
 }
 
 int m21_device_raw_ingress_refuses(void)
 {
-    noun gate0 = g_gate[0], gate1 = g_gate[1], queue0 = g_queue[0], queue1 = g_queue[1];
-    uint64_t n0 = g_queue_n[0], n1 = g_queue_n[1], sequence = g_sequence;
+    root_snapshot_t before = root_snapshot();
     noun raw;
     if (!g_active) return -1;
     heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
@@ -733,36 +786,74 @@ int m21_device_raw_ingress_refuses(void)
      * admission; it is rejected before either FIFO is changed. */
     if (!cons(g_tag_external, g_tag_carrier, &raw)
         || enqueue_source_external(raw) != -1) return -1;
-    return root_unchanged(gate0, gate1, queue0, queue1, n0, n1, sequence) ? 0 : -1;
+    return root_unchanged(&before) ? 0 : -1;
 }
 
 int m21_device_stale_carrier_refuses(void)
 {
     noun samples, carrier, event;
-    noun gate0 = g_gate[0], gate1 = g_gate[1], queue0 = g_queue[0], queue1 = g_queue[1];
-    uint64_t n0 = g_queue_n[0], n1 = g_queue_n[1], sequence = g_sequence;
+    root_snapshot_t before = root_snapshot();
     if (!g_active) return -1;
     heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
     if (!test_link1_samples(&samples)
         || !build_carrier(1, 2, 8, 1, samples, g_sequence, 2, 1, &carrier)) return -1;
     /* This is a complete typed carrier with only source generation stale. */
     if (carrier_to_device_ei(carrier, &event, g_sequence)) return -1;
-    return root_unchanged(gate0, gate1, queue0, queue1, n0, n1, sequence) ? 0 : -1;
+    return root_unchanged(&before) ? 0 : -1;
 }
 
 int m21_device_destination_full_refuses(void)
 {
-    noun samples, carrier, event;
-    noun gate0 = g_gate[0], gate1 = g_gate[1], queue0 = g_queue[0], queue1 = g_queue[1];
-    uint64_t n0 = g_queue_n[0], n1 = g_queue_n[1], sequence = g_sequence;
+    noun source_event, source_queue, samples, carrier, target_queue = NOUN_ZERO;
+    root_snapshot_t before, staged;
+    int passed = 0;
     if (!g_active) return -1;
+    before = root_snapshot();
     heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
-    if (!test_link1_samples(&samples)
-        || !build_carrier(1, 2, 8, 1, samples, g_sequence, 1, 1, &carrier)) return -1;
-    /* The normal parser accepts this private complete carrier at the current
-     * sequence.  A two-link batch at destination 15/16 still cannot reserve
-     * even its first append. */
-    if (!carrier_to_device_ei(carrier, &event, g_sequence)
-        || target_capacity_available(15, 2)) return -1;
-    return root_unchanged(gate0, gate1, queue0, queue1, n0, n1, sequence) ? 0 : -1;
+    if (!build_source_external(0, 0, &source_event)
+        || !cons(source_event, NOUN_ZERO, &source_queue)
+        || !test_link1_samples(&samples)
+        || !build_carrier(1, 2, 8, 1, samples, g_sequence + 1u, 1, 1, &carrier))
+        return -1;
+    /* Build a real 15-deep destination FIFO, then drive a genuine source
+     * egress through the normal scheduler.  The carrier entries are valid
+     * private pending work; they are never serviced by this focused probe. */
+    for (unsigned i = 0; i < 15; i++)
+        if (!cons(carrier, target_queue, &target_queue)) return -1;
+    if (!publish_root(g_gate[0], g_gate[1], source_queue, target_queue,
+                      1, 15, g_sequence, 0, g_faults, g_last_error))
+        return -1;
+    staged = root_snapshot();
+    if (m21_device_step() == -1
+        && noun_eq(g_gate[0], staged.gate0) && noun_eq(g_gate[1], staged.gate1)
+        && noun_eq(g_queue[1], staged.queue1) && g_queue_n[0] == 0
+        && g_queue_n[1] == 15 && g_sequence == staged.sequence
+        && g_faults == staged.faults + 1u && g_last_error == 4)
+        passed = 1;
+    return passed && root_restore(&before) ? 0 : -1;
+}
+
+int m21_device_publish_reservation_fault_refuses(void)
+{
+    noun source_event;
+    root_snapshot_t before, staged;
+    int passed = 0;
+    if (!g_active) return -1;
+    before = root_snapshot();
+    heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
+    if (!build_source_external(1, 1, &source_event)
+        || enqueue_source_external(source_event) != 0) return -1;
+    staged = root_snapshot();
+    /* Fail only the final root reservation.  The fallback terminal root must
+     * retire the source head and preserve both gates, the target FIFO, and
+     * the delivery sequence. */
+    g_test_publish_reservation_fail_once = 1;
+    if (m21_device_step() == -1
+        && noun_eq(g_gate[0], staged.gate0) && noun_eq(g_gate[1], staged.gate1)
+        && noun_eq(g_queue[1], staged.queue1) && g_queue_n[0] == 0
+        && g_queue_n[1] == staged.n1 && g_sequence == staged.sequence
+        && g_faults == staged.faults + 1u && g_last_error == 4)
+        passed = 1;
+    g_test_publish_reservation_fail_once = 0;
+    return passed && root_restore(&before) ? 0 : -1;
 }

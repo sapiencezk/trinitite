@@ -17,8 +17,11 @@ uint64_t m21_device_last_error(void);
 int m21_device_checkpoint_capture(void);
 int m21_device_checkpoint_restore(void);
 int m21_device_checkpoint_tamper_refuses(void);
-/* Focused hostile controls: no raw ingress, stale carrier, or full-tail
- * preflight can change the live two-slot root. */
+/* Focused hostile controls: no raw ingress or stale carrier can change the
+ * live two-slot root.  The full-tail and root-reservation probes execute a
+ * real source bridge fault, verify its terminal retirement, then restore the
+ * private setup root used by the probe. */
 int m21_device_raw_ingress_refuses(void);
 int m21_device_stale_carrier_refuses(void);
 int m21_device_destination_full_refuses(void);
+int m21_device_publish_reservation_fault_refuses(void);

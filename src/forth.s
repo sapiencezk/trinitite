@@ -2830,7 +2830,7 @@ defcode "M2PREP", 6, m2_prepare_pill, 0
 // EI, route, egress, or inter-resource carrier nouns.
 // M21IN ( a b -- status ) / M21STEP ( -- status ) / M21AIN@ ( -- bool|-1 )
 // M21BIN@ ( -- bool|-1 ) / M21Q ( slot -- count|-1 ) / M21ERR@ ( -- code )
-// M21RAW?/M21ST?/M21FL? ( -- status ) are focused hostile controls.
+// M21RAW?/M21ST?/M21FL?/M21RF? ( -- status ) are focused hostile controls.
 // M21CKS?/M21CKR? capture/restore the fixed two-slot checkpoint noun;
 // M21BD? proves tamper refusal retains the current root.
 defcode "M21IN", 5, m21_input_word, 0
@@ -2884,6 +2884,12 @@ defcode "M21ST?", 6, m21_stale_word, 0
 
 defcode "M21FL?", 6, m21_full_word, 0
     bl      m21_device_destination_full_refuses
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M21RF?", 6, m21_reservation_fault_word, 0
+    bl      m21_device_publish_reservation_fault_refuses
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
