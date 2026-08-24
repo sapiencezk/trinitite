@@ -752,6 +752,11 @@ int m23_provider_core_receive_native(void)
         if (transport != M24_NATIVE_NO_PACKET) break;
     }
     if (transport != M24_NATIVE_OK) { reject(native_transport_error(transport)); return -1; }
+    /* One bounded admission-work unit is charged for every target-local
+     * datagram that reaches the native authority seam, before HMAC/Cue or
+     * session admission.  Refusals remain root/replay/application-atomic,
+     * while repeated malformed traffic cannot receive unlimited codec work. */
+    g_ingress_work_count++;
     const uint8_t *wire = datagram.payload;
     uint32_t wire_len = datagram.payload_len;
     if (!wire || wire_len < M24_WIRE_HEADER_LEN || wire_len > M24_WIRE_MAX_DATAGRAM) {
@@ -801,7 +806,6 @@ int m23_provider_core_receive_native(void)
         return -1;
     }
     int result = admit_sequence_value(sequence, epoch, value);
-    if (result == 0) g_ingress_work_count++;
     if (noun_tx_active()) noun_tx_abort();
     return result;
 }

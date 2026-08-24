@@ -3236,6 +3236,12 @@ defcode "M24RXOVR", 8, m24_virtio_test_overadvance_rx_used_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "M24RXLEN", 8, m24_virtio_test_overlong_rx_used_word, 0
+    bl      virtio_net_test_overlong_rx_used
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "M24TXBAD", 8, m24_virtio_test_corrupt_tx_used_word, 0
     bl      virtio_net_test_corrupt_tx_used
     sxtw    x0, w0

@@ -31,6 +31,7 @@ int virtio_net_test_hold_tx(void);
 int virtio_net_test_release_tx(void);
 int virtio_net_test_corrupt_rx_used(void);
 int virtio_net_test_overadvance_rx_used(void);
+int virtio_net_test_overlong_rx_used(void);
 int virtio_net_test_corrupt_tx_used(void);
 int virtio_net_test_overlong_tx_used(void);
 #endif

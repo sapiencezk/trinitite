@@ -87,6 +87,7 @@ static int g_tx_busy;
 static int g_tx_completion_hidden;
 static int g_test_rx_bad;
 static int g_test_rx_overadvance;
+static int g_test_rx_overlong;
 static int g_test_tx_bad;
 static int g_test_tx_overlong;
 #endif
@@ -136,7 +137,7 @@ int virtio_net_init(void)
     g_tx_avail_idx = 0; g_rx_packets = 0; g_tx_packets = 0; g_last_error = 0;
 #ifdef M23_TEST_CONTROLS
     g_tx_completion_hidden = 0;
-    g_test_rx_bad = 0; g_test_rx_overadvance = 0;
+    g_test_rx_bad = 0; g_test_rx_overadvance = 0; g_test_rx_overlong = 0;
     g_test_tx_bad = 0; g_test_tx_overlong = 0;
 #endif
     if (PLATFORM_VIRTIO_MMIO_BASE == 0 || MMIO(REG_MAGIC) != 0x74726976u
@@ -201,7 +202,8 @@ virtio_net_status_t virtio_net_receive(uint8_t *out, uint32_t out_cap,
     uint16_t used = g_rx_used.idx;
     barrier();
 #ifdef M23_TEST_CONTROLS
-    if (used == g_rx_used_seen && !g_test_rx_bad && !g_test_rx_overadvance) {
+    if (used == g_rx_used_seen && !g_test_rx_bad && !g_test_rx_overadvance
+        && !g_test_rx_overlong) {
         cpu_relax_rx(); return VIRTIO_NET_NO_PACKET;
     }
 #else
@@ -211,7 +213,8 @@ virtio_net_status_t virtio_net_receive(uint8_t *out, uint32_t out_cap,
 #ifdef M23_TEST_CONTROLS
     int test_rx_bad = g_test_rx_bad;
     int test_rx_overadvance = g_test_rx_overadvance;
-    g_test_rx_bad = 0; g_test_rx_overadvance = 0;
+    int test_rx_overlong = g_test_rx_overlong;
+    g_test_rx_bad = 0; g_test_rx_overadvance = 0; g_test_rx_overlong = 0;
     if (test_rx_bad) delta = 1;
     if (test_rx_overadvance) delta = RING_COUNT + 1u;
 #endif
@@ -229,12 +232,17 @@ virtio_net_status_t virtio_net_receive(uint8_t *out, uint32_t out_cap,
             candidate.id = RING_COUNT;
             candidate.len = 0;
         }
+        if (test_rx_overlong && offset == 0) {
+            candidate.id = 0;
+            candidate.len = g_rx_desc[0].len + 1u;
+        }
 #endif
         uint16_t bit = candidate.id < RING_COUNT
             ? (uint16_t)(1u << candidate.id) : 0;
         if (candidate.id >= RING_COUNT || bit == 0
             || (g_rx_posted_mask & bit) == 0 || (batch_ids & bit) != 0
             || candidate.len < RX_NET_HEADER_BYTES
+            || candidate.len > g_rx_desc[candidate.id].len
             || candidate.len - RX_NET_HEADER_BYTES > out_cap) {
             g_last_error = 5;
             g_ready = 0;
@@ -351,6 +359,13 @@ int virtio_net_test_overadvance_rx_used(void)
 {
     if (!g_ready) return -1;
     g_test_rx_overadvance = 1;
+    return 0;
+}
+
+int virtio_net_test_overlong_rx_used(void)
+{
+    if (!g_ready) return -1;
+    g_test_rx_overlong = 1;
     return 0;
 }
 
