@@ -535,6 +535,10 @@ int m23_provider_core_checkpoint_restore(void)
         || g_checkpoint_wire_minor != M23_WIRE_MINOR
         || g_checkpoint_message_kind != M23_MESSAGE_KIND
         || g_checkpoint_epoch == 0 || g_checkpoint_next_sequence == 0
+        /* A checkpoint captured before a local rotation is stale.  Clean
+         * restore may equal the retained floor (the checkpoint's own epoch),
+         * but it must never move authority backwards. */
+        || g_checkpoint_epoch < g_authority_floor
         || g_checkpoint_rate_count > M23_RATE_CAP
         || (g_checkpoint_rate_count == 0 && g_checkpoint_rate_remaining != 0)
         || g_checkpoint_rate_remaining > target_counter_freq()) {
