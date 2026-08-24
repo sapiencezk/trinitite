@@ -804,33 +804,43 @@ int m21_device_stale_carrier_refuses(void)
 
 int m21_device_destination_full_refuses(void)
 {
-    noun source_event, source_queue, samples, carrier, target_queue = NOUN_ZERO;
+    noun head, tail, candidate, causes, cause, rest, source_samples;
+    noun target_samples, carrier, target_queue = NOUN_ZERO;
+    uint64_t event_id, ordinal, target_event, link_id;
     root_snapshot_t before, staged;
     int passed = 0;
-    if (!g_active) return -1;
+    if (!g_active || g_queue_n[0] != 0 || g_queue_n[1] != 0) return -1;
     before = root_snapshot();
-    heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
-    if (!build_source_external(0, 0, &source_event)
-        || !cons(source_event, NOUN_ZERO, &source_queue)
-        || !test_link1_samples(&samples)
-        || !build_carrier(1, 2, 8, 1, samples, g_sequence + 1u, 1, 1, &carrier))
+    if (m21_device_enqueue_source_bool(1, 1) != 0) return -1;
+    /* This is the same pure-Nock source slam and classified egress/product
+     * validation used by m21_device_step.  The probe then injects a real
+     * resident 16-entry target FIFO immediately before publish_egress, so
+     * the actual bridge preflight—not a standalone predicate—fails. */
+    if (!queue_head_tail(g_queue[0], &head, &tail)
+        || !slam_slot(0, head, 1, &candidate, &causes)
+        || !take(causes, &cause, &rest) || !direct_is(rest, 0)
+        || !unwrap_egress(cause, &event_id, &ordinal, &source_samples)
+        || !source_samples_match_candidate(candidate, event_id, ordinal, source_samples)
+        || !samples_for_link(source_samples, event_id, ordinal, &target_samples,
+                             &target_event, &link_id)
+        || !build_carrier(link_id, event_id, ordinal, target_event, target_samples,
+                          g_sequence + 1u, 1, 1, &carrier))
         return -1;
-    /* Build a real 15-deep destination FIFO, then drive a genuine source
-     * egress through the normal scheduler.  The carrier entries are valid
-     * private pending work; they are never serviced by this focused probe. */
-    for (unsigned i = 0; i < 15; i++)
+    heap_set_mode(HEAP_MODE_PERSIST);
+    for (unsigned i = 0; i < 16; i++)
         if (!cons(carrier, target_queue, &target_queue)) return -1;
-    if (!publish_root(g_gate[0], g_gate[1], source_queue, target_queue,
-                      1, 15, g_sequence, 0, g_faults, g_last_error))
-        return -1;
+    g_queue[1] = target_queue;
+    g_queue_n[1] = 16;
     staged = root_snapshot();
-    if (m21_device_step() == -1
+    if (!publish_egress(candidate, tail, carrier)
+        && terminal_retire_or_fence(0, tail, 4)
         && noun_eq(g_gate[0], staged.gate0) && noun_eq(g_gate[1], staged.gate1)
         && noun_eq(g_queue[1], staged.queue1) && g_queue_n[0] == 0
-        && g_queue_n[1] == 15 && g_sequence == staged.sequence
+        && g_queue_n[1] == 16 && g_sequence == staged.sequence
         && g_faults == staged.faults + 1u && g_last_error == 4)
         passed = 1;
-    return passed && root_restore(&before) ? 0 : -1;
+    int restored = root_restore(&before);
+    return passed && restored ? 0 : -1;
 }
 
 int m21_device_publish_reservation_fault_refuses(void)
@@ -855,5 +865,6 @@ int m21_device_publish_reservation_fault_refuses(void)
         && g_faults == staged.faults + 1u && g_last_error == 4)
         passed = 1;
     g_test_publish_reservation_fail_once = 0;
-    return passed && root_restore(&before) ? 0 : -1;
+    int restored = root_restore(&before);
+    return passed && restored ? 0 : -1;
 }
