@@ -258,18 +258,15 @@ static int parse_product(noun product, uint64_t *sequence, uint64_t *epoch,
 
 int m23_provider_core_init(void)
 {
+    m23_session_root_t initial = {0};
     g_product_tag = cord_from_bytes("aethernet-0-adapter-product-v1", 30);
     g_publication_tag = cord_from_bytes("publication-envelope-v1", 23);
     g_publish_event_tag = cord_from_bytes("PUBLISH_1", 9);
     g_raw_carrier_tag = cord_from_bytes("i2-inter-resource-v1", 20);
     g_bare_ei_tag = cord_from_bytes("i2-ei", 5);
-    g_queue_head = 0;
-    g_queue_count = 0;
-    g_high_water = 0;
-    g_high_water_valid = 0;
-    g_epoch = 0;
-    g_next_sequence = 0;
-    g_authority_floor = M23_INITIAL_FLOOR;
+    initial.authority_floor = M23_INITIAL_FLOOR;
+    initial.state = M23_STATE_UNARMED;
+    g_root = initial;
     g_ingress_work_count = 0;
     g_outbound_rate_count = 0;
     g_outbound_rate_deadline = 0;
@@ -281,7 +278,6 @@ int m23_provider_core_init(void)
     g_active = noun_is_atom(g_product_tag) && noun_is_atom(g_publication_tag)
         && noun_is_atom(g_publish_event_tag) && noun_is_atom(g_raw_carrier_tag)
         && noun_is_atom(g_bare_ei_tag);
-    g_state = M23_STATE_UNARMED;
     i2_rx_init();
     return g_active ? 0 : -1;
 }
@@ -295,14 +291,16 @@ int m23_provider_core_arm(void)
     if (epoch == 0 || epoch <= g_authority_floor) {
         reject(M23_ERR_EPOCH_NOT_NEWER); return -1;
     }
-    g_epoch = epoch;
-    g_next_sequence = 1;
-    g_high_water = 0;
-    g_high_water_valid = 0;
+    m23_session_root_t candidate = g_root;
+    candidate.epoch = epoch;
+    candidate.next_sequence = 1;
+    candidate.high_water = 0;
+    candidate.high_water_valid = 0;
     g_ingress_work_count = 0;
-    g_outbound_rate_count = 0;
-    g_outbound_rate_deadline = 0;
-    g_state = M23_STATE_ARMED;
+    candidate.outbound_rate_count = 0;
+    candidate.outbound_rate_deadline = 0;
+    candidate.state = M23_STATE_ARMED;
+    g_root = candidate;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
@@ -310,17 +308,19 @@ int m23_provider_core_arm(void)
 int m23_provider_core_cold(void)
 {
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
-    g_authority_floor = g_epoch;
-    g_state = M23_STATE_UNARMED;
-    g_epoch = 0;
-    g_next_sequence = 0;
-    g_high_water = 0;
-    g_high_water_valid = 0;
-    g_queue_head = 0;
-    g_queue_count = 0;
+    m23_session_root_t candidate = g_root;
+    candidate.authority_floor = g_epoch;
+    candidate.state = M23_STATE_UNARMED;
+    candidate.epoch = 0;
+    candidate.next_sequence = 0;
+    candidate.high_water = 0;
+    candidate.high_water_valid = 0;
+    candidate.queue_head = 0;
+    candidate.queue_count = 0;
     g_ingress_work_count = 0;
-    g_outbound_rate_count = 0;
-    g_outbound_rate_deadline = 0;
+    candidate.outbound_rate_count = 0;
+    candidate.outbound_rate_deadline = 0;
+    g_root = candidate;
     /* A cold/unclean restart has no usable clean checkpoint. */
     g_checkpoint_valid = 0;
     g_checkpoint_magic = 0;
@@ -334,17 +334,19 @@ int m23_provider_core_restart_clean(void)
     if (g_state != M23_STATE_ARMED || g_queue_count != 0 || !g_checkpoint_valid) {
         reject(M23_ERR_CHECKPOINT_BUSY); return -1;
     }
-    g_authority_floor = g_epoch;
-    g_state = M23_STATE_UNARMED;
-    g_epoch = 0;
-    g_next_sequence = 0;
-    g_high_water = 0;
-    g_high_water_valid = 0;
-    g_queue_head = 0;
-    g_queue_count = 0;
+    m23_session_root_t candidate = g_root;
+    candidate.authority_floor = g_epoch;
+    candidate.state = M23_STATE_UNARMED;
+    candidate.epoch = 0;
+    candidate.next_sequence = 0;
+    candidate.high_water = 0;
+    candidate.high_water_valid = 0;
+    candidate.queue_head = 0;
+    candidate.queue_count = 0;
     g_ingress_work_count = 0;
-    g_outbound_rate_count = 0;
-    g_outbound_rate_deadline = 0;
+    candidate.outbound_rate_count = 0;
+    candidate.outbound_rate_deadline = 0;
+    g_root = candidate;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
@@ -470,14 +472,16 @@ int m23_provider_core_rotate(void)
     }
     uint64_t next_epoch = g_epoch + 1u;
     if (next_epoch == 0 || next_epoch <= g_epoch) { reject(M23_ERR_EPOCH_NOT_NEWER); return -1; }
-    g_authority_floor = g_epoch;
-    g_epoch = next_epoch;
-    g_next_sequence = 1;
-    g_high_water = 0;
-    g_high_water_valid = 0;
+    m23_session_root_t candidate = g_root;
+    candidate.authority_floor = g_epoch;
+    candidate.epoch = next_epoch;
+    candidate.next_sequence = 1;
+    candidate.high_water = 0;
+    candidate.high_water_valid = 0;
     g_ingress_work_count = 0;
-    g_outbound_rate_count = 0;
-    g_outbound_rate_deadline = 0;
+    candidate.outbound_rate_count = 0;
+    candidate.outbound_rate_deadline = 0;
+    g_root = candidate;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
@@ -543,18 +547,20 @@ int m23_provider_core_checkpoint_restore(void)
         if (g_checkpoint_schema[i] != M23_SCHEMA[i]) {
             reject(M23_ERR_CHECKPOINT_INVALID); return -1;
         }
-    g_epoch = g_checkpoint_epoch;
-    g_high_water = g_checkpoint_high_water;
-    g_high_water_valid = g_checkpoint_high_water != 0;
-    g_next_sequence = g_checkpoint_next_sequence;
-    g_outbound_rate_count = g_checkpoint_rate_count;
+    m23_session_root_t candidate = g_root;
+    candidate.epoch = g_checkpoint_epoch;
+    candidate.high_water = g_checkpoint_high_water;
+    candidate.high_water_valid = g_checkpoint_high_water != 0;
+    candidate.next_sequence = g_checkpoint_next_sequence;
+    candidate.outbound_rate_count = g_checkpoint_rate_count;
     uint64_t now = target_counter_now();
-    g_outbound_rate_deadline = g_checkpoint_rate_remaining == 0
+    candidate.outbound_rate_deadline = g_checkpoint_rate_remaining == 0
         ? 0 : (now > UINT64_MAX - g_checkpoint_rate_remaining
             ? UINT64_MAX : now + g_checkpoint_rate_remaining);
     /* An ARMED checkpoint with next==UINT64_MAX still permits that final
      * sequence.  EXHAUSTED is entered only by the successful send itself. */
-    g_state = M23_STATE_ARMED;
+    candidate.state = M23_STATE_ARMED;
+    g_root = candidate;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
@@ -575,14 +581,14 @@ int m23_provider_core_publish(void)
     if (g_state == M23_STATE_EXHAUSTED) { reject(M23_ERR_SEQUENCE_EXHAUSTED); return -1; }
     if (g_state == M23_STATE_CLOSED) { reject(M23_ERR_CLOSED); return -1; }
     uint64_t now = target_counter_now();
-    if (g_outbound_rate_deadline == 0 || now >= g_outbound_rate_deadline) {
-        g_outbound_rate_count = 0;
-        g_outbound_rate_deadline = target_counter_deadline();
+    m23_session_root_t candidate = g_root;
+    if (candidate.outbound_rate_deadline == 0 || now >= candidate.outbound_rate_deadline) {
+        candidate.outbound_rate_count = 0;
+        candidate.outbound_rate_deadline = target_counter_deadline();
     }
-    if (g_outbound_rate_count >= M23_RATE_CAP) {
+    if (candidate.outbound_rate_count >= M23_RATE_CAP) {
         reject(M23_ERR_FRAME_RATE); return -1;
     }
-    m23_session_root_t candidate = g_root;
     if (candidate.next_sequence == UINT64_MAX) {
         candidate.state = M23_STATE_EXHAUSTED;
     } else {
@@ -598,9 +604,11 @@ int m23_provider_core_publish(void)
 int m23_provider_core_set_next_max_minus_one(void)
 {
     if (g_state != M23_STATE_ARMED) { reject(M23_ERR_SESSION_UNARMED); return -1; }
-    g_next_sequence = UINT64_MAX - 1u;
-    g_outbound_rate_count = 0;
-    g_outbound_rate_deadline = 0;
+    m23_session_root_t candidate = g_root;
+    candidate.next_sequence = UINT64_MAX - 1u;
+    candidate.outbound_rate_count = 0;
+    candidate.outbound_rate_deadline = 0;
+    g_root = candidate;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
@@ -610,7 +618,9 @@ int m23_provider_core_close(void)
 {
     if (!g_active) { reject(M23_ERR_NOT_INITIALIZED); return -1; }
     if (g_state == M23_STATE_CLOSED) return 0;
-    g_state = M23_STATE_CLOSED;
+    m23_session_root_t candidate = g_root;
+    candidate.state = M23_STATE_CLOSED;
+    g_root = candidate;
     g_last_error = M23_ERR_NONE;
     return 0;
 }
