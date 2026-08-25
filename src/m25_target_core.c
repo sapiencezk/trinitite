@@ -631,7 +631,11 @@ static int checkpoint_noun(noun *out)
 #else
     for (int i = 4; i >= 0; i--) if (!cons(values[i], tail, &tail)) return 0;
 #endif
+#ifdef M26_DUPLEX
+    return cons(cord_from_bytes("m26-checkpoint-v1", 17), tail, out);
+#else
     return cons(cord_from_bytes("m25-checkpoint-v2", 17), tail, out);
+#endif
 }
 
 int m25_target_checkpoint_capture(void)
@@ -661,7 +665,11 @@ int m25_target_checkpoint_restore(void)
     if (cue_bounded_bytes(g_checkpoint, g_checkpoint_len, &cue_i2_limits,
                           HEAP_MODE_PERSIST, &checkpoint) != CUE_BOUNDED_OK
         || !take(checkpoint, &tag, &rest)
+#ifdef M26_DUPLEX
+        || !noun_eq(tag, cord_from_bytes("m26-checkpoint-v1", 17))) goto reject;
+#else
         || !noun_eq(tag, cord_from_bytes("m25-checkpoint-v2", 17))) goto reject;
+#endif
 #ifdef M26_DUPLEX
     for (unsigned i = 0; i < 7; i++) if (!take(rest, &values[i], &rest)) goto reject;
 #else
