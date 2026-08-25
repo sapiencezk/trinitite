@@ -21,11 +21,17 @@
 #include "nock.h"
 #include "setjmp.h"
 #include "sha256.h"
+#ifdef M26_DUPLEX
+#include "runtime_stats.h"
+#endif
 
 #define M25_FIFO_CAPACITY 16u
 #define M25_HEADER_BYTES 128u
 #define M25_MAX_PAYLOAD 512u
 #define M25_MAX_DATAGRAM 1200u
+#ifdef M26_DUPLEX
+#define M26_RATE_LIMIT 64u
+#endif
 #define M25_OPS 2000000ULL
 #define M25_CELLS 128000ULL
 #define M25_CHECKPOINT_BYTES JAM_MAX_BYTES
@@ -52,6 +58,9 @@ static uint8_t g_fifo_value[M25_FIFO_CAPACITY];
 static uint64_t g_fifo_sequence[M25_FIFO_CAPACITY];
 static uint32_t g_fifo_head, g_fifo_count;
 static uint64_t g_next_sequence, g_high_water, g_last_indication, g_last_error;
+#ifdef M26_DUPLEX
+static uint64_t g_rate_window_start, g_rate_successes;
+#endif
 static int g_indication_valid, g_active, g_is_source, g_native_initialized;
 static uint8_t g_checkpoint[M25_CHECKPOINT_BYTES];
 static uint64_t g_checkpoint_len;
@@ -364,6 +373,9 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
     runtime_identity_set_capability_profile(capability_profile);
     g_pending_event = NOUN_ZERO; g_fifo_head = g_fifo_count = 0;
     g_next_sequence = 1; g_high_water = 0; g_last_indication = 0;
+#ifdef M26_DUPLEX
+    g_rate_window_start = 0; g_rate_successes = 0;
+#endif
     g_last_error = 0; g_indication_valid = 0; g_active = 1;
 #ifdef M26_DUPLEX
     g_is_source = 1;
@@ -489,6 +501,19 @@ int m25_target_step(void)
             || !build_publication(value, g_next_sequence, frame, &frame_len)) {
             g_last_error = 3; return -1;
         }
+#ifdef M26_DUPLEX
+        /* The native target has one statically admitted outbound direction.
+         * Rate accounting is a private candidate: a Nock/product/copy/native
+         * failure cannot consume the window or alter checkpoint state. */
+        uint64_t rate_now = runtime_counter_now();
+        uint64_t rate_start = g_rate_window_start;
+        uint64_t rate_count = g_rate_successes;
+        uint64_t rate_freq = runtime_counter_freq();
+        if (rate_start == 0 || (rate_freq != 0 && rate_now - rate_start >= rate_freq)) {
+            rate_start = rate_now; rate_count = 0;
+        }
+        if (rate_count >= M26_RATE_LIMIT) { g_last_error = 10; return -1; }
+#endif
         /* CNF is a second authoritative service transaction.  Build its
          * application/service candidate and reserve the persistent copy
          * before native TX becomes externally visible.  The send-success
@@ -510,6 +535,9 @@ int m25_target_step(void)
         if (status != M25_NATIVE_OK) { heap_persist_abort_tx(); g_last_error = 5; return -1; }
         /* No fallible work follows native completion. */
         g_gate = staged; g_pending_event = NOUN_ZERO; g_next_sequence++;
+#ifdef M26_DUPLEX
+        g_rate_window_start = rate_start; g_rate_successes = rate_count + 1;
+#endif
         heap_persist_commit_tx(); g_last_error = 0; return 1;
     }
     if (g_fifo_count == 0) return 0;
@@ -587,11 +615,22 @@ int m25_target_test_cnf_release(void)
 
 static int checkpoint_noun(noun *out)
 {
-    noun tail = NOUN_ZERO, values[5];
+    noun tail = NOUN_ZERO;
+#ifdef M26_DUPLEX
+    noun values[7];
+#else
+    noun values[5];
+#endif
     values[0] = g_gate; values[1] = direct(g_next_sequence);
     values[2] = direct(g_high_water); values[3] = direct(g_last_indication);
     values[4] = direct(g_indication_valid ? 1 : 0);
+#ifdef M26_DUPLEX
+    values[5] = direct(g_rate_window_start);
+    values[6] = direct(g_rate_successes);
+    for (int i = 6; i >= 0; i--) if (!cons(values[i], tail, &tail)) return 0;
+#else
     for (int i = 4; i >= 0; i--) if (!cons(values[i], tail, &tail)) return 0;
+#endif
     return cons(cord_from_bytes("m25-checkpoint-v2", 17), tail, out);
 }
 
@@ -612,13 +651,22 @@ int m25_target_checkpoint_restore(void)
 {
     if (!g_active || !g_checkpoint_valid || g_pending_event != NOUN_ZERO || g_fifo_count != 0
         || m25_native_tx_pending()) return -1;
-    noun checkpoint, tag, rest, values[5], staged;
+    noun checkpoint, tag, rest, staged;
+#ifdef M26_DUPLEX
+    noun values[7];
+#else
+    noun values[5];
+#endif
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
     if (cue_bounded_bytes(g_checkpoint, g_checkpoint_len, &cue_i2_limits,
                           HEAP_MODE_PERSIST, &checkpoint) != CUE_BOUNDED_OK
         || !take(checkpoint, &tag, &rest)
         || !noun_eq(tag, cord_from_bytes("m25-checkpoint-v2", 17))) goto reject;
+#ifdef M26_DUPLEX
+    for (unsigned i = 0; i < 7; i++) if (!take(rest, &values[i], &rest)) goto reject;
+#else
     for (unsigned i = 0; i < 5; i++) if (!take(rest, &values[i], &rest)) goto reject;
+#endif
     if (!direct_is(rest, 0) || !noun_is_direct(values[1]) || !noun_is_direct(values[2])
         || !noun_is_direct(values[3]) || !noun_is_direct(values[4])
         || direct_val(values[1]) == 0
@@ -626,9 +674,17 @@ int m25_target_checkpoint_restore(void)
         || direct_val(values[4]) > 1
         || !runtime_identity_validate_gate(values[0], &g_identity, 0)
         || !noun_copy_checked(values[0], &staged)) goto reject;
+#ifdef M26_DUPLEX
+    if (!noun_is_direct(values[5]) || !noun_is_direct(values[6])
+        || direct_val(values[5]) == UINT64_MAX || direct_val(values[6]) > M26_RATE_LIMIT
+        || (direct_val(values[5]) == 0 && direct_val(values[6]) != 0)) goto reject;
+#endif
     g_gate = staged; g_next_sequence = direct_val(values[1]);
     g_high_water = direct_val(values[2]); g_last_indication = direct_val(values[3]);
     g_indication_valid = direct_val(values[4]) != 0;
+#ifdef M26_DUPLEX
+    g_rate_window_start = direct_val(values[5]); g_rate_successes = direct_val(values[6]);
+#endif
     noun_tx_commit(); heap_persist_commit_tx(); return 0;
 reject:
     if (noun_tx_active()) noun_tx_abort();
