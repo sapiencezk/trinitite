@@ -37,7 +37,11 @@
 #define CORD_I2_RX_ORIGIN_V1 0x3178723269ULL
 #define CORD_I2_INTERNAL_ORIGIN_V1 0x316e693269ULL
 
+#ifdef M26_DUPLEX
+static const uint8_t M25_PSK[] = "m26-development-key-0123456789";
+#else
 static const uint8_t M25_PSK[] = "m25-development-key-0123456789";
+#endif
 
 static noun g_gate;
 static runtime_identity_t g_identity;
@@ -243,10 +247,19 @@ static int parse_frame(const uint8_t *raw, uint32_t len, uint64_t *sequence,
         || get16(raw + 10) == 0
         || get16(raw + 10) > M25_MAX_PAYLOAD
         || len != M25_HEADER_BYTES + get16(raw + 10)) return 0;
+#ifdef M26_DUPLEX
+    if (get64(raw + 12) != m25_admitted_plan.target_device_id) return 0;
+    if (get64(raw + 20) != m25_admitted_plan.source_device_id) return 0;
+    if (!equal_bytes(raw + 28, m25_admitted_plan.reverse_binding_id,
+                     sizeof m25_admitted_plan.reverse_binding_id)) return 0;
+    if (!equal_bytes(raw + 44, m25_admitted_plan.reverse_schema_digest,
+                     sizeof m25_admitted_plan.reverse_schema_digest)) return 0;
+#else
     if (get64(raw + 12) != m25_admitted_plan.source_device_id) return 0;
     if (get64(raw + 20) != m25_admitted_plan.target_device_id) return 0;
     if (!equal_bytes(raw + 28, m25_admitted_plan.binding_id, sizeof m25_admitted_plan.binding_id)) return 0;
     if (!equal_bytes(raw + 44, m25_admitted_plan.schema_digest, sizeof m25_admitted_plan.schema_digest)) return 0;
+#endif
     if (get32(raw + 76) != m25_admitted_plan.key_id) return 0;
     if (get64(raw + 80) != m25_admitted_plan.epoch) return 0;
     if (get64(raw + 88) == 0) return 0;
@@ -352,7 +365,11 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
     g_pending_event = NOUN_ZERO; g_fifo_head = g_fifo_count = 0;
     g_next_sequence = 1; g_high_water = 0; g_last_indication = 0;
     g_last_error = 0; g_indication_valid = 0; g_active = 1;
+#ifdef M26_DUPLEX
+    g_is_source = 1;
+#else
     g_is_source = rid == m25_admitted_plan.source_resource_id;
+#endif
     g_native_initialized = 0;
     g_test_cnf_failure = 0;
     g_checkpoint_len = 0; g_checkpoint_valid = 0;
@@ -377,13 +394,30 @@ int m25_target_init(void)
     }
     g_gate = persisted; heap_persist_commit_tx();
     g_native_initialized = 1;
+#ifdef M26_DUPLEX
+    /* Every M26 resource owns both local service instances.  The second INIT
+     * is staged from the first committed candidate before native RX/TX is
+     * enabled; no provider-side shortcut can initialize the seam. */
+    heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
+    if (!service_candidate(g_gate, m25_admitted_plan.subscribe_instance,
+                           1, 0, &staged)) return -1;
+    heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
+    if (!noun_copy_checked(staged, &persisted)) {
+        heap_persist_abort_tx(); return -1;
+    }
+    g_gate = persisted; heap_persist_commit_tx();
+#endif
     return 0;
 }
 
 int m25_target_restart_source(void)
 {
     noun staged;
+#ifdef M26_DUPLEX
+    if (!g_active || g_pending_event != NOUN_ZERO) return -1;
+#else
     if (!g_active || !g_is_source || g_pending_event != NOUN_ZERO) return -1;
+#endif
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
     if (cue_bounded_bytes(g_initial_jam, g_initial_jam_len, &cue_i2_limits,
                           HEAP_MODE_PERSIST, &staged) != CUE_BOUNDED_OK) {
@@ -396,7 +430,11 @@ int m25_target_restart_source(void)
 int m25_target_input(uint64_t a, uint64_t b)
 {
     noun event;
+#ifndef M26_DUPLEX
     if (!g_active || !g_is_source || g_pending_event != NOUN_ZERO) return -1;
+#else
+    if (!g_active || g_pending_event != NOUN_ZERO) return -1;
+#endif
     /* The bounded pending event is owned by the current persistent arena.
      * The later authoritative step flips to the other arena for the gate
      * candidate; keeping this event out of that flip preserves retry safety
@@ -411,7 +449,11 @@ int m25_target_poll(void)
 {
     m25_native_datagram_t datagram;
     uint64_t sequence, value;
+#ifndef M26_DUPLEX
     if (!g_active || g_is_source) return -1;
+#else
+    if (!g_active) return -1;
+#endif
     m25_native_status_t status = m25_native_receive(&datagram);
     if (status == M25_NATIVE_NO_PACKET) return 0;
     if (status != M25_NATIVE_OK || !parse_frame(datagram.payload, datagram.payload_len,
@@ -430,7 +472,11 @@ int m25_target_poll(void)
 int m25_target_step(void)
 {
     if (!g_active) return -1;
-    if (g_is_source) {
+    if (g_is_source
+#ifdef M26_DUPLEX
+        && g_fifo_count == 0
+#endif
+    ) {
         if (g_pending_event == NOUN_ZERO) return 0;
         /* UINT64_MAX is a terminal fence: never serialize a sequence that
          * would wrap to zero after the coherent send commit. */
@@ -470,10 +516,30 @@ int m25_target_step(void)
     uint32_t at = g_fifo_head; uint64_t value = g_fifo_value[at];
     heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
     noun event, candidate, causes, indicated;
+#ifdef M26_DUPLEX
+    /* The typed SUBSCRIBE IND is the authoritative service transition before
+     * the application delivery.  Keep the same order as the host endpoint:
+     * both candidates are private until the final persistent copy commits. */
+    noun service_state;
+    uint64_t effect_value;
+    if (!service_candidate(g_gate, m25_admitted_plan.subscribe_instance,
+                           4, value, &service_state)
+        || !build_delivery(value, &event)
+        || !slam_gate(service_state, event, 0, &candidate, &causes)
+        || !parse_intent(causes, &effect_value)) {
+        g_last_error = 6; return -1;
+    }
+    (void)effect_value;
+#else
     if (!build_delivery(value, &event) || !slam(event, &candidate, &causes)
-        || !direct_is(causes, 0)
-        || !service_candidate(candidate, m25_admitted_plan.subscribe_instance,
-                              4, value, &indicated)) { g_last_error = 6; return -1; }
+        || !direct_is(causes, 0)) { g_last_error = 6; return -1; }
+#endif
+#ifndef M26_DUPLEX
+    if (!service_candidate(candidate, m25_admitted_plan.subscribe_instance,
+                           4, value, &indicated)) { g_last_error = 6; return -1; }
+#else
+    indicated = candidate;
+#endif
     noun staged;
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
     if (!noun_copy_checked(indicated, &staged)) { heap_persist_abort_tx(); g_last_error = 7; return -1; }
@@ -485,10 +551,17 @@ int m25_target_step(void)
 int m25_target_service_tick(void)
 {
     if (!g_active || !g_native_initialized) return 0;
+#if defined(M26_DUPLEX)
+    {
+        int received = m25_target_poll();
+        if (received < 0 && received != -1) return received;
+    }
+#else
     if (!g_is_source) {
         int received = m25_target_poll();
         if (received < 0) return received;
     }
+#endif
     return m25_target_step();
 }
 

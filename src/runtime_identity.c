@@ -8,6 +8,9 @@
 #include "memory.h"
 #include "i2_admission_envelope.h"
 #include "i2_admission_metrics.h"
+#ifdef M26_DUPLEX
+#include "m26_admission.h"
+#endif
 
 #define PILL_I2_HEADER_SIZE (256u)
 #define PILL_I2_MAX_BYTES   PILL_SCRATCH_SIZE
@@ -453,7 +456,11 @@ static int m20_or_m21_base_program(noun program, noun *base_out)
     if (!take(program, &tag, &rest)
         || (!m17_cord_is(tag, "i2-m20-program")
             && !m17_cord_is(tag, "i2-m21-program")
-            && !m17_cord_is(tag, "i2-m25-program"))
+            && !m17_cord_is(tag, "i2-m25-program")
+#ifdef M26_DUPLEX
+            && !m17_cord_is(tag, "i2-m26-program")
+#endif
+            )
         || !take(rest, &base, &tables) || !noun_is_cell(tables))
         return 0;
     *base_out = base;
@@ -680,7 +687,11 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
 
     noun instance_states = NOUN_ZERO;
     if (i2_admission_program_known(id->program_hash)
-        || m25_admission_program_known(id->program_hash)) {
+        || m25_admission_program_known(id->program_hash)
+#ifdef M26_DUPLEX
+        || m26_admission_program_known(id->program_hash)
+#endif
+    ) {
         noun formula;
         if (!take(dynamic, &instance_states, &formula)
             || !noun_matches_hash(battery, id->battery_hash)
@@ -978,6 +989,10 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
         && identity.deployment_schema[0] == 1
         && identity.deployment_schema[1] == 3
         && capability_profile == RUNTIME_CAPABILITY_PROFILE_M25;
+#ifdef M26_DUPLEX
+    int m26_identity = m25_identity
+        && m26_admission_program_known(identity.program_hash);
+#endif
     if (digital_identity || m7_digital_identity || m25_identity) {
         closed_io = m7_digital_identity
             && capability_profile == RUNTIME_CAPABILITY_PROFILE_CLOSED_PROCESS_IO;
@@ -1007,6 +1022,11 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
             uint64_t pill_bytes = PILL_I2_HEADER_SIZE + len;
             int header_admitted = !i2_admission_pill_digest(base, pill_bytes, pill_digest)
                 ? 0
+#ifdef M26_DUPLEX
+                : m26_identity
+                ? m26_admission_lookup(identity.program_hash, identity.package_hash,
+                                       pill_digest, 0, 0)
+#endif
                 : m25_identity
                 ? m25_admission_lookup(identity.program_hash, identity.package_hash,
                                        pill_digest, 0, 0)
@@ -1037,6 +1057,11 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
         int admitted = !i2_admission_limits_hash(gate, limits_hash)
             || !i2_admission_pill_digest(base, pill_bytes, pill_digest)
             ? 0
+#ifdef M26_DUPLEX
+            : m26_identity
+            ? m26_admission_lookup(identity.program_hash, identity.package_hash,
+                                   pill_digest, limits_hash, &entry)
+#endif
             : m25_identity
             ? m25_admission_lookup(identity.program_hash, identity.package_hash,
                                    pill_digest, limits_hash, &entry)

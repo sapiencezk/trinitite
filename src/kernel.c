@@ -22,6 +22,10 @@
 #include "i2_operator.h"
 #include "m21_device.h"
 #include "m25_target_core.h"
+#ifdef M26_DUPLEX
+#include "m26_target_core.h"
+#include "m26_admission.h"
+#endif
 #include "m22_provider_core.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
@@ -2390,12 +2394,15 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
 
     for (;;) {
         int jr = setjmp(nock_abort);
-#ifdef M25_TARGET
+#if defined(M25_TARGET) && !defined(M26_DUPLEX)
         /* The bounded M25 device runner is scheduled at every kernel-loop
          * boundary, including while UART/Forth ingress is being serviced.
          * This keeps application/provider progress independent of a second
          * harness step or poll command. */
         (void)m25_target_service_tick();
+#endif
+#ifdef M26_DUPLEX
+        (void)m26_target_service_tick();
 #endif
         if (jr == NOCK_ABORT_CRASH) {
             if (nock_budget_get() != 0) {
@@ -2506,11 +2513,14 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
              * frames therefore coexist with timer and watchdog polling.
              */
             for (;;) {
-#ifdef M25_TARGET
+#if defined(M25_TARGET) && !defined(M26_DUPLEX)
                 /* M25 owns one bounded native/service tick while the device
                  * runner is otherwise idle.  UART remains an ingress/observe
                  * surface; it is not required to drive target RX or IND. */
                 (void)m25_target_service_tick();
+#endif
+#ifdef M26_DUPLEX
+                (void)m26_target_service_tick();
 #endif
                 i2_operator_poll();
 #ifdef I2_OPERATOR
@@ -5251,8 +5261,13 @@ int kernel_prepare_pill(void)
     if (noun_is_cell(gate) && g_pill_candidate_i2
         && g_pill_candidate_identity.runtime_abi[0] == 1
         && g_pill_candidate_identity.runtime_abi[1] == 9) {
+#ifdef M26_DUPLEX
+        int status = m26_target_boot(
+            gate, &g_pill_candidate_identity, g_pill_candidate_capability);
+#else
         int status = m25_target_boot(
             gate, &g_pill_candidate_identity, g_pill_candidate_capability);
+#endif
         if (status != 0 && noun_tx_active()) noun_tx_abort();
         g_pill_candidate_i2 = 0;
         return status;

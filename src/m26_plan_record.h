@@ -2,11 +2,9 @@
 
 #include <stdint.h>
 
-/* Immutable projection of the one admitted M25 CommunicationDeploymentPlan.
- * This record is generated/admitted data, not a provider registry.  The
- * native engine consumes it; application/service identities do not appear as
- * engine policy constants. */
-#ifndef M26_DUPLEX
+/* Static local projection of both M26 directions.  The outgoing identity is
+ * selected by M24_NODE_ID; the reverse identity is the only accepted RX
+ * identity.  No peer registry or application-name dispatch is represented. */
 typedef struct {
     uint8_t plan_digest[32];
     uint32_t source_device_id;
@@ -26,11 +24,12 @@ typedef struct {
     uint32_t key_id;
     uint8_t binding_id[16];
     uint8_t schema_digest[32];
-} m25_plan_record_t;
+    uint8_t reverse_binding_id[16];
+    uint8_t reverse_schema_digest[32];
+} m26_plan_record_t;
 
-extern const m25_plan_record_t m25_admitted_plan;
-#endif
+extern const m26_plan_record_t m26_admitted_plan;
 
-int m25_plan_record_validate(void);
-int m25_plan_record_source_association(uint64_t event, uint64_t ordinal,
+int m26_plan_record_validate(void);
+int m26_plan_record_source_association(uint64_t event, uint64_t ordinal,
                                        uint64_t data);

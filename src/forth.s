@@ -2017,12 +2017,19 @@ defcode "QUIT", 4, quit, 0
 .Lq_rxwait:
     ldr     w1, [x0]
     tbz     w1, #4, .Lq_rxready
-#ifdef M25_TARGET
+#if defined(M25_TARGET) && !defined(M26_DUPLEX)
     /* QUIT owns the operator line wait, so the C kernel idle loop is not
      * reached while a guest is waiting for its next observation command.
      * Run exactly one bounded M25 device tick between UART polls. */
     stp     x5, x6, [sp, #-16]!
     bl      m25_target_service_tick
+    ldp     x5, x6, [sp], #16
+    ldr     x0, =UART_FR
+#endif
+
+#ifdef M26_DUPLEX
+    stp     x5, x6, [sp, #-16]!
+    bl      m26_target_service_tick
     ldp     x5, x6, [sp], #16
     ldr     x0, =UART_FR
 #endif
@@ -2848,7 +2855,7 @@ defcode "M2PREP", 6, m2_prepare_pill, 0
     str     x0, [DSP, #-8]!
     NEXT
 
-#ifdef M25_TARGET
+#if defined(M25_TARGET) && !defined(M26_DUPLEX)
 // M25 target runner: M25IN injects only the admitted external BOOL samples;
 // M25STEP executes the local ResourceProgram/service/provider transaction,
 // and M25POLL admits one authenticated native frame into the SUBSCRIBE FIFO.
@@ -2948,6 +2955,93 @@ defcode "M25CKS?", 7, m25_checkpoint_save_word, 0
 
 defcode "M25CKR?", 7, m25_checkpoint_restore_word, 0
     bl      m25_target_checkpoint_restore
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
+#ifdef M26_DUPLEX
+// M26 positive-path controls inject only an admitted external BOOL event and
+// observe the autonomous native RX/service loop.  There is deliberately no
+// M26POLL or M26STEP word exposed to the positive harness.
+defcode "M26INIT", 7, m26_init_word, 0
+    bl      m26_target_init
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26RST", 6, m26_restart_word, 0
+    bl      m26_target_restart_source
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26IN", 5, m26_input_word, 0
+    ldr     x1, [DSP]
+    ldr     x0, [DSP, #8]
+    add     DSP, DSP, #16
+    bl      m26_target_input
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26Q", 4, m26_queue_word, 0
+    bl      m26_target_queue_len
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26IND@", 7, m26_indication_word, 0
+    bl      m26_target_sink_value
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26SEQ@", 7, m26_sequence_word, 0
+    bl      m26_target_next_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26HWM@", 7, m26_high_water_word, 0
+    bl      m26_target_high_water
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26ERR@", 7, m26_error_word, 0
+    bl      m26_target_last_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26HOLD", 7, m26_hold_word, 0
+    bl      m25_native_test_hold_tx
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M26REL", 6, m26_release_word, 0
+    bl      m25_native_test_release_tx
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M26CERR", 7, m26_cnf_failure_word, 0
+    ldr     x0, [DSP]
+    add     DSP, DSP, #8
+    bl      m26_target_test_cnf_failure
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26CREL", 7, m26_cnf_release_word, 0
+    bl      m26_target_test_cnf_release
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26CKS?", 7, m26_checkpoint_save_word, 0
+    bl      m26_target_checkpoint_capture
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M26CKR?", 7, m26_checkpoint_restore_word, 0
+    bl      m26_target_checkpoint_restore
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
