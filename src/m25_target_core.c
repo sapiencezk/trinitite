@@ -54,6 +54,7 @@ static uint64_t g_checkpoint_len;
 static int g_checkpoint_valid;
 static uint8_t g_initial_jam[M25_CHECKPOINT_BYTES];
 static uint64_t g_initial_jam_len;
+static uint64_t g_test_cnf_failure;
 
 static int take(noun n, noun *head, noun *tail)
 {
@@ -353,6 +354,7 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
     g_last_error = 0; g_indication_valid = 0; g_active = 1;
     g_is_source = rid == m25_admitted_plan.source_resource_id;
     g_native_initialized = 0;
+    g_test_cnf_failure = 0;
     g_checkpoint_len = 0; g_checkpoint_valid = 0;
     return 0;
 }
@@ -441,17 +443,26 @@ int m25_target_step(void)
             || !build_publication(value, g_next_sequence, frame, &frame_len)) {
             g_last_error = 3; return -1;
         }
-        m25_native_status_t status = m25_native_send(frame, frame_len);
-        if (status != M25_NATIVE_OK) { g_last_error = 5; return -1; }
-        /* CNF is a second authoritative service transaction and is only
-         * staged after the native driver reports complete TX. */
+        /* CNF is a second authoritative service transaction.  Build its
+         * application/service candidate and reserve the persistent copy
+         * before native TX becomes externally visible.  The send-success
+         * suffix below is assignment-only: no Nock, copy, or allocation can
+         * remain after a frame has been accepted by the native adapter. */
         noun confirmed, staged;
+        if (g_test_cnf_failure == 1) { g_last_error = 9; return -1; }
         if (!service_candidate(candidate, m25_admitted_plan.publish_instance,
                                3, g_next_sequence, &confirmed)) {
             g_last_error = 9; return -1;
         }
+        if (g_test_cnf_failure == 2) { g_last_error = 9; return -1; }
         heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
+        if (g_test_cnf_failure == 3) {
+            heap_persist_abort_tx(); g_last_error = 4; return -1;
+        }
         if (!noun_copy_checked(confirmed, &staged)) { heap_persist_abort_tx(); g_last_error = 4; return -1; }
+        m25_native_status_t status = m25_native_send(frame, frame_len);
+        if (status != M25_NATIVE_OK) { heap_persist_abort_tx(); g_last_error = 5; return -1; }
+        /* No fallible work follows native completion. */
         g_gate = staged; g_pending_event = NOUN_ZERO; g_next_sequence++;
         heap_persist_commit_tx(); g_last_error = 0; return 1;
     }
@@ -486,6 +497,20 @@ uint64_t m25_target_sink_value(void) { return g_indication_valid ? g_last_indica
 uint64_t m25_target_next_sequence(void) { return g_next_sequence; }
 uint64_t m25_target_high_water(void) { return g_high_water; }
 uint64_t m25_target_last_error(void) { return g_last_error; }
+
+int m25_target_test_cnf_failure(uint64_t kind)
+{
+    if (!g_active || !g_is_source || kind < 1 || kind > 3) return -1;
+    g_test_cnf_failure = kind;
+    return 0;
+}
+
+int m25_target_test_cnf_release(void)
+{
+    if (!g_active || !g_is_source) return -1;
+    g_test_cnf_failure = 0;
+    return 0;
+}
 
 static int checkpoint_noun(noun *out)
 {
@@ -554,6 +579,8 @@ uint64_t m25_target_sink_value(void) { return UINT64_MAX; }
 uint64_t m25_target_next_sequence(void) { return 0; }
 uint64_t m25_target_high_water(void) { return 0; }
 uint64_t m25_target_last_error(void) { return 0; }
+int m25_target_test_cnf_failure(uint64_t kind) { (void)kind; return -1; }
+int m25_target_test_cnf_release(void) { return -1; }
 int m25_target_checkpoint_capture(void) { return -1; }
 int m25_target_checkpoint_restore(void) { return -1; }
 

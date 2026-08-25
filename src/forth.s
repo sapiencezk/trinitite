@@ -2924,6 +2924,22 @@ defcode "M25REL", 6, m25_release_word, 0
     str     xzr, [DSP, #-8]!
     NEXT
 
+// Qualification-only deterministic CNF-Nock/product/copy staging controls.
+// The selected failure is held before native TX until M25CREL is called.
+defcode "M25CERR", 7, m25_cnf_failure_word, 0
+    ldr     x0, [DSP]
+    add     DSP, DSP, #8
+    bl      m25_target_test_cnf_failure
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M25CREL", 7, m25_cnf_release_word, 0
+    bl      m25_target_test_cnf_release
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "M25CKS?", 7, m25_checkpoint_save_word, 0
     bl      m25_target_checkpoint_capture
     sxtw    x0, w0

@@ -16,6 +16,10 @@ int m25_target_step(void);
 /* One bounded device-runner tick: native admission followed by at most one
  * authoritative resource/service transaction. */
 int m25_target_service_tick(void);
+/* Qualification-only persistent CNF staging controls.  A held failure is
+ * checked before native TX and is released explicitly for retry. */
+int m25_target_test_cnf_failure(uint64_t kind);
+int m25_target_test_cnf_release(void);
 uint64_t m25_target_queue_len(void);
 uint64_t m25_target_sink_value(void);
 uint64_t m25_target_next_sequence(void);
