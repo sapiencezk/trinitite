@@ -13,6 +13,9 @@ int m25_target_restart_source(void);
 int m25_target_input(uint64_t a, uint64_t b);
 int m25_target_poll(void);
 int m25_target_step(void);
+/* One bounded device-runner tick: native admission followed by at most one
+ * authoritative resource/service transaction. */
+int m25_target_service_tick(void);
 uint64_t m25_target_queue_len(void);
 uint64_t m25_target_sink_value(void);
 uint64_t m25_target_next_sequence(void);

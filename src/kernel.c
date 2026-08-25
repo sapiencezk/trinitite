@@ -2390,6 +2390,13 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
 
     for (;;) {
         int jr = setjmp(nock_abort);
+#ifdef M25_TARGET
+        /* The bounded M25 device runner is scheduled at every kernel-loop
+         * boundary, including while UART/Forth ingress is being serviced.
+         * This keeps application/provider progress independent of a second
+         * harness step or poll command. */
+        (void)m25_target_service_tick();
+#endif
         if (jr == NOCK_ABORT_CRASH) {
             if (nock_budget_get() != 0) {
                 runtime_stats_max(RT_COUNT_NOCK_OPS_HWM, nock_ops_used());
@@ -2499,6 +2506,12 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
              * frames therefore coexist with timer and watchdog polling.
              */
             for (;;) {
+#ifdef M25_TARGET
+                /* M25 owns one bounded native/service tick while the device
+                 * runner is otherwise idle.  UART remains an ingress/observe
+                 * surface; it is not required to drive target RX or IND. */
+                (void)m25_target_service_tick();
+#endif
                 i2_operator_poll();
 #ifdef I2_OPERATOR
                 /* Exclusive pump owns classification in shrine_loop. */

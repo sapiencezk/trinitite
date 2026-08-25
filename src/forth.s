@@ -2016,7 +2016,18 @@ defcode "QUIT", 4, quit, 0
     ldr     x0, =UART_FR
 .Lq_rxwait:
     ldr     w1, [x0]
-    tbnz    w1, #4, .Lq_rxwait
+    tbz     w1, #4, .Lq_rxready
+#ifdef M25_TARGET
+    /* QUIT owns the operator line wait, so the C kernel idle loop is not
+     * reached while a guest is waiting for its next observation command.
+     * Run exactly one bounded M25 device tick between UART polls. */
+    stp     x5, x6, [sp, #-16]!
+    bl      m25_target_service_tick
+    ldp     x5, x6, [sp], #16
+    ldr     x0, =UART_FR
+#endif
+    b       .Lq_rxwait
+.Lq_rxready:
     ldr     x0, =UART_DR
     ldr     w2, [x0]
     and     w2, w2, #0xFF
@@ -2899,6 +2910,18 @@ defcode "M25HWM@", 7, m25_high_water_word, 0
 defcode "M25ERR@", 7, m25_error_word, 0
     bl      m25_target_last_error
     str     x0, [DSP, #-8]!
+    NEXT
+
+// Qualification-only deterministic native TX failure/retry controls.  These
+// are never used by the positive application witness.
+defcode "M25HOLD", 7, m25_hold_word, 0
+    bl      m25_native_test_hold_tx
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M25REL", 6, m25_release_word, 0
+    bl      m25_native_test_release_tx
+    str     xzr, [DSP, #-8]!
     NEXT
 
 defcode "M25CKS?", 7, m25_checkpoint_save_word, 0

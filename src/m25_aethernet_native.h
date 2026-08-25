@@ -21,3 +21,7 @@ int m25_native_init(void);
 m25_native_status_t m25_native_receive(m25_native_datagram_t *out);
 m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len);
 int m25_native_tx_pending(void);
+/* Bounded qualification controls.  They model a deterministic native TX
+ * refusal without changing the admitted application/session state. */
+void m25_native_test_hold_tx(void);
+void m25_native_test_release_tx(void);

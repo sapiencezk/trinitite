@@ -35,6 +35,7 @@ static uint8_t g_tx[FRAME_BYTES] __attribute__((aligned(16)));
 static uint8_t g_pending[MAX_PAYLOAD];
 static uint32_t g_pending_len;
 static int g_pending_tx;
+static int g_test_hold_tx;
 
 static uint16_t be16(const volatile uint8_t *p)
 {
@@ -82,7 +83,7 @@ static uint16_t checksum(const volatile uint8_t *ip,
 int m25_native_init(void)
 {
     uint8_t mac[6];
-    g_pending_tx = 0; g_pending_len = 0;
+    g_pending_tx = 0; g_pending_len = 0; g_test_hold_tx = 0;
     return virtio_net_init() != 0 || virtio_net_config_mac(mac) != 0
         || !same(mac, LOCAL_MAC, 6) ? -1 : 0;
 }
@@ -116,6 +117,7 @@ m25_native_status_t m25_native_receive(m25_native_datagram_t *out)
 m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len)
 {
     if (!payload || payload_len == 0 || payload_len > MAX_PAYLOAD) return M25_NATIVE_MALFORMED;
+    if (g_test_hold_tx) return M25_NATIVE_RING_FULL;
     if (g_pending_tx) {
         int complete = virtio_net_tx_complete();
         if (complete == 1) {
@@ -147,3 +149,6 @@ m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len
 }
 
 int m25_native_tx_pending(void) { return g_pending_tx; }
+
+void m25_native_test_hold_tx(void) { g_test_hold_tx = 1; }
+void m25_native_test_release_tx(void) { g_test_hold_tx = 0; }

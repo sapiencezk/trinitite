@@ -4,8 +4,8 @@
  * image accepts one external BOOL event, runs its PILL gate through Nock,
  * classifies the compiler-produced M25 intent, and sends one bounded frame.
  * A target image authenticates the frame, advances its private FIFO/session
- * root, and on the later M25STEP runs the SUBSCRIBE delivery through Nock.
- * It does not call M21/M23/M24 provider controls or interpret M16 behavior. */
+ * root, and the device service loop runs the SUBSCRIBE delivery through Nock.
+ * It does not call earlier provider controls or interpret application behavior. */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -16,19 +16,12 @@
 #include "bounded_cue.h"
 #include "jam.h"
 #include "m25_aethernet_native.h"
+#include "m25_plan_record.h"
 #include "memory.h"
 #include "nock.h"
 #include "setjmp.h"
 #include "sha256.h"
 
-#define M25_SOURCE_DEVICE 11u
-#define M25_TARGET_DEVICE 22u
-#define M25_SOURCE_RESOURCE 1u
-#define M25_TARGET_RESOURCE 2u
-#define M25_SERVICE_PUBLISH 8u
-#define M25_SERVICE_SUBSCRIBE 9u
-#define M25_SOURCE_INSTANCE 5u
-#define M25_TARGET_INSTANCE 6u
 #define M25_FIFO_CAPACITY 16u
 #define M25_HEADER_BYTES 128u
 #define M25_MAX_PAYLOAD 512u
@@ -36,8 +29,6 @@
 #define M25_OPS 2000000ULL
 #define M25_CELLS 128000ULL
 #define M25_CHECKPOINT_BYTES JAM_MAX_BYTES
-#define M25_PLAN_EPOCH 1u
-#define M25_KEY_ID 1u
 #define M25_PROFILE 1u
 #define M25_WIRE_MAJOR 0u
 #define M25_WIRE_MINOR 1u
@@ -47,24 +38,17 @@
 #define CORD_I2_INTERNAL_ORIGIN_V1 0x316e693269ULL
 
 static const uint8_t M25_PSK[] = "m25-development-key-0123456789";
-static const uint8_t M25_BINDING[16] = {
-    0xba,0x59,0xa8,0x09,0x5c,0x82,0x51,0x8f,0x5b,0x67,0xdf,0x9d,0x2d,0x1f,0xcc,0x06
-};
-static const uint8_t M25_SCHEMA[32] = {
-    0x73,0x2d,0x9c,0xb1,0x71,0x79,0x81,0x30,0xe8,0x32,0xdb,0x68,0x2a,0x4a,0x2c,0xc4,
-    0x5c,0x44,0x1c,0x5f,0xf9,0xfe,0xaf,0x69,0x5f,0xa9,0x5d,0x96,0x7d,0x60,0x85,0x55
-};
 
 static noun g_gate;
 static runtime_identity_t g_identity;
-static noun g_external_tag, g_ei_tag, g_intent_tag, g_delivery_tag;
+static noun g_external_tag, g_ei_tag, g_intent_tag, g_delivery_tag, g_service_tag;
 static noun g_envelope_tag, g_publish_tag;
 static noun g_pending_event;
 static uint8_t g_fifo_value[M25_FIFO_CAPACITY];
 static uint64_t g_fifo_sequence[M25_FIFO_CAPACITY];
 static uint32_t g_fifo_head, g_fifo_count;
 static uint64_t g_next_sequence, g_high_water, g_last_indication, g_last_error;
-static int g_indication_valid, g_active, g_is_source;
+static int g_indication_valid, g_active, g_is_source, g_native_initialized;
 static uint8_t g_checkpoint[M25_CHECKPOINT_BYTES];
 static uint64_t g_checkpoint_len;
 static int g_checkpoint_valid;
@@ -148,13 +132,14 @@ static int product_parts(noun result, noun *candidate, noun *causes)
         && take(rest, candidate, causes);
 }
 
-static int slam(noun event, noun *candidate, noun *causes)
+static int slam_gate(noun gate, noun event, int rx_origin,
+                     noun *candidate, noun *causes)
 {
     noun carrier, subject, result, formula = build_slam();
     if (!noun_is_cell(formula)
-        || !cons(g_is_source ? direct(CORD_I2_RX_ORIGIN_V1)
+        || !cons(rx_origin ? direct(CORD_I2_RX_ORIGIN_V1)
                              : direct(CORD_I2_INTERNAL_ORIGIN_V1), event, &carrier)
-        || !cons(g_gate, carrier, &subject)) return 0;
+        || !cons(gate, carrier, &subject)) return 0;
     int jump = setjmp(nock_abort);
     if (jump) { nock_budget_finish(); return 0; }
     nock_budget_set_limits(M25_OPS, M25_CELLS);
@@ -164,6 +149,11 @@ static int slam(noun event, noun *candidate, noun *causes)
         && runtime_identity_validate_gate(*candidate, &g_identity, 0);
 }
 
+static int slam(noun event, noun *candidate, noun *causes)
+{
+    return slam_gate(g_gate, event, g_is_source, candidate, causes);
+}
+
 static int build_external(uint64_t a, uint64_t b, noun *out)
 {
     noun va, vb, sa, sb, list, ei, body;
@@ -171,7 +161,7 @@ static int build_external(uint64_t a, uint64_t b, noun *out)
         || !cons(direct(1), direct(b), &vb) || !cons(direct(1), va, &sa)
         || !cons(direct(2), vb, &sb) || !cons(sb, NOUN_ZERO, &list)
         || !cons(sa, list, &ei) || !cons(direct(1), ei, &body)
-        || !cons(direct(M25_SOURCE_INSTANCE), body, &ei)
+        || !cons(direct(m25_admitted_plan.source_application_instance), body, &ei)
         || !cons(g_ei_tag, ei, &body) || !cons(g_external_tag, body, out)) return 0;
     return 1;
 }
@@ -188,21 +178,25 @@ static int resource_id(noun gate, uint64_t *out)
 
 static int parse_intent(noun causes, uint64_t *value)
 {
-    noun cause, rest, tag, body, fields[10], value_type, value_payload;
+    noun cause, rest, tag, body, fields[11], value_type, value_payload;
     if (!take(causes, &cause, &rest) || !direct_is(rest, 0)
         || !take(cause, &tag, &body) || !noun_eq(tag, g_intent_tag)) return 0;
-    for (unsigned i = 0; i < 10; i++)
+    for (unsigned i = 0; i < 11; i++)
         if (!take(body, &fields[i], &body)) return 0;
     if (!take(body, &value_type, &value_payload)
         || !direct_is(value_type, 1) || !noun_is_direct(value_payload)
         || direct_val(value_payload) > 1
-        || !direct_is(fields[0], M25_SOURCE_INSTANCE)
-        || !(direct_is(fields[1], 2) || direct_is(fields[1], 3))
-        || !(direct_is(fields[2], 8) || direct_is(fields[2], 9))
-        || !direct_is(fields[3], direct_val(fields[1]) == 2 ? 3 : 4)
-        || !direct_is(fields[4], 1) || !direct_is(fields[5], M25_SERVICE_SUBSCRIBE)
-        || !direct_is(fields[6], M25_TARGET_INSTANCE) || !direct_is(fields[7], 1)
-        || !direct_is(fields[8], 1) || !direct_is(fields[9], 1)) return 0;
+        || !direct_is(fields[0], m25_admitted_plan.source_application_instance)
+        || !noun_is_direct(fields[1]) || !noun_is_direct(fields[2])
+        || !noun_is_direct(fields[3])
+        || !m25_plan_record_source_association(direct_val(fields[1]), direct_val(fields[2]), direct_val(fields[3]))
+        || !direct_is(fields[4], 1)
+        || !direct_is(fields[5], m25_admitted_plan.publish_instance)
+        || !direct_is(fields[6], m25_admitted_plan.subscribe_instance)
+        || !direct_is(fields[7], m25_admitted_plan.target_application_instance)
+        || !direct_is(fields[8], m25_admitted_plan.target_event)
+        || !direct_is(fields[9], m25_admitted_plan.target_data)
+        || !direct_is(fields[10], 1)) return 0;
     *value = direct_val(value_payload);
     return 1;
 }
@@ -223,11 +217,11 @@ static int build_publication(uint64_t value, uint64_t sequence,
     frame[4]=M25_WIRE_MAJOR; frame[5]=M25_WIRE_MINOR; frame[6]=M25_PROFILE;
     frame[7]=M25_MESSAGE_KIND_DATA; put16(frame + 8, M25_HEADER_BYTES);
     put16(frame + 10, (uint16_t)payload_len);
-    put32(frame + 12, 0); put32(frame + 16, M25_SOURCE_DEVICE);
-    put32(frame + 20, 0); put32(frame + 24, M25_TARGET_DEVICE);
-    for (unsigned i = 0; i < sizeof M25_BINDING; i++) frame[28+i] = M25_BINDING[i];
-    for (unsigned i = 0; i < sizeof M25_SCHEMA; i++) frame[44+i] = M25_SCHEMA[i];
-    put32(frame + 76, M25_KEY_ID); put64(frame + 80, M25_PLAN_EPOCH);
+    put32(frame + 12, 0); put32(frame + 16, m25_admitted_plan.source_device_id);
+    put32(frame + 20, 0); put32(frame + 24, m25_admitted_plan.target_device_id);
+    for (unsigned i = 0; i < sizeof m25_admitted_plan.binding_id; i++) frame[28+i] = m25_admitted_plan.binding_id[i];
+    for (unsigned i = 0; i < sizeof m25_admitted_plan.schema_digest; i++) frame[44+i] = m25_admitted_plan.schema_digest[i];
+    put32(frame + 76, m25_admitted_plan.key_id); put64(frame + 80, m25_admitted_plan.epoch);
     put64(frame + 88, sequence);
     for (unsigned i = 96; i < 128; i++) frame[i] = 0;
     uint8_t auth[32]; hmac_sha256(M25_PSK, sizeof M25_PSK - 1u,
@@ -248,12 +242,12 @@ static int parse_frame(const uint8_t *raw, uint32_t len, uint64_t *sequence,
         || get16(raw + 10) == 0
         || get16(raw + 10) > M25_MAX_PAYLOAD
         || len != M25_HEADER_BYTES + get16(raw + 10)) return 0;
-    if (get64(raw + 12) != M25_SOURCE_DEVICE) return 0;
-    if (get64(raw + 20) != M25_TARGET_DEVICE) return 0;
-    if (!equal_bytes(raw + 28, M25_BINDING, sizeof M25_BINDING)) return 0;
-    if (!equal_bytes(raw + 44, M25_SCHEMA, sizeof M25_SCHEMA)) return 0;
-    if (get32(raw + 76) != M25_KEY_ID) return 0;
-    if (get64(raw + 80) != M25_PLAN_EPOCH) return 0;
+    if (get64(raw + 12) != m25_admitted_plan.source_device_id) return 0;
+    if (get64(raw + 20) != m25_admitted_plan.target_device_id) return 0;
+    if (!equal_bytes(raw + 28, m25_admitted_plan.binding_id, sizeof m25_admitted_plan.binding_id)) return 0;
+    if (!equal_bytes(raw + 44, m25_admitted_plan.schema_digest, sizeof m25_admitted_plan.schema_digest)) return 0;
+    if (get32(raw + 76) != m25_admitted_plan.key_id) return 0;
+    if (get64(raw + 80) != m25_admitted_plan.epoch) return 0;
     if (get64(raw + 88) == 0) return 0;
     uint8_t input[M25_HEADER_BYTES + M25_MAX_PAYLOAD];
     for (uint32_t i = 0; i < len; i++) input[i] = raw[i];
@@ -283,9 +277,30 @@ static int build_delivery(uint64_t value, noun *out)
     if (!cons(direct(1), direct(value), &type_value)
         || !cons(direct(1), type_value, &variable)
         || !cons(direct(1), variable, &target_event)
-        || !cons(direct(M25_TARGET_INSTANCE), target_event, &target_instance)
-        || !cons(direct(M25_SERVICE_SUBSCRIBE), target_instance, &service)
+        || !cons(direct(m25_admitted_plan.target_application_instance), target_event, &target_instance)
+        || !cons(direct(m25_admitted_plan.subscribe_instance), target_instance, &service)
         || !cons(g_delivery_tag, service, out)) return 0;
+    return 1;
+}
+
+static int build_service_event(uint64_t instance, uint64_t operation,
+                               uint64_t value, noun *out)
+{
+    return cons(direct(value), NOUN_ZERO, out)
+        && cons(direct(operation), *out, out)
+        && cons(direct(instance), *out, out)
+        && cons(g_service_tag, *out, out);
+}
+
+static int service_candidate(noun base_gate, uint64_t instance,
+                             uint64_t operation, uint64_t value,
+                             noun *out)
+{
+    noun event, causes, cause, rest;
+    if (!build_service_event(instance, operation, value, &event)
+        || !slam_gate(base_gate, event, 0, out, &causes)
+        || !take(causes, &cause, &rest)
+        || !noun_eq(cause, event) || !direct_is(rest, 0)) return 0;
     return 1;
 }
 
@@ -293,7 +308,8 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
                     uint8_t capability_profile)
 {
     uint64_t rid;
-    if (!identity || identity->runtime_abi[0] != 1 || identity->runtime_abi[1] != 9
+    if (!identity || !m25_plan_record_validate()
+        || identity->runtime_abi[0] != 1 || identity->runtime_abi[1] != 9
         || identity->host_abi[0] != 1 || identity->host_abi[1] != 3
         || capability_profile != RUNTIME_CAPABILITY_PROFILE_M25) {
         return -1;
@@ -302,18 +318,21 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
         return -1;
     }
     if (!resource_id(gate, &rid)
-        || (rid != M25_SOURCE_RESOURCE && rid != M25_TARGET_RESOURCE)) {
+        || (rid != m25_admitted_plan.source_resource_id
+            && rid != m25_admitted_plan.target_resource_id)) {
         return -1;
     }
-    noun tags[6] = {
+    noun tags[7] = {
         cord_from_bytes("i2-external", 11), cord_from_bytes("i2-ei", 5),
         cord_from_bytes("i2-m25-intent-v1", 16), cord_from_bytes("i2-m25-delivery-v1", 18),
         cord_from_bytes("m25-publication-envelope-v1", 27), cord_from_bytes("M25-PUBLISH-1", 13),
+        cord_from_bytes("i2-m25-service-v1", 17),
     };
     g_external_tag=tags[0]; g_ei_tag=tags[1]; g_intent_tag=tags[2];
     g_delivery_tag=tags[3]; g_envelope_tag=tags[4]; g_publish_tag=tags[5];
+    g_service_tag=tags[6];
     if (!noun_is_atom(g_intent_tag) || !noun_is_atom(g_delivery_tag)
-        || !noun_is_atom(g_envelope_tag)) return -1;
+        || !noun_is_atom(g_envelope_tag) || !noun_is_atom(g_service_tag)) return -1;
     noun copy;
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
     if (!noun_copy_checked(gate, &copy)) {
@@ -332,7 +351,8 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
     g_pending_event = NOUN_ZERO; g_fifo_head = g_fifo_count = 0;
     g_next_sequence = 1; g_high_water = 0; g_last_indication = 0;
     g_last_error = 0; g_indication_valid = 0; g_active = 1;
-    g_is_source = rid == M25_SOURCE_RESOURCE;
+    g_is_source = rid == m25_admitted_plan.source_resource_id;
+    g_native_initialized = 0;
     g_checkpoint_len = 0; g_checkpoint_valid = 0;
     return 0;
 }
@@ -344,6 +364,17 @@ int m25_target_init(void)
     if (!g_active || g_pending_event != NOUN_ZERO || g_fifo_count != 0
         || m25_native_tx_pending()) return -1;
     if (m25_native_init() != 0) return -1;
+    noun staged, persisted;
+    uint64_t instance = g_is_source ? m25_admitted_plan.publish_instance
+                                    : m25_admitted_plan.subscribe_instance;
+    heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
+    if (!service_candidate(g_gate, instance, 1, 0, &staged)) return -1;
+    heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
+    if (!noun_copy_checked(staged, &persisted)) {
+        heap_persist_abort_tx(); return -1;
+    }
+    g_gate = persisted; heap_persist_commit_tx();
+    g_native_initialized = 1;
     return 0;
 }
 
@@ -410,26 +441,44 @@ int m25_target_step(void)
             || !build_publication(value, g_next_sequence, frame, &frame_len)) {
             g_last_error = 3; return -1;
         }
-        noun staged;
-        heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
-        if (!noun_copy_checked(candidate, &staged)) { heap_persist_abort_tx(); g_last_error = 4; return -1; }
         m25_native_status_t status = m25_native_send(frame, frame_len);
-        if (status != M25_NATIVE_OK) { heap_persist_abort_tx(); g_last_error = 5; return -1; }
+        if (status != M25_NATIVE_OK) { g_last_error = 5; return -1; }
+        /* CNF is a second authoritative service transaction and is only
+         * staged after the native driver reports complete TX. */
+        noun confirmed, staged;
+        if (!service_candidate(candidate, m25_admitted_plan.publish_instance,
+                               3, g_next_sequence, &confirmed)) {
+            g_last_error = 9; return -1;
+        }
+        heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
+        if (!noun_copy_checked(confirmed, &staged)) { heap_persist_abort_tx(); g_last_error = 4; return -1; }
         g_gate = staged; g_pending_event = NOUN_ZERO; g_next_sequence++;
         heap_persist_commit_tx(); g_last_error = 0; return 1;
     }
     if (g_fifo_count == 0) return 0;
     uint32_t at = g_fifo_head; uint64_t value = g_fifo_value[at];
     heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
-    noun event, candidate, causes;
+    noun event, candidate, causes, indicated;
     if (!build_delivery(value, &event) || !slam(event, &candidate, &causes)
-        || !direct_is(causes, 0)) { g_last_error = 6; return -1; }
+        || !direct_is(causes, 0)
+        || !service_candidate(candidate, m25_admitted_plan.subscribe_instance,
+                              4, value, &indicated)) { g_last_error = 6; return -1; }
     noun staged;
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
-    if (!noun_copy_checked(candidate, &staged)) { heap_persist_abort_tx(); g_last_error = 7; return -1; }
+    if (!noun_copy_checked(indicated, &staged)) { heap_persist_abort_tx(); g_last_error = 7; return -1; }
     g_gate = staged; g_fifo_head = (g_fifo_head + 1u) % M25_FIFO_CAPACITY;
     g_fifo_count--; g_last_indication = value; g_indication_valid = 1;
     heap_persist_commit_tx(); g_last_error = 0; return 1;
+}
+
+int m25_target_service_tick(void)
+{
+    if (!g_active || !g_native_initialized) return 0;
+    if (!g_is_source) {
+        int received = m25_target_poll();
+        if (received < 0) return received;
+    }
+    return m25_target_step();
 }
 
 uint64_t m25_target_queue_len(void) { return g_active ? g_fifo_count : UINT64_MAX; }
@@ -499,6 +548,7 @@ int m25_target_restart_source(void) { return -1; }
 int m25_target_input(uint64_t a, uint64_t b) { (void)a; (void)b; return -1; }
 int m25_target_poll(void) { return -1; }
 int m25_target_step(void) { return -1; }
+int m25_target_service_tick(void) { return -1; }
 uint64_t m25_target_queue_len(void) { return UINT64_MAX; }
 uint64_t m25_target_sink_value(void) { return UINT64_MAX; }
 uint64_t m25_target_next_sequence(void) { return 0; }
