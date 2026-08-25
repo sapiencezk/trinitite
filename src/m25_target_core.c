@@ -484,12 +484,7 @@ int m25_target_poll(void)
 int m25_target_step(void)
 {
     if (!g_active) return -1;
-    if (g_is_source
-#ifdef M26_DUPLEX
-        && g_fifo_count == 0
-#endif
-    ) {
-        if (g_pending_event == NOUN_ZERO) return 0;
+    if (g_is_source && g_pending_event != NOUN_ZERO) {
         /* UINT64_MAX is a terminal fence: never serialize a sequence that
          * would wrap to zero after the coherent send commit. */
         if (g_next_sequence == UINT64_MAX) { g_last_error = 8; return -1; }
