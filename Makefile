@@ -126,7 +126,9 @@ NATIVE_OBJS =
 ifeq ($(M24_NATIVE),1)
 NATIVE_OBJS = sha256.o virtio_net.o aethernet_native.o
 endif
-ifeq ($(M25_TARGET),1)
+ifeq ($(M26_DUPLEX),1)
+NATIVE_OBJS += sha256.o virtio_net.o m25_aethernet_native.o
+else ifeq ($(M25_TARGET),1)
 NATIVE_OBJS += sha256.o virtio_net.o m25_aethernet_native.o
 endif
 ifeq ($(M26_DUPLEX),1)
