@@ -14,6 +14,9 @@
 #ifdef M27_COMMISSION
 #include "m27_admission.h"
 #endif
+#ifdef M28_COMMISSION
+#include "m28_admission.h"
+#endif
 
 #define PILL_I2_HEADER_SIZE (256u)
 #define PILL_I2_MAX_BYTES   PILL_SCRATCH_SIZE
@@ -466,6 +469,10 @@ static int m20_or_m21_base_program(noun program, noun *base_out)
 #ifdef M27_COMMISSION
             && !m17_cord_is(tag, "i2-m27-program")
 #endif
+#ifdef M28_COMMISSION
+            && !m17_cord_is(tag, "i2-m27-program")
+            && !m17_cord_is(tag, "i2-m28-program")
+#endif
             )
         || !take(rest, &base, &tables) || !noun_is_cell(tables))
         return 0;
@@ -695,7 +702,9 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
     if (i2_admission_program_known(id->program_hash)
         || m25_admission_program_known(id->program_hash)
 #ifdef M26_DUPLEX
-#ifdef M27_COMMISSION
+#ifdef M28_COMMISSION
+        || m28_admission_program_known(id->program_hash)
+#elif defined(M27_COMMISSION)
         || m27_admission_program_known(id->program_hash)
 #else
         || m26_admission_program_known(id->program_hash)
@@ -981,8 +990,9 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
 
     runtime_identity_t identity;
     if (!runtime_identity_parse(header + 64, &identity)
-        || !runtime_identity_supported(&identity))
+        || !runtime_identity_supported(&identity)) {
         return PILL_I2_IDENTITY;
+    }
     int digital_identity =
         identity.host_abi[0] == 1 && identity.host_abi[1] == 1
         && identity.deployment_schema[0] == 1
@@ -1001,7 +1011,9 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
         && capability_profile == RUNTIME_CAPABILITY_PROFILE_M25;
 #ifdef M26_DUPLEX
     int m26_identity = m25_identity
-#ifdef M27_COMMISSION
+#ifdef M28_COMMISSION
+        && m28_admission_program_known(identity.program_hash);
+#elif defined(M27_COMMISSION)
         && m27_admission_program_known(identity.program_hash);
 #else
         && m26_admission_program_known(identity.program_hash);
@@ -1029,15 +1041,20 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
             : digital_identity ? RUNTIME_CAPABILITY_PROFILE_DIGITAL_OUT
                                : RUNTIME_CAPABILITY_PROFILE_M7_DIGITAL_OUT;
         if (capability_profile != expected_profile
-            || !bytes_eq(header + 248, fingerprint, 8))
+            || !bytes_eq(header + 248, fingerprint, 8)) {
             return PILL_I2_IDENTITY;
+        }
         if (closed_io || static_resource || m25_identity) {
             uint8_t pill_digest[32];
             uint64_t pill_bytes = PILL_I2_HEADER_SIZE + len;
             int header_admitted = !i2_admission_pill_digest(base, pill_bytes, pill_digest)
                 ? 0
 #ifdef M26_DUPLEX
-#ifdef M27_COMMISSION
+#ifdef M28_COMMISSION
+                : m26_identity
+                ? m28_admission_lookup(identity.program_hash, identity.package_hash,
+                                       pill_digest, 0, 0)
+#elif defined(M27_COMMISSION)
                 : m26_identity
                 ? m27_admission_lookup(identity.program_hash, identity.package_hash,
                                        pill_digest, 0, 0)
@@ -1078,7 +1095,11 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
             || !i2_admission_pill_digest(base, pill_bytes, pill_digest)
             ? 0
 #ifdef M26_DUPLEX
-#ifdef M27_COMMISSION
+#ifdef M28_COMMISSION
+            : m26_identity
+            ? m28_admission_lookup(identity.program_hash, identity.package_hash,
+                                   pill_digest, limits_hash, &entry)
+#elif defined(M27_COMMISSION)
             : m26_identity
             ? m27_admission_lookup(identity.program_hash, identity.package_hash,
                                    pill_digest, limits_hash, &entry)
