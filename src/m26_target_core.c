@@ -21,6 +21,11 @@
 #define m25_target_last_error m26_target_last_error
 #define m25_target_checkpoint_capture m26_target_checkpoint_capture
 #define m25_target_checkpoint_restore m26_target_checkpoint_restore
+#define m25_target_set_running m26_target_set_running
+#define m25_target_prepare_gate m26_target_prepare_gate
+#define m25_target_publish_gate m26_target_publish_gate
+#define m25_target_identity_matches m26_target_identity_matches
+#define m25_target_native_ready m26_target_native_ready
 #define m25_plan_record_t m26_plan_record_t
 #define m25_admitted_plan m26_admitted_plan
 #define m25_plan_record_validate m26_plan_record_validate

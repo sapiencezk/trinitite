@@ -22,3 +22,10 @@ uint64_t m26_target_high_water(void);
 uint64_t m26_target_last_error(void);
 int m26_target_checkpoint_capture(void);
 int m26_target_checkpoint_restore(void);
+int m26_target_set_running(int running);
+int m26_target_prepare_gate(noun gate, const runtime_identity_t *identity,
+                            uint8_t capability_profile, noun *out);
+void m26_target_publish_gate(noun gate, const runtime_identity_t *identity,
+                             uint8_t capability_profile);
+int m26_target_identity_matches(const runtime_identity_t *identity);
+int m26_target_native_ready(void);

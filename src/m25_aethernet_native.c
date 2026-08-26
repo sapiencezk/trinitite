@@ -36,6 +36,9 @@ static uint8_t g_pending[MAX_PAYLOAD];
 static uint32_t g_pending_len;
 static int g_pending_tx;
 static int g_test_hold_tx;
+static uint32_t g_inbox_len;
+static int g_inbox;
+static int g_shared_demux;
 
 static uint16_t be16(const volatile uint8_t *p)
 {
@@ -84,6 +87,8 @@ int m25_native_init(void)
 {
     uint8_t mac[6];
     g_pending_tx = 0; g_pending_len = 0; g_test_hold_tx = 0;
+    g_inbox = 0; g_inbox_len = 0;
+    g_shared_demux = 0;
     return virtio_net_init() != 0 || virtio_net_config_mac(mac) != 0
         || !same(mac, LOCAL_MAC, 6) ? -1 : 0;
 }
@@ -92,9 +97,18 @@ m25_native_status_t m25_native_receive(m25_native_datagram_t *out)
 {
     uint32_t frame_len = 0;
     if (!out) return M25_NATIVE_MALFORMED;
-    virtio_net_status_t got = virtio_net_receive(g_rx, sizeof g_rx, &frame_len);
-    if (got == VIRTIO_NET_NO_PACKET) return M25_NATIVE_NO_PACKET;
-    if (got != VIRTIO_NET_OK || frame_len < ETH_BYTES + IPV6_BYTES + UDP_BYTES
+    virtio_net_status_t got;
+    if (g_inbox) {
+        frame_len = g_inbox_len;
+        g_inbox = 0;
+    } else if (g_shared_demux) {
+        return M25_NATIVE_NO_PACKET;
+    } else {
+        got = virtio_net_receive(g_rx, sizeof g_rx, &frame_len);
+        if (got == VIRTIO_NET_NO_PACKET) return M25_NATIVE_NO_PACKET;
+        if (got != VIRTIO_NET_OK) return M25_NATIVE_DEVICE;
+    }
+    if (frame_len < ETH_BYTES + IPV6_BYTES + UDP_BYTES
         || frame_len > sizeof g_rx) return M25_NATIVE_DEVICE;
     volatile const uint8_t *eth = g_rx, *ip = eth + ETH_BYTES;
     if (be16(eth + 12) != 0x86ddu || !same(eth, LOCAL_MAC, 6)
@@ -149,6 +163,17 @@ m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len
 }
 
 int m25_native_tx_pending(void) { return g_pending_tx; }
+
+void m25_native_accept_frame(const uint8_t *frame, uint32_t frame_len)
+{
+    if (!frame || frame_len < ETH_BYTES + IPV6_BYTES + UDP_BYTES
+        || frame_len > sizeof g_rx || g_inbox) return;
+    for (uint32_t i = 0; i < frame_len; i++) g_rx[i] = frame[i];
+    g_inbox_len = frame_len;
+    g_inbox = 1;
+}
+
+void m25_native_set_shared_demux(int enabled) { g_shared_demux = enabled != 0; }
 
 void m25_native_test_hold_tx(void) { g_test_hold_tx = 1; }
 void m25_native_test_release_tx(void) { g_test_hold_tx = 0; }

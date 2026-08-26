@@ -62,11 +62,21 @@ static uint64_t g_next_sequence, g_high_water, g_last_indication, g_last_error;
 static uint64_t g_rate_window_start, g_rate_successes;
 #endif
 static int g_indication_valid, g_active, g_is_source, g_native_initialized;
+/* M27 owns the lifecycle fence around the unchanged M26 data service.  The
+ * historical M25/M26 paths remain running by default; only the M27 build
+ * toggles this narrow gate. */
+#ifdef M26_DUPLEX
+static int g_lifecycle_running;
+#endif
 static uint8_t g_checkpoint[M25_CHECKPOINT_BYTES];
 static uint64_t g_checkpoint_len;
 static int g_checkpoint_valid;
 static uint8_t g_initial_jam[M25_CHECKPOINT_BYTES];
 static uint64_t g_initial_jam_len;
+#ifdef M26_DUPLEX
+static uint8_t g_candidate_jam[M25_CHECKPOINT_BYTES];
+static uint64_t g_candidate_jam_len;
+#endif
 static uint64_t g_test_cnf_failure;
 
 static int take(noun n, noun *head, noun *tail)
@@ -379,6 +389,7 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
     g_last_error = 0; g_indication_valid = 0; g_active = 1;
 #ifdef M26_DUPLEX
     g_is_source = 1;
+    g_lifecycle_running = 1;
 #else
     g_is_source = rid == m25_admitted_plan.source_resource_id;
 #endif
@@ -445,7 +456,7 @@ int m25_target_input(uint64_t a, uint64_t b)
 #ifndef M26_DUPLEX
     if (!g_active || !g_is_source || g_pending_event != NOUN_ZERO) return -1;
 #else
-    if (!g_active || g_pending_event != NOUN_ZERO) return -1;
+    if (!g_active || !g_lifecycle_running || g_pending_event != NOUN_ZERO) return -1;
 #endif
     /* The bounded pending event is owned by the current persistent arena.
      * The later authoritative step flips to the other arena for the gate
@@ -574,6 +585,9 @@ int m25_target_step(void)
 int m25_target_service_tick(void)
 {
     if (!g_active || !g_native_initialized) return 0;
+#ifdef M26_DUPLEX
+    if (!g_lifecycle_running) return 0;
+#endif
 #if defined(M26_DUPLEX)
     {
         int received = m25_target_poll();
@@ -694,6 +708,70 @@ reject:
     heap_persist_abort_tx();
     return -1;
 }
+
+#ifdef M26_DUPLEX
+
+int m25_target_set_running(int running)
+{
+    if (!g_active || (g_pending_event != NOUN_ZERO) || g_fifo_count != 0
+        || m25_native_tx_pending()) return -1;
+    if (!running) {
+        g_lifecycle_running = 0;
+        return 0;
+    }
+    if (!g_native_initialized) return -1;
+    g_lifecycle_running = 1;
+    return 0;
+}
+
+int m25_target_native_ready(void)
+{
+    return g_active && g_native_initialized;
+}
+
+int m25_target_prepare_gate(noun gate, const runtime_identity_t *identity,
+                            uint8_t capability_profile, noun *out)
+{
+    if (!out || !g_active || g_lifecycle_running
+        || g_pending_event != NOUN_ZERO || g_fifo_count != 0
+        || m25_native_tx_pending() || !identity
+        || capability_profile != RUNTIME_CAPABILITY_PROFILE_M25
+        || identity->runtime_abi[0] != 1 || identity->runtime_abi[1] != 9
+        || !runtime_identity_validate_gate(gate, identity, 0)) return -1;
+    const uint8_t *encoded;
+    uint64_t encoded_len;
+    if (jam_encode_bytes_checked(gate, &encoded, &encoded_len) != 0
+        || encoded_len == 0 || encoded_len > sizeof g_initial_jam) return -1;
+    /* The gate itself was cued in the caller's persistent transaction.  The
+     * byte-for-byte jam copy is prepared before the transaction can publish,
+     * so START can rebuild the service root without a fallible post-commit
+     * operation. */
+    for (uint64_t i = 0; i < encoded_len; i++) g_candidate_jam[i] = encoded[i];
+    g_candidate_jam_len = encoded_len;
+    *out = gate;
+    return 0;
+}
+
+void m25_target_publish_gate(noun gate, const runtime_identity_t *identity,
+                             uint8_t capability_profile)
+{
+    g_gate = gate;
+    for (uint64_t i = 0; i < g_candidate_jam_len; i++)
+        g_initial_jam[i] = g_candidate_jam[i];
+    g_initial_jam_len = g_candidate_jam_len;
+    g_identity = *identity;
+    runtime_identity_set(identity);
+    runtime_identity_set_capability_profile(capability_profile);
+    g_native_initialized = 0;
+    g_lifecycle_running = 0;
+}
+
+int m25_target_identity_matches(const runtime_identity_t *identity)
+{
+    return identity && runtime_identity_equal(&g_identity, identity);
+}
+
+#endif
 
 #else
 

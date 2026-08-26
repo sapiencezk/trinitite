@@ -26,6 +26,9 @@
 #include "m26_target_core.h"
 #include "m26_admission.h"
 #endif
+#ifdef M27_COMMISSION
+#include "m27_target_core.h"
+#endif
 #include "m22_provider_core.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
@@ -2402,6 +2405,11 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
         (void)m25_target_service_tick();
 #endif
 #ifdef M26_DUPLEX
+        /* M27 owns the shared RX demultiplex point. It hands M26 DATA frames
+         * back to the unchanged data adapter before the M26 service tick. */
+ #ifdef M27_COMMISSION
+        (void)m27_target_service_tick();
+ #endif
         (void)m26_target_service_tick();
 #endif
         if (jr == NOCK_ABORT_CRASH) {
@@ -2520,6 +2528,9 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 (void)m25_target_service_tick();
 #endif
 #ifdef M26_DUPLEX
+                #ifdef M27_COMMISSION
+                (void)m27_target_service_tick();
+                #endif
                 (void)m26_target_service_tick();
 #endif
                 i2_operator_poll();
@@ -5264,6 +5275,11 @@ int kernel_prepare_pill(void)
 #ifdef M26_DUPLEX
         int status = m26_target_boot(
             gate, &g_pill_candidate_identity, g_pill_candidate_capability);
+#ifdef M27_COMMISSION
+        if (status == 0)
+            status = m27_target_boot(
+                gate, &g_pill_candidate_identity, g_pill_candidate_capability);
+#endif
 #else
         int status = m25_target_boot(
             gate, &g_pill_candidate_identity, g_pill_candidate_capability);

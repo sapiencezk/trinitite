@@ -2028,6 +2028,12 @@ defcode "QUIT", 4, quit, 0
 #endif
 
 #ifdef M26_DUPLEX
+    #ifdef M27_COMMISSION
+    stp     x5, x6, [sp, #-16]!
+    bl      m27_target_service_tick
+    ldp     x5, x6, [sp], #16
+    ldr     x0, =UART_FR
+    #endif
     stp     x5, x6, [sp, #-16]!
     bl      m26_target_service_tick
     ldp     x5, x6, [sp], #16
@@ -3042,6 +3048,22 @@ defcode "M26CKS?", 7, m26_checkpoint_save_word, 0
 
 defcode "M26CKR?", 7, m26_checkpoint_restore_word, 0
     bl      m26_target_checkpoint_restore
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
+#ifdef M27_COMMISSION
+// M27 checkpoint controls are local recovery operations. The management
+// profile remains exclusively native Aethernet/IPv6/UDP.
+defcode "M27CKS?", 7, m27_checkpoint_save_word, 0
+    bl      m27_target_checkpoint_capture
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M27CKR?", 7, m27_checkpoint_restore_word, 0
+    bl      m27_target_checkpoint_restore
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
