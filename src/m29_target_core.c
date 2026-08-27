@@ -100,6 +100,7 @@ static m29_lifecycle_t g_checkpoint_lifecycle; static uint64_t g_checkpoint_gene
 static uint64_t g_checkpoint_sequence_high,g_checkpoint_operation_high;
 static uint64_t g_checkpoint_response_sequence,g_checkpoint_rate_start,g_checkpoint_rate_count;
 static m29_cache_t g_checkpoint_cache[M29_CACHE_ENTRIES];
+static uint8_t g_checkpoint_replay_digest[32];
 static uint8_t g_active_policy_digest[32], g_active_program_identity[32];
 static uint8_t g_checkpoint_policy_digest[32], g_checkpoint_program_identity[32];
 
@@ -194,6 +195,89 @@ static int response_frame(const uint8_t *payload, uint16_t payload_len,
 static int cache_find(uint64_t id,const uint8_t*d){for(unsigned i=0;i<M29_CACHE_ENTRIES;i++)if(g_cache[i].used&&g_cache[i].operation==id)return equal_bytes(g_cache[i].digest,d,32)?(int)i:-2;return -1;}
 static int cache_put(uint64_t id,const uint8_t*d,const uint8_t*p,uint16_t n){for(unsigned i=0;i<M29_CACHE_ENTRIES;i++)if(!g_cache[i].used){g_cache[i].used=1;g_cache[i].operation=id;for(unsigned j=0;j<32;j++)g_cache[i].digest[j]=d[j];g_cache[i].len=n;for(unsigned j=0;j<n;j++)g_cache[i].payload[j]=p[j];return 1;}return 0;}
 static int cache_free(void){for(unsigned i=0;i<M29_CACHE_ENTRIES;i++)if(!g_cache[i].used)return 1;return 0;}
+
+static int checkpoint_cache_response_valid(const m29_cache_t *entry)
+{
+    if (!entry || entry->used != 1 || entry->operation == 0
+        || entry->operation >= (1ULL << 63) || entry->len == 0
+        || entry->len > M29_MAX_PAYLOAD) return 0;
+    noun root,tag,rest,version,operation,result,body;
+    int ok = cue_bounded_bytes(entry->payload,entry->len,&cue_i2_limits,
+                               HEAP_MODE_SCRATCH,&root) == CUE_BOUNDED_OK;
+    const uint8_t *canonical = 0; uint64_t canonical_len = 0;
+    if (ok) ok = jam_encode_bytes_identity(root,&canonical,&canonical_len) == 0
+        && canonical_len == entry->len
+        && equal_bytes(canonical,entry->payload,entry->len);
+    if (ok) ok = take(root,&tag,&rest) && cord_is(tag,"aethernet-management-m29")
+        && take(rest,&version,&rest) && direct_is(version,1)
+        && take(rest,&operation,&rest) && noun_is_direct(operation)
+        && direct_val(operation) == entry->operation
+        && take(rest,&result,&body)
+        && (cord_is(result,"done") || cord_is(result,"rejected")
+            || cord_is(result,"failed"));
+    if (noun_tx_active()) noun_tx_abort();
+    return ok;
+}
+
+static void hash_u64(sha256_ctx_t *ctx,uint64_t value)
+{
+    uint8_t bytes[8];
+    for (unsigned i=0;i<8;i++) bytes[i]=(uint8_t)(value>>(8u*i));
+    sha256_update(ctx,bytes,sizeof bytes);
+}
+
+static void checkpoint_replay_hash(uint8_t out[32])
+{
+    sha256_ctx_t ctx; sha256_init(&ctx);
+    static const uint8_t domain[] = "M29-checkpoint-replay-v1";
+    sha256_update(&ctx,domain,sizeof domain-1u);
+    hash_u64(&ctx,g_checkpoint_selected); hash_u64(&ctx,g_checkpoint_terminal);
+    hash_u64(&ctx,g_checkpoint_lifecycle); hash_u64(&ctx,g_checkpoint_generation);
+    hash_u64(&ctx,g_checkpoint_installation);
+    hash_u64(&ctx,g_checkpoint_sequence_high);
+    hash_u64(&ctx,g_checkpoint_operation_high);
+    hash_u64(&ctx,g_checkpoint_response_sequence);
+    hash_u64(&ctx,g_checkpoint_rate_start);
+    hash_u64(&ctx,g_checkpoint_rate_count);
+    for (unsigned i=0;i<M29_CACHE_ENTRIES;i++) {
+        const m29_cache_t *entry=&g_checkpoint_cache[i];
+        hash_u64(&ctx,(uint64_t)entry->used); hash_u64(&ctx,entry->operation);
+        sha256_update(&ctx,entry->digest,sizeof entry->digest);
+        hash_u64(&ctx,entry->len);
+        sha256_update(&ctx,entry->payload,entry->len);
+    }
+    sha256_final(&ctx,out);
+}
+
+static int checkpoint_replay_valid(void)
+{
+    if (g_checkpoint_selected > 1u
+        || (g_checkpoint_lifecycle != M29_RUNNING
+            && g_checkpoint_lifecycle != M29_STOPPED
+            && g_checkpoint_lifecycle != M29_IDLE)
+        || (g_checkpoint_selected == 0
+            ? (g_checkpoint_generation != 1 || g_checkpoint_terminal != 0)
+            : (g_checkpoint_generation != 2 || g_checkpoint_terminal != 1))
+        || g_checkpoint_sequence_high == UINT64_MAX
+        || g_checkpoint_operation_high == UINT64_MAX
+        || g_checkpoint_response_sequence == 0
+        || g_checkpoint_response_sequence == UINT64_MAX
+        || g_checkpoint_rate_count > M29_RATE_LIMIT
+        || (g_checkpoint_rate_start == 0 && g_checkpoint_rate_count != 0)) return 0;
+    unsigned used=0; uint64_t previous=0,maximum=0;
+    for (unsigned i=0;i<M29_CACHE_ENTRIES;i++) {
+        const m29_cache_t *entry=&g_checkpoint_cache[i];
+        if (entry->used == 0) continue;
+        if (entry->used != 1 || entry->operation <= previous
+            || !checkpoint_cache_response_valid(entry)) return 0;
+        previous=entry->operation; maximum=entry->operation; used++;
+    }
+    if (maximum > g_checkpoint_operation_high
+        || g_checkpoint_sequence_high < used
+        || g_checkpoint_response_sequence < (uint64_t)used + 1u) return 0;
+    uint8_t digest[32]; checkpoint_replay_hash(digest);
+    return equal_bytes(digest,g_checkpoint_replay_digest,sizeof digest);
+}
 
 typedef struct {
     uint8_t policy_id[32], policy_digest[32], predecessor[32];
@@ -514,11 +598,17 @@ int m29_target_checkpoint_capture(void)
     for(unsigned i=0;i<M29_CACHE_ENTRIES;i++){
         g_checkpoint_cache[i]=g_cache[i];
     }
+    checkpoint_replay_hash(g_checkpoint_replay_digest);
     g_checkpoint_valid=1;return 0;
 }
 int m29_target_checkpoint_restore(void)
 {
-    if(!g_checkpoint_valid||g_stage_open||g_response_pending||m26_target_checkpoint_restore()!=0)return -1;
+    /* Validate the complete bounded replay record before touching the M26
+     * provider or any M29 publication state.  The digest detects mutation of
+     * the fixed checkpoint copy; this is an in-memory integrity fence, not a
+     * crash/power-loss durability claim. */
+    if(!g_checkpoint_valid||g_stage_open||g_response_pending||!checkpoint_replay_valid())return -1;
+    if(m26_target_checkpoint_restore()!=0)return -1;
     g_selected=g_checkpoint_selected;g_terminal=g_checkpoint_terminal;
     g_lifecycle=g_checkpoint_lifecycle;g_generation=g_checkpoint_generation;
     g_terminal_installation=g_checkpoint_installation;
