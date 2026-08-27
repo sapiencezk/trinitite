@@ -583,7 +583,11 @@ int m29_target_service_tick(void)
 
 int m29_target_checkpoint_capture(void)
 {
-    if(g_stage_open||g_response_pending||g_checkpoint_valid||m26_target_checkpoint_capture()!=0)return -1;
+    /* The supported M29 checkpoint profile is already-quiescent STOPPED.
+     * RUNNING capture would create a checkpoint whose restore requires a
+     * fallible provider/native reinitialization suffix without rollback. */
+    if(g_lifecycle!=M29_STOPPED||g_stage_open||g_response_pending
+       ||g_checkpoint_valid||m26_target_checkpoint_capture()!=0)return -1;
     g_checkpoint_selected=g_selected;g_checkpoint_terminal=g_terminal;
     g_checkpoint_lifecycle=g_lifecycle;g_checkpoint_generation=g_generation;
     g_checkpoint_installation=g_terminal_installation;
@@ -607,7 +611,11 @@ int m29_target_checkpoint_restore(void)
      * provider or any M29 publication state.  The digest detects mutation of
      * the fixed checkpoint copy; this is an in-memory integrity fence, not a
      * crash/power-loss durability claim. */
-    if(!g_checkpoint_valid||g_stage_open||g_response_pending||!checkpoint_replay_valid())return -1;
+    /* Refuse RUNNING restore before the underlying M26 provider restore or
+     * any M29 publication assignment.  The later reinitialization path is
+     * therefore unreachable in the supported STOPPED-only profile. */
+    if(!g_checkpoint_valid||g_lifecycle!=M29_STOPPED||g_stage_open
+       ||g_response_pending||!checkpoint_replay_valid())return -1;
     if(m26_target_checkpoint_restore()!=0)return -1;
     g_selected=g_checkpoint_selected;g_terminal=g_checkpoint_terminal;
     g_lifecycle=g_checkpoint_lifecycle;g_generation=g_checkpoint_generation;
@@ -624,7 +632,16 @@ int m29_target_checkpoint_restore(void)
     for(unsigned i=0;i<M29_CACHE_ENTRIES;i++){
         g_cache[i]=g_checkpoint_cache[i];
     }
-    if(g_lifecycle==M29_RUNNING){if(m26_target_init()!=0||m29_native_init()!=0||m26_target_set_running(1)!=0)return -1;}
     return 0;
 }
+#ifdef M29_TEST_CONTROLS
+int m29_target_test_checkpoint_tamper(void)
+{
+    /* The separate replay digest remains untouched: this is the compiled
+     * target witness for detecting a single cached-field mutation. */
+    if(!g_checkpoint_valid||!g_checkpoint_cache[0].used)return -1;
+    g_checkpoint_cache[0].digest[0]^=1u;
+    return 0;
+}
+#endif
 uint64_t m29_target_selected(void){return g_selected?1:0;} uint64_t m29_target_generation(void){return g_generation;} uint64_t m29_target_terminal(void){return g_terminal?1:0;}

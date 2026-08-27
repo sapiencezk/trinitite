@@ -3111,6 +3111,16 @@ defcode "M29CKR?", 7, m29_checkpoint_restore_word, 0
     NEXT
 #endif
 
+#ifdef M29_TEST_CONTROLS
+// M29BD? is qualification-only: mutate one cached replay field after capture
+// without recomputing its integrity digest, then test restore refusal.
+defcode "M29BD?", 6, m29_checkpoint_tamper_word, 0
+    bl      m29_target_test_checkpoint_tamper
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
 // M21 fixed two-slot authority probes.  The only external ingress accepts
 // two BOOL samples for the admitted source REQ; no Forth word accepts raw
 // EI, route, egress, or inter-resource carrier nouns.
