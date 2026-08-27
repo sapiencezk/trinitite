@@ -17,6 +17,15 @@ int i2_admission_lookup(const uint8_t program_hash[32],
                         const uint8_t limits_hash[32],
                         const i2_admission_catalog_entry_t **out);
 int i2_admission_limits_hash(noun gate, uint8_t out[32]);
+/* SHA-256 of the canonical DeploymentBinding reconstructed from the
+ * already-validated candidate gate and identities.  The helper deliberately
+ * receives policy resource/generation rather than discovering either from a
+ * target or catalog. */
+int i2_candidate_binding_digest(noun gate, uint64_t resource_id,
+                                uint64_t generation,
+                                const uint8_t package_hash[32],
+                                const uint8_t battery_hash[32],
+                                uint8_t out[32]);
 int i2_admission_pill_digest(const uint8_t *base, uint64_t pill_bytes,
                              uint8_t out[32]);
 /* True when program+anchor+capability name exactly one catalog entry and

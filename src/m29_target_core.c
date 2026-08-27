@@ -68,13 +68,6 @@ static const uint8_t M29_DATA_PLAN_ID[32] = {
     0x41,0x2e,0xe3,0xf4,0x29,0x32,0xdb,0x66,0xbd,0x56,0x9c,0x99,0xe2,0x88,0x4a,0x28,
     0x47,0xd7,0x66,0xb0,0x44,0x25,0x51,0xad,0x19,0xf7,0xa0,0x4a,0xb0,0x14,0xd5,0x50,
 };
-/* SHA-256 of the canonical unchanged M25 binding envelope.  This is a
- * capability-envelope identity, not a successor program identity. */
-static const uint8_t M29_BINDING_IDENTITY[32] = {
-    0xaa,0x38,0x53,0x56,0x9a,0x34,0x15,0x74,0x9c,0x07,0xbd,0xd9,0xa8,0x84,0x5e,0x53,
-    0xcc,0x0c,0xf5,0xc2,0xaa,0x51,0x03,0x91,0xd0,0x2f,0x90,0x58,0x8a,0xa4,0xbe,0x63,
-};
-
 typedef enum { M29_RUNNING=1, M29_STOPPED=2, M29_IDLE=3 } m29_lifecycle_t;
 typedef enum { M29_DONE=1, M29_REJECTED=2, M29_FAILED=3 } m29_result_t;
 typedef enum { M29_STATUS=1, M29_STOP, M29_BEGIN, M29_CHUNK, M29_SEAL, M29_ACTIVATE, M29_CANCEL, M29_START } m29_op_t;
@@ -364,13 +357,6 @@ reject:
     return 0;
 }
 
-static int capability_binding_identity(uint8_t digest_out[32])
-{
-    if (!digest_out) return 0;
-    for (unsigned i = 0; i < 32; i++) digest_out[i] = M29_BINDING_IDENTITY[i];
-    return 1;
-}
-
 static int policy_bootstrap_valid(const m29_policy_t *p)
 {
     return p && p->generation == 2 && p->manager == M29_MANAGER
@@ -453,7 +439,9 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
     if(!equal_bytes(identity.battery_hash,policy.battery,32))goto reject;
     if(!i2_admission_limits_hash(candidate,got_limits)
        ||!equal_bytes(got_limits,policy.successor_limits,32))goto reject;
-    if(!capability_binding_identity(capability_binding)
+    if(!i2_candidate_binding_digest(candidate,policy.resource,policy.generation,
+                                    identity.package_hash,identity.battery_hash,
+                                    capability_binding)
        ||!equal_bytes(capability_binding,policy.successor_binding,32))goto reject;
     if(!validate_program_projection(candidate,&identity,&policy))goto reject;
     if(m26_target_prepare_gate(candidate,&identity,capability,&prepared)!=0)goto reject;
