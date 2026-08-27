@@ -32,6 +32,9 @@
 #ifdef M28_COMMISSION
 #include "m28_target_core.h"
 #endif
+#ifdef M29_COMMISSION
+#include "m29_target_core.h"
+#endif
 #include "m22_provider_core.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
@@ -2410,7 +2413,9 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
 #ifdef M26_DUPLEX
         /* The commissioning seam owns the shared RX demultiplex point. It hands M26 DATA frames
          * back to the unchanged data adapter before the M26 service tick. */
- #ifdef M28_COMMISSION
+ #ifdef M29_COMMISSION
+        (void)m29_target_service_tick();
+ #elif defined(M28_COMMISSION)
         (void)m28_target_service_tick();
  #elif defined(M27_COMMISSION)
         (void)m27_target_service_tick();
@@ -2533,7 +2538,9 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 (void)m25_target_service_tick();
 #endif
 #ifdef M26_DUPLEX
-                #ifdef M28_COMMISSION
+                #ifdef M29_COMMISSION
+                (void)m29_target_service_tick();
+                #elif defined(M28_COMMISSION)
                 (void)m28_target_service_tick();
                 #elif defined(M27_COMMISSION)
                 (void)m27_target_service_tick();
@@ -5282,7 +5289,11 @@ int kernel_prepare_pill(void)
 #ifdef M26_DUPLEX
         int status = m26_target_boot(
             gate, &g_pill_candidate_identity, g_pill_candidate_capability);
-#ifdef M28_COMMISSION
+#ifdef M29_COMMISSION
+        if (status == 0)
+            status = m29_target_boot(
+                gate, &g_pill_candidate_identity, g_pill_candidate_capability);
+#elif defined(M28_COMMISSION)
         if (status == 0)
             status = m28_target_boot(
                 gate, &g_pill_candidate_identity, g_pill_candidate_capability);

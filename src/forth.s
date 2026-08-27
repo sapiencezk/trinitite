@@ -2028,7 +2028,12 @@ defcode "QUIT", 4, quit, 0
 #endif
 
 #ifdef M26_DUPLEX
-    #ifdef M28_COMMISSION
+    #ifdef M29_COMMISSION
+    stp     x5, x6, [sp, #-16]!
+    bl      m29_target_service_tick
+    ldp     x5, x6, [sp], #16
+    ldr     x0, =UART_FR
+    #elif defined(M28_COMMISSION)
     stp     x5, x6, [sp, #-16]!
     bl      m28_target_service_tick
     ldp     x5, x6, [sp], #16
@@ -3085,6 +3090,22 @@ defcode "M28CKS?", 7, m28_checkpoint_save_word, 0
 
 defcode "M28CKR?", 7, m28_checkpoint_restore_word, 0
     bl      m28_target_checkpoint_restore
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
+#ifdef M29_COMMISSION
+// M29 checkpoint controls are local recovery operations; commissioning and
+// the M26 DATA profile remain native management/data surfaces.
+defcode "M29CKS?", 7, m29_checkpoint_save_word, 0
+    bl      m29_target_checkpoint_capture
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M29CKR?", 7, m29_checkpoint_restore_word, 0
+    bl      m29_target_checkpoint_restore
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT

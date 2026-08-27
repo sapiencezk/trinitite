@@ -40,6 +40,17 @@ ifeq ($(M27_COMMISSION),1)
 $(error M28_COMMISSION=1 cannot be combined with frozen M27_COMMISSION=1)
 endif
 endif
+ifeq ($(M29_COMMISSION),1)
+ifneq ($(PLATFORM),qemu-virt)
+$(error M29_COMMISSION=1 requires PLATFORM=qemu-virt; refusing native MMIO on $(PLATFORM))
+endif
+ifeq ($(M27_COMMISSION),1)
+$(error M29_COMMISSION=1 cannot be combined with frozen M27_COMMISSION=1)
+endif
+ifeq ($(M28_COMMISSION),1)
+$(error M29_COMMISSION=1 cannot be combined with frozen M28_COMMISSION=1)
+endif
+endif
 
 CROSS   ?= aarch64-elf-
 CC       = $(CROSS)gcc
@@ -76,6 +87,7 @@ M25_TARGET ?= 0
 M26_DUPLEX ?= 0
 M27_COMMISSION ?= 0
 M28_COMMISSION ?= 0
+M29_COMMISSION ?= 0
 
 ifeq ($(M8_EVIDENCE),1)
 CFLAGS += -DM8_EVIDENCE=1
@@ -109,6 +121,9 @@ CFLAGS += -DM27_COMMISSION=1 -DM26_DUPLEX=1 -DM25_TARGET=1 -DM24_NODE_ID=$(M24_N
 endif
 ifeq ($(M28_COMMISSION),1)
 CFLAGS += -DM28_COMMISSION=1 -DM26_DUPLEX=1 -DM25_TARGET=1 -DM24_NODE_ID=$(M24_NODE_ID)
+endif
+ifeq ($(M29_COMMISSION),1)
+CFLAGS += -DM29_COMMISSION=1 -DM26_DUPLEX=1 -DM25_TARGET=1 -DM24_NODE_ID=$(M24_NODE_ID)
 endif
 
 ifeq ($(COLD_MEDIA),ram)
@@ -147,7 +162,7 @@ NATIVE_OBJS =
 ifeq ($(M24_NATIVE),1)
 NATIVE_OBJS = sha256.o virtio_net.o aethernet_native.o
 endif
-ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION)),)
+ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)
 NATIVE_OBJS += sha256.o virtio_net.o m25_aethernet_native.o
 else ifeq ($(M25_TARGET),1)
 NATIVE_OBJS += sha256.o virtio_net.o m25_aethernet_native.o
@@ -158,7 +173,10 @@ endif
 ifeq ($(M28_COMMISSION),1)
 NATIVE_OBJS += sha256.o virtio_net.o m28_aethernet_native.o
 endif
-ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION)),)
+ifeq ($(M29_COMMISSION),1)
+NATIVE_OBJS += sha256.o virtio_net.o m29_aethernet_native.o
+endif
+ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)
 M26_OBJS = m26_admission.o m26_plan_record.o m26_target_core.o
 else
 M26_OBJS =
@@ -171,11 +189,15 @@ M28_OBJS =
 ifeq ($(M28_COMMISSION),1)
 M28_OBJS = m28_admission.o m28_target_core.o
 endif
-OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
-ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION)),)
+M29_OBJS =
+ifeq ($(M29_COMMISSION),1)
+M29_OBJS = m29_admission.o m29_target_core.o
+endif
+OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)
 OBJ_NAMES := $(filter-out m25_plan_record.o m25_target_core.o,$(OBJ_NAMES))
 endif
-CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M25_TARGET)-$(M26_DUPLEX)-$(M27_COMMISSION)-$(M28_COMMISSION)-$(M24_NODE_ID)
+CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M25_TARGET)-$(M26_DUPLEX)-$(M27_COMMISSION)-$(M28_COMMISSION)-$(M29_COMMISSION)-$(M24_NODE_ID)
 BUILD_DIR = .build/$(CONFIG_KEY)
 OBJDIR = $(BUILD_DIR)/obj
 OBJS = $(addprefix $(OBJDIR)/,$(OBJ_NAMES))

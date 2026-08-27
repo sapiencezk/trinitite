@@ -17,6 +17,9 @@
 #ifdef M28_COMMISSION
 #include "m28_admission.h"
 #endif
+#ifdef M29_COMMISSION
+#include "m29_admission.h"
+#endif
 
 #define PILL_I2_HEADER_SIZE (256u)
 #define PILL_I2_MAX_BYTES   PILL_SCRATCH_SIZE
@@ -228,7 +231,7 @@ static int version_is(noun n, uint16_t major, uint16_t minor)
 
 static int m17_cord_is(noun n, const char *text)
 {
-    char buffer[16];
+    char buffer[32];
     size_t len = 0;
     while (text[len])
         len++;
@@ -464,14 +467,18 @@ static int m20_or_m21_base_program(noun program, noun *base_out)
             && !m17_cord_is(tag, "i2-m21-program")
             && !m17_cord_is(tag, "i2-m25-program")
 #ifdef M26_DUPLEX
+#ifdef M29_COMMISSION
+            && !m17_cord_is(tag, "i2-resource-program-v1")
             && !m17_cord_is(tag, "i2-m26-program")
-#endif
+#elif defined(M28_COMMISSION)
+            && !m17_cord_is(tag, "i2-m28-program")
+#else
 #ifdef M27_COMMISSION
             && !m17_cord_is(tag, "i2-m27-program")
+#else
+            && !m17_cord_is(tag, "i2-m26-program")
 #endif
-#ifdef M28_COMMISSION
-            && !m17_cord_is(tag, "i2-m27-program")
-            && !m17_cord_is(tag, "i2-m28-program")
+#endif
 #endif
             )
         || !take(rest, &base, &tables) || !noun_is_cell(tables))
@@ -702,7 +709,9 @@ static int validate_gate_common(noun gate, const runtime_identity_t *id,
     if (i2_admission_program_known(id->program_hash)
         || m25_admission_program_known(id->program_hash)
 #ifdef M26_DUPLEX
-#ifdef M28_COMMISSION
+#ifdef M29_COMMISSION
+        || m29_admission_program_known(id->program_hash)
+#elif defined(M28_COMMISSION)
         || m28_admission_program_known(id->program_hash)
 #elif defined(M27_COMMISSION)
         || m27_admission_program_known(id->program_hash)
@@ -1010,12 +1019,17 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
         && identity.deployment_schema[1] == 3
         && capability_profile == RUNTIME_CAPABILITY_PROFILE_M25;
 #ifdef M26_DUPLEX
+#ifdef M29_COMMISSION
     int m26_identity = m25_identity
-#ifdef M28_COMMISSION
+        && m29_admission_program_known(identity.program_hash);
+#elif defined(M28_COMMISSION)
+    int m26_identity = m25_identity
         && m28_admission_program_known(identity.program_hash);
 #elif defined(M27_COMMISSION)
+    int m26_identity = m25_identity
         && m27_admission_program_known(identity.program_hash);
 #else
+    int m26_identity = m25_identity
         && m26_admission_program_known(identity.program_hash);
 #endif
 #endif
@@ -1050,7 +1064,11 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
             int header_admitted = !i2_admission_pill_digest(base, pill_bytes, pill_digest)
                 ? 0
 #ifdef M26_DUPLEX
-#ifdef M28_COMMISSION
+#ifdef M29_COMMISSION
+                : m26_identity
+                ? m29_admission_lookup(identity.program_hash, identity.package_hash,
+                                       pill_digest, 0, 0)
+#elif defined(M28_COMMISSION)
                 : m26_identity
                 ? m28_admission_lookup(identity.program_hash, identity.package_hash,
                                        pill_digest, 0, 0)
@@ -1095,7 +1113,11 @@ pill_i2_status_t pill_i2_validate_buffer(const uint8_t *base,
             || !i2_admission_pill_digest(base, pill_bytes, pill_digest)
             ? 0
 #ifdef M26_DUPLEX
-#ifdef M28_COMMISSION
+#ifdef M29_COMMISSION
+            : m26_identity
+            ? m29_admission_lookup(identity.program_hash, identity.package_hash,
+                                   pill_digest, limits_hash, &entry)
+#elif defined(M28_COMMISSION)
             : m26_identity
             ? m28_admission_lookup(identity.program_hash, identity.package_hash,
                                    pill_digest, limits_hash, &entry)
