@@ -16,6 +16,7 @@
 #include "bounded_cue.h"
 #include "jam.h"
 #include "m25_aethernet_native.h"
+#include "i2_application_surface.h"
 #include "m25_plan_record.h"
 #include "memory.h"
 #include "nock.h"
@@ -52,6 +53,7 @@ static const uint8_t M25_PSK[] = "m25-development-key-0123456789";
 static noun g_gate;
 static runtime_identity_t g_identity;
 static noun g_external_tag, g_ei_tag, g_intent_tag, g_delivery_tag, g_service_tag;
+static i2_application_service_surface_t g_surface;
 static noun g_envelope_tag, g_publish_tag;
 static noun g_pending_event;
 static uint8_t g_fifo_value[M25_FIFO_CAPACITY];
@@ -76,6 +78,7 @@ static uint64_t g_initial_jam_len;
 #ifdef M26_DUPLEX
 static uint8_t g_candidate_jam[M25_CHECKPOINT_BYTES];
 static uint64_t g_candidate_jam_len;
+static i2_application_service_surface_t g_candidate_surface;
 #endif
 static uint64_t g_test_cnf_failure;
 
@@ -178,17 +181,53 @@ static int slam(noun event, noun *candidate, noun *causes)
     return slam_gate(g_gate, event, g_is_source, candidate, causes);
 }
 
+static int drain_application_causes(noun candidate, noun causes,
+                                    noun *final_candidate, noun *final_causes)
+{
+    noun current = candidate, pending = causes;
+    for (unsigned depth = 0; depth < 2; depth++) {
+        noun cause, rest, tag;
+        if (!take(pending, &cause, &rest) || !direct_is(rest, 0)
+            || !take(cause, &tag, &rest)) return 0;
+        if (noun_eq(tag, g_intent_tag)) {
+            *final_candidate = current; *final_causes = pending; return 1;
+        }
+        if (!i2_application_surface_tag_matches(tag, "i2-route-ei", 11)) return 0;
+        if (!slam_gate(current, cause, 0, &current, &pending)) return 0;
+    }
+    return 0;
+}
+
 static int build_external(uint64_t a, uint64_t b, noun *out)
 {
-    noun va, vb, sa, sb, list, ei, body;
-    if (a > 1 || b > 1 || !cons(direct(1), direct(a), &va)
-        || !cons(direct(1), direct(b), &vb) || !cons(direct(1), va, &sa)
-        || !cons(direct(2), vb, &sb) || !cons(sb, NOUN_ZERO, &list)
-        || !cons(sa, list, &ei) || !cons(direct(1), ei, &body)
-        || !cons(direct(m25_admitted_plan.source_application_instance), body, &ei)
-        || !cons(g_ei_tag, ei, &body) || !cons(g_external_tag, body, out)) return 0;
+    noun list = NOUN_ZERO, typed, variable, body, target;
+    if (!g_surface.ingress.sample_count
+        || g_surface.ingress.sample_count > I2_SURFACE_MAX_INGRESS_SAMPLES
+        || a > 1 || (g_surface.ingress.sample_count > 1 && b > 1)) return 0;
+    for (uint32_t i = g_surface.ingress.sample_count; i > 0; i--) {
+        uint64_t value = i == 1 ? a : b;
+        if (!cons(direct(g_surface.ingress.sample_type[i - 1]), direct(value), &typed)
+            || !cons(direct(g_surface.ingress.sample_id[i - 1]), typed, &variable)
+            || !cons(variable, list, &list)) return 0;
+    }
+    if (!cons(direct(g_surface.ingress.event), list, &body)
+        || !cons(direct(g_surface.ingress.instance), body, &target)
+        || !cons(g_ei_tag, target, &body) || !cons(g_external_tag, body, out)) return 0;
     return 1;
 }
+
+#ifdef M26_DUPLEX
+static int surface_remote_target_valid(const i2_application_service_surface_t *surface)
+{
+    const i2_publication_attachment_t *publication;
+    if (!surface || surface->publication_count == 0) return 0;
+    publication = &surface->publications[0];
+    return publication->target_instance == m25_admitted_plan.target_application_instance
+        && publication->target_event == m25_admitted_plan.target_event
+        && publication->target_data == m25_admitted_plan.target_data
+        && publication->target_type == 1;
+}
+#endif
 
 static int resource_id(noun gate, uint64_t *out)
 {
@@ -210,17 +249,17 @@ static int parse_intent(noun causes, uint64_t *value)
     if (!take(body, &value_type, &value_payload)
         || !direct_is(value_type, 1) || !noun_is_direct(value_payload)
         || direct_val(value_payload) > 1
-        || !direct_is(fields[0], m25_admitted_plan.source_application_instance)
         || !noun_is_direct(fields[1]) || !noun_is_direct(fields[2])
         || !noun_is_direct(fields[3])
-        || !m25_plan_record_source_association(direct_val(fields[1]), direct_val(fields[2]), direct_val(fields[3]))
-        || !direct_is(fields[4], 1)
-        || !direct_is(fields[5], m25_admitted_plan.publish_instance)
-        || !direct_is(fields[6], m25_admitted_plan.subscribe_instance)
-        || !direct_is(fields[7], m25_admitted_plan.target_application_instance)
-        || !direct_is(fields[8], m25_admitted_plan.target_event)
-        || !direct_is(fields[9], m25_admitted_plan.target_data)
-        || !direct_is(fields[10], 1)) return 0;
+        || !noun_is_direct(fields[4]) || !noun_is_direct(fields[5])
+        || !noun_is_direct(fields[6]) || !noun_is_direct(fields[7])
+        || !noun_is_direct(fields[8]) || !noun_is_direct(fields[9])
+        || !noun_is_direct(fields[10])
+        || !i2_application_surface_publication_matches(
+            &g_surface, direct_val(fields[0]), direct_val(fields[1]),
+            direct_val(fields[2]), direct_val(fields[3]), direct_val(fields[4]),
+            direct_val(fields[5]), direct_val(fields[6]), direct_val(fields[7]),
+            direct_val(fields[8]), direct_val(fields[9]), direct_val(fields[10]))) return 0;
     *value = direct_val(value_payload);
     return 1;
 }
@@ -307,11 +346,13 @@ static int parse_frame(const uint8_t *raw, uint32_t len, uint64_t *sequence,
 static int build_delivery(uint64_t value, noun *out)
 {
     noun type_value, variable, target_event, target_instance, service;
-    if (!cons(direct(1), direct(value), &type_value)
-        || !cons(direct(1), type_value, &variable)
-        || !cons(direct(1), variable, &target_event)
-        || !cons(direct(m25_admitted_plan.target_application_instance), target_event, &target_instance)
-        || !cons(direct(m25_admitted_plan.subscribe_instance), target_instance, &service)
+    const i2_publication_attachment_t *publication = &g_surface.publications[0];
+    if (g_surface.publication_count == 0
+        || !cons(direct(publication->target_type), direct(value), &type_value)
+        || !cons(direct(publication->target_data), type_value, &variable)
+        || !cons(direct(publication->target_event), variable, &target_event)
+        || !cons(direct(publication->target_instance), target_event, &target_instance)
+        || !cons(direct(publication->target_service), target_instance, &service)
         || !cons(g_delivery_tag, service, out)) return 0;
     return 1;
 }
@@ -341,6 +382,7 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
                     uint8_t capability_profile)
 {
     uint64_t rid;
+    i2_application_service_surface_t surface;
     if (!identity || !m25_plan_record_validate()
         || identity->runtime_abi[0] != 1 || identity->runtime_abi[1] != 9
         || identity->host_abi[0] != 1 || identity->host_abi[1] != 3
@@ -350,6 +392,11 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
     if (!runtime_identity_validate_gate(gate, identity, 0)) {
         return -1;
     }
+    if (!i2_application_surface_from_gate(gate, &surface)
+#ifdef M26_DUPLEX
+        || !surface_remote_target_valid(&surface)
+#endif
+    ) return -1;
     if (!resource_id(gate, &rid)
         || (rid != m25_admitted_plan.source_resource_id
             && rid != m25_admitted_plan.target_resource_id)) {
@@ -365,13 +412,15 @@ int m25_target_boot(noun gate, const runtime_identity_t *identity,
     g_delivery_tag=tags[3]; g_envelope_tag=tags[4]; g_publish_tag=tags[5];
     g_service_tag=tags[6];
     if (!noun_is_atom(g_intent_tag) || !noun_is_atom(g_delivery_tag)
-        || !noun_is_atom(g_envelope_tag) || !noun_is_atom(g_service_tag)) return -1;
+        || !noun_is_atom(g_envelope_tag) || !noun_is_atom(g_service_tag)) {
+        return -1;
+    }
     noun copy;
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
     if (!noun_copy_checked(gate, &copy)) {
         heap_persist_abort_tx(); return -1;
     }
-    g_gate = copy; heap_persist_commit_tx();
+    g_gate = copy; g_surface = surface; heap_persist_commit_tx();
     if (noun_tx_active()) noun_tx_commit();
     heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
     const uint8_t *initial_bytes; uint64_t initial_len;
@@ -407,8 +456,8 @@ int m25_target_init(void)
         || m25_native_tx_pending()) return -1;
     if (m25_native_init() != 0) return -1;
     noun staged, persisted;
-    uint64_t instance = g_is_source ? m25_admitted_plan.publish_instance
-                                    : m25_admitted_plan.subscribe_instance;
+    uint64_t instance = g_is_source ? g_surface.publications[0].source_service
+                                    : g_surface.publications[0].target_service;
     heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
     if (!service_candidate(g_gate, instance, 1, 0, &staged)) return -1;
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
@@ -422,7 +471,7 @@ int m25_target_init(void)
      * is staged from the first committed candidate before native RX/TX is
      * enabled; no provider-side shortcut can initialize the seam. */
     heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
-    if (!service_candidate(g_gate, m25_admitted_plan.subscribe_instance,
+    if (!service_candidate(g_gate, g_surface.publications[0].target_service,
                            1, 0, &staged)) return -1;
     heap_persist_begin_tx(); heap_set_mode(HEAP_MODE_PERSIST);
     if (!noun_copy_checked(staged, &persisted)) {
@@ -500,10 +549,11 @@ int m25_target_step(void)
          * would wrap to zero after the coherent send commit. */
         if (g_next_sequence == UINT64_MAX) { g_last_error = 8; return -1; }
         heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
-        noun candidate, causes; uint64_t value;
+        noun candidate, causes, final_causes; uint64_t value;
         uint8_t frame[M25_HEADER_BYTES + M25_MAX_PAYLOAD]; uint32_t frame_len;
         if (!slam(g_pending_event, &candidate, &causes)
-            || !parse_intent(causes, &value)
+            || !drain_application_causes(candidate, causes, &candidate, &final_causes)
+            || !parse_intent(final_causes, &value)
             || !build_publication(value, g_next_sequence, frame, &frame_len)) {
             g_last_error = 3; return -1;
         }
@@ -527,7 +577,7 @@ int m25_target_step(void)
          * remain after a frame has been accepted by the native adapter. */
         noun confirmed, staged;
         if (g_test_cnf_failure == 1) { g_last_error = 9; return -1; }
-        if (!service_candidate(candidate, m25_admitted_plan.publish_instance,
+        if (!service_candidate(candidate, g_surface.publications[0].source_service,
                                3, g_next_sequence, &confirmed)) {
             g_last_error = 9; return -1;
         }
@@ -556,7 +606,7 @@ int m25_target_step(void)
      * both candidates are private until the final persistent copy commits. */
     noun service_state;
     uint64_t effect_value;
-    if (!service_candidate(g_gate, m25_admitted_plan.subscribe_instance,
+    if (!service_candidate(g_gate, g_surface.publications[0].target_service,
                            4, value, &service_state)
         || !build_delivery(value, &event)
         || !slam_gate(service_state, event, 0, &candidate, &causes)
@@ -738,6 +788,8 @@ int m25_target_prepare_gate(noun gate, const runtime_identity_t *identity,
         || capability_profile != RUNTIME_CAPABILITY_PROFILE_M25
         || identity->runtime_abi[0] != 1 || identity->runtime_abi[1] != 9
         || !runtime_identity_validate_gate(gate, identity, 0)) return -1;
+    if (!i2_application_surface_from_gate(gate, &g_candidate_surface)
+        || !surface_remote_target_valid(&g_candidate_surface)) return -1;
     const uint8_t *encoded;
     uint64_t encoded_len;
     if (jam_encode_bytes_checked(gate, &encoded, &encoded_len) != 0
@@ -756,6 +808,7 @@ void m25_target_publish_gate(noun gate, const runtime_identity_t *identity,
                              uint8_t capability_profile)
 {
     g_gate = gate;
+    g_surface = g_candidate_surface;
     for (uint64_t i = 0; i < g_candidate_jam_len; i++)
         g_initial_jam[i] = g_candidate_jam[i];
     g_initial_jam_len = g_candidate_jam_len;
