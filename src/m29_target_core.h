@@ -18,3 +18,7 @@ int m29_target_test_checkpoint_tamper(void);
 uint64_t m29_target_selected(void);
 uint64_t m29_target_generation(void);
 uint64_t m29_target_terminal(void);
+uint64_t m29_target_pending(void);
+uint64_t m29_target_pending_attempts(void);
+uint64_t m29_target_pending_tx_state(void);
+uint64_t m29_target_response_sequence(void);

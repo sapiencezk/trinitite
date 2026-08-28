@@ -32,6 +32,7 @@
 #define M29_RATE_LIMIT 64u
 #define M29_OPS 2000000ULL
 #define M29_CELLS 128000ULL
+#define M29_RESPONSE_ATTEMPTS 3u
 
 #define M29_WIRE_MAJOR 0u
 #define M29_WIRE_MINOR 1u
@@ -77,9 +78,15 @@ typedef struct {
     uint8_t policy_sha256[32]; uint8_t pill_sha256[32]; m29_op_t op;
 } m29_request_t;
 typedef struct { int used; uint64_t operation; uint8_t digest[32]; uint16_t len; uint8_t payload[M29_MAX_PAYLOAD]; } m29_cache_t;
+typedef enum { M29_PENDING_NONE=0, M29_PENDING_UNSENT=1, M29_PENDING_IN_FLIGHT=2 } m29_pending_tx_t;
+typedef struct {
+    int used; uint64_t operation; uint8_t digest[32]; uint16_t len;
+    uint8_t payload[M29_MAX_PAYLOAD]; uint64_t response_sequence;
+    uint8_t attempts; m29_pending_tx_t tx_state;
+} m29_pending_response_t;
 
 static uint8_t g_stage[M29_STAGE_BYTES] __attribute__((aligned(16)));
-static int g_stage_open,g_stage_sealed,g_selected,g_terminal,g_initialized,g_response_pending;
+static int g_stage_open,g_stage_sealed,g_selected,g_terminal,g_initialized;
 static uint64_t g_installation,g_total,g_policy_bytes,g_pill_bytes,g_received,g_chunks,g_lease;
 static m29_lifecycle_t g_lifecycle;
 static noun g_management_tag;
@@ -88,6 +95,7 @@ static uint8_t g_stage_policy_sha256[32], g_stage_pill_sha256[32];
 static uint64_t g_generation,g_sequence_high,g_operation_high,g_response_sequence,g_terminal_installation;
 static uint64_t g_rate_start,g_rate_count;
 static m29_cache_t g_cache[M29_CACHE_ENTRIES];
+static m29_pending_response_t g_pending;
 static uint8_t g_checkpoint_valid,g_checkpoint_selected,g_checkpoint_terminal;
 static m29_lifecycle_t g_checkpoint_lifecycle; static uint64_t g_checkpoint_generation,g_checkpoint_installation;
 static uint64_t g_checkpoint_sequence_high,g_checkpoint_operation_high;
@@ -164,7 +172,7 @@ static int response_payload(uint64_t id,m29_result_t result,noun body,uint8_t*ou
 
 static int response_frame(const uint8_t *payload, uint16_t payload_len,
                           uint8_t out[M29_HEADER_BYTES + M29_MAX_PAYLOAD],
-                          uint32_t *length)
+                          uint32_t *length, uint64_t response_sequence)
 {
     if (!payload || !length || payload_len > M29_MAX_PAYLOAD) return 0;
     for (unsigned i=0;i<M29_HEADER_BYTES;i++) out[i]=0;
@@ -178,7 +186,7 @@ static int response_frame(const uint8_t *payload, uint16_t payload_len,
     for(unsigned i=0;i<16;i++)out[28+i]=M29_BINDING[i];
     for(unsigned i=0;i<32;i++)out[44+i]=M29_SCHEMA[i];
     out[79]=M29_KEY_ID;out[87]=M29_EPOCH;
-    for(unsigned i=0;i<8;i++)out[88+i]=(uint8_t)(g_response_sequence>>(56u-i*8u));
+    for(unsigned i=0;i<8;i++)out[88+i]=(uint8_t)(response_sequence>>(56u-i*8u));
     for(unsigned i=0;i<payload_len;i++)out[M29_HEADER_BYTES+i]=payload[i];
     uint8_t auth[32];
     hmac_sha256(M29_PSK,sizeof M29_PSK-1u,out,M29_HEADER_BYTES+payload_len,auth);
@@ -526,7 +534,64 @@ int m29_target_boot(noun gate,const runtime_identity_t*identity,uint8_t capabili
        ||!identity||capability!=RUNTIME_CAPABILITY_PROFILE_M25||identity->generation!=1
        ||!equal_bytes(identity->program_hash,M29_PREDECESSOR_PROGRAM,32)
        ||!equal_bytes(identity->package_hash,M29_PREDECESSOR_ANCHOR,32))return -1;
-    (void)gate;g_identity=*identity;g_management_tag=cord_from_bytes("aethernet-management-m29",24);if(!noun_is_atom(g_management_tag))return -1;for(unsigned i=0;i<M29_CACHE_ENTRIES;i++)g_cache[i].used=0;g_lifecycle=M29_RUNNING;g_selected=0;g_terminal=0;g_generation=1;g_terminal_installation=0;g_sequence_high=0;g_operation_high=0;g_response_sequence=1;g_rate_start=g_rate_count=0;g_stage_open=g_stage_sealed=0;g_initialized=0;g_response_pending=0;g_checkpoint_valid=0;return 0;
+    (void)gate;g_identity=*identity;g_management_tag=cord_from_bytes("aethernet-management-m29",24);if(!noun_is_atom(g_management_tag))return -1;for(unsigned i=0;i<M29_CACHE_ENTRIES;i++)g_cache[i].used=0;g_pending.used=0;g_lifecycle=M29_RUNNING;g_selected=0;g_terminal=0;g_generation=1;g_terminal_installation=0;g_sequence_high=0;g_operation_high=0;g_response_sequence=1;g_rate_start=g_rate_count=0;g_stage_open=g_stage_sealed=0;g_initialized=0;g_checkpoint_valid=0;return 0;
+}
+
+static m29_pending_tx_t pending_tx_state(void)
+{
+    int completion=m29_native_tx_complete();
+    return completion==0?M29_PENDING_IN_FLIGHT:M29_PENDING_UNSENT;
+}
+
+static int pending_store(uint64_t operation,const uint8_t digest[32],
+                         const uint8_t *payload,uint16_t length)
+{
+    if(g_pending.used||!digest||!payload||!length||length>M29_MAX_PAYLOAD
+       ||g_response_sequence==UINT64_MAX)return 0;
+    g_pending.used=1;g_pending.operation=operation;g_pending.len=length;
+    g_pending.response_sequence=g_response_sequence;g_pending.attempts=1;
+    g_pending.tx_state=pending_tx_state();
+    for(unsigned i=0;i<32;i++)g_pending.digest[i]=digest[i];
+    for(unsigned i=0;i<length;i++)g_pending.payload[i]=payload[i];
+    return 1;
+}
+
+static int pending_retry(const m29_request_t *r,const uint8_t digest[32])
+{
+    if(!r||!digest||!g_pending.used||r->operation!=g_pending.operation
+       ||!equal_bytes(digest,g_pending.digest,32))return 0;
+    if(g_pending.attempts>=M29_RESPONSE_ATTEMPTS)return 0;
+    g_pending.attempts++;
+    int completion=m29_native_tx_complete();
+    if(completion==0){g_pending.tx_state=M29_PENDING_IN_FLIGHT;return 0;}
+    if(completion<0){g_pending.tx_state=M29_PENDING_UNSENT;return 0;}
+    g_pending.tx_state=M29_PENDING_UNSENT;
+    uint8_t frame[M29_HEADER_BYTES+M29_MAX_PAYLOAD];uint32_t frame_len=0;
+    if(!response_frame(g_pending.payload,g_pending.len,frame,&frame_len,
+                       g_pending.response_sequence))return 0;
+    if(m29_native_send(frame,frame_len)!=M29_NATIVE_OK){
+        g_pending.tx_state=pending_tx_state();return 0;
+    }
+    g_response_sequence++;g_pending.used=0;return 1;
+}
+
+static void pending_poll_completion(void)
+{
+    /* An unsent frame has no descriptor to poll.  Treating an available TX
+     * ring as completion for that state would silently clear a persistent
+     * submit failure before the bounded exact replay gets its attempt. */
+    if(!g_pending.used||g_pending.tx_state!=M29_PENDING_IN_FLIGHT)return;
+    int completion=m29_native_tx_complete();
+    if(completion>0){
+        /* Completion proves the retained frame was submitted.  A lost
+         * host-visible frame is repaired by the normal cache replay; no
+         * background retransmission is introduced here. */
+        g_response_sequence++;g_pending.used=0;
+    }else if(completion<0){
+        g_pending.tx_state=M29_PENDING_UNSENT;
+    }else{
+        g_pending.tx_state=M29_PENDING_IN_FLIGHT;
+    }
 }
 
 int m29_target_service_tick(void)
@@ -540,6 +605,7 @@ int m29_target_service_tick(void)
         g_stage_open=g_stage_sealed=0;g_received=g_chunks=g_total=g_policy_bytes=g_pill_bytes=0;
         for(unsigned i=0;i<32;i++){g_stage_policy_sha256[i]=0;g_stage_pill_sha256[i]=0;}
     }
+    pending_poll_completion();
     m29_native_datagram_t d;
     m29_native_status_t native=m29_native_receive(&d);
     if(native!=M29_NATIVE_OK)return 0;
@@ -548,7 +614,15 @@ int m29_target_service_tick(void)
     m29_request_t r;
     if(!decode_request(d.header,d.payload,d.payload_len,&r))return 0;
     if(noun_tx_active())noun_tx_abort();
+    if(g_pending.used){
+        if(r.operation!=g_pending.operation)return 0;
+        if(!equal_bytes(digest,g_pending.digest,32))return 0;
+        if(g_pending.attempts>=M29_RESPONSE_ATTEMPTS)return 0;
+        if(!accept_sequence(r.sequence))return 0;
+        return pending_retry(&r,digest);
+    }
     if(!accept_sequence(r.sequence))return 0;
+    if(g_response_sequence==UINT64_MAX)return 0;
     int found=cache_find(r.operation,digest);
     uint8_t response[M29_MAX_PAYLOAD];uint16_t n=0;
     if(found>=0){
@@ -557,16 +631,18 @@ int m29_target_service_tick(void)
     }else if(found==-2){
         if(!response_payload(r.operation,M29_REJECTED,NOUN_ZERO,response,&n))return 0;
     }else{
-        if(g_response_pending||r.operation==0||r.operation==UINT64_MAX||r.operation<=g_operation_high)return 0;
+        if(r.operation==0||r.operation==UINT64_MAX||r.operation<=g_operation_high)return 0;
         if(!cache_free()||!execute(&r,response,&n))return 0;
         if(!cache_put(r.operation,digest,response,n))return 0;
         g_operation_high=r.operation;
     }
-    if(g_response_sequence==UINT64_MAX)return 0;
     uint8_t frame[M29_HEADER_BYTES+M29_MAX_PAYLOAD];uint32_t frame_len=0;
-    if(!response_frame(response,n,frame,&frame_len))return 0;
-    if(m29_native_send(frame,frame_len)!=M29_NATIVE_OK){g_response_pending=1;return 0;}
-    g_response_sequence++;g_response_pending=0;return 1;
+    if(!response_frame(response,n,frame,&frame_len,g_response_sequence))return 0;
+    if(m29_native_send(frame,frame_len)!=M29_NATIVE_OK){
+        if(!pending_store(r.operation,digest,response,n))return 0;
+        return 0;
+    }
+    g_response_sequence++;return 1;
 }
 
 int m29_target_checkpoint_capture(void)
@@ -574,7 +650,7 @@ int m29_target_checkpoint_capture(void)
     /* The supported M29 checkpoint profile is already-quiescent STOPPED.
      * RUNNING capture would create a checkpoint whose restore requires a
      * fallible provider/native reinitialization suffix without rollback. */
-    if(g_lifecycle!=M29_STOPPED||g_stage_open||g_response_pending
+    if(g_lifecycle!=M29_STOPPED||g_stage_open||g_pending.used
        ||g_checkpoint_valid||m26_target_checkpoint_capture()!=0)return -1;
     g_checkpoint_selected=g_selected;g_checkpoint_terminal=g_terminal;
     g_checkpoint_lifecycle=g_lifecycle;g_checkpoint_generation=g_generation;
@@ -603,7 +679,7 @@ int m29_target_checkpoint_restore(void)
      * any M29 publication assignment.  The later reinitialization path is
      * therefore unreachable in the supported STOPPED-only profile. */
     if(!g_checkpoint_valid||g_lifecycle!=M29_STOPPED||g_stage_open
-       ||g_response_pending||!checkpoint_replay_valid())return -1;
+       ||g_pending.used||!checkpoint_replay_valid())return -1;
     if(m26_target_checkpoint_restore()!=0)return -1;
     g_selected=g_checkpoint_selected;g_terminal=g_checkpoint_terminal;
     g_lifecycle=g_checkpoint_lifecycle;g_generation=g_checkpoint_generation;
@@ -633,3 +709,7 @@ int m29_target_test_checkpoint_tamper(void)
 }
 #endif
 uint64_t m29_target_selected(void){return g_selected?1:0;} uint64_t m29_target_generation(void){return g_generation;} uint64_t m29_target_terminal(void){return g_terminal?1:0;}
+uint64_t m29_target_pending(void){return g_pending.used?1:0;}
+uint64_t m29_target_pending_attempts(void){return g_pending.used?g_pending.attempts:0;}
+uint64_t m29_target_pending_tx_state(void){return g_pending.used?(uint64_t)g_pending.tx_state:0;}
+uint64_t m29_target_response_sequence(void){return g_response_sequence;}

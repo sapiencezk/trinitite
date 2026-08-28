@@ -3121,6 +3121,54 @@ defcode "M29BD?", 6, m29_checkpoint_tamper_word, 0
     NEXT
 #endif
 
+#ifdef M32_TEST_CONTROLS
+// M32* words are qualification-only controls/telemetry for the single bounded
+// response-reconciliation slot. They expose no production control surface.
+defcode "M32HOLD", 7, m32_hold_word, 0
+    bl      virtio_net_test_hold_tx
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32REL", 6, m32_release_word, 0
+    bl      virtio_net_test_release_tx
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32FAIL", 7, m32_submit_fail_once_word, 0
+    bl      m29_native_test_fail_tx_once
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32FAILP", 8, m32_submit_fail_persistent_word, 0
+    bl      m29_native_test_fail_tx_persistent
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32PEND@", 8, m32_pending_word, 0
+    bl      m29_target_pending
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32PATT@", 8, m32_pending_attempts_word, 0
+    bl      m29_target_pending_attempts
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32PTX@", 7, m32_pending_tx_word, 0
+    bl      m29_target_pending_tx_state
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32RSEQ@", 8, m32_response_sequence_word, 0
+    bl      m29_target_response_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
 // M21 fixed two-slot authority probes.  The only external ingress accepts
 // two BOOL samples for the admitted source REQ; no Forth word accepts raw
 // EI, route, egress, or inter-resource carrier nouns.

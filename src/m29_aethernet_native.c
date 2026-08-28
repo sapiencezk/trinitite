@@ -28,6 +28,9 @@ static const uint8_t MANAGER_IP[16] = {0xfd,0,0x14,0x99,0x27,0,0,0,0,0,0,0,0,0,0
 static uint8_t g_rx[FRAME_BYTES] __attribute__((aligned(16)));
 static uint8_t g_tx[FRAME_BYTES] __attribute__((aligned(16)));
 static int g_initialized;
+#ifdef M32_TEST_CONTROLS
+static int g_m32_submit_failure;
+#endif
 
 static uint16_t be16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; }
 static void put16(uint8_t *p, uint16_t v) { volatile uint8_t *out=p; out[0] = (uint8_t)(v >> 8); out[1] = (uint8_t)v; }
@@ -79,6 +82,12 @@ m29_native_status_t m29_native_receive(m29_native_datagram_t *out)
 m29_native_status_t m29_native_send(const uint8_t *payload, uint32_t payload_len)
 {
     if (!payload || !payload_len || payload_len>MAX_FRAME_PAYLOAD || !g_initialized) return M29_NATIVE_MALFORMED;
+#ifdef M32_TEST_CONTROLS
+    if (g_m32_submit_failure) {
+        if (g_m32_submit_failure == 1) g_m32_submit_failure = 0;
+        return M29_NATIVE_DEVICE;
+    }
+#endif
     uint8_t *eth=g_tx,*ip=eth+ETH_BYTES,*udp=ip+IPV6_BYTES;
     volatile uint8_t *vip=ip;
     for(unsigned i=0;i<6;i++){eth[i]=MANAGER_MAC[i];eth[6+i]=LOCAL_MAC[i];} put16(eth+12,0x86ddu);
@@ -90,3 +99,24 @@ m29_native_status_t m29_native_send(const uint8_t *payload, uint32_t payload_len
     virtio_net_status_t status=virtio_net_send(g_tx,ETH_BYTES+IPV6_BYTES+UDP_BYTES+payload_len);
     return status==VIRTIO_NET_OK?M29_NATIVE_OK:(status==VIRTIO_NET_RING_FULL?M29_NATIVE_RING_FULL:M29_NATIVE_DEVICE);
 }
+
+int m29_native_tx_complete(void)
+{
+    return virtio_net_tx_complete();
+}
+
+#ifdef M32_TEST_CONTROLS
+int m29_native_test_fail_tx_once(void)
+{
+    if (!g_initialized) return -1;
+    g_m32_submit_failure = 1;
+    return 0;
+}
+
+int m29_native_test_fail_tx_persistent(void)
+{
+    if (!g_initialized) return -1;
+    g_m32_submit_failure = 2;
+    return 0;
+}
+#endif

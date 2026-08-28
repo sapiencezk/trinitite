@@ -20,3 +20,10 @@ typedef struct {
 int m29_native_init(void);
 m29_native_status_t m29_native_receive(m29_native_datagram_t *out);
 m29_native_status_t m29_native_send(const uint8_t *payload, uint32_t payload_len);
+/* -1 is a driver error, 0 is an in-flight descriptor, and 1 is available
+ * for a new bounded response submission. */
+int m29_native_tx_complete(void);
+#ifdef M32_TEST_CONTROLS
+int m29_native_test_fail_tx_once(void);
+int m29_native_test_fail_tx_persistent(void);
+#endif
