@@ -181,21 +181,171 @@ static int slam(noun event, noun *candidate, noun *causes)
     return slam_gate(g_gate, event, g_is_source, candidate, causes);
 }
 
+#define I2_GRAPH_WORKLIST_CAPACITY 3u
+#define I2_GRAPH_CAUSE_BUDGET 4u
+#define I2_GRAPH_WORK_BUDGET 5u
+
+static int route_fields(noun cause, uint64_t fields[5], noun *samples)
+{
+    noun tag, body, value;
+    if (!cause || !fields || !samples || !take(cause, &tag, &body)
+        || !i2_application_surface_tag_matches(tag, "i2-route-ei", 11)) return 0;
+    for (unsigned i = 0; i < 5; i++)
+        if (!take(body, &value, &body) || !noun_is_direct(value)
+            || (fields[i] = direct_val(value)) == 0) return 0;
+    *samples = body;
+    return 1;
+}
+
+static int root_route_at(uint32_t ordinal, const i2_event_edge_t **edge)
+{
+    uint32_t seen = 0;
+    if (!edge) return 0;
+    for (uint32_t i = 0; i < g_surface.event_edge_count; i++)
+        if (g_surface.event_edges[i].source_instance == g_surface.ingress.instance) {
+            if (seen++ == ordinal) { *edge = &g_surface.event_edges[i]; return 1; }
+        }
+    return 0;
+}
+
+static int route_record_matches(const uint64_t fields[5],
+                                const i2_event_edge_t *edge)
+{
+    return fields && edge && fields[0] == edge->ordinal
+        && fields[1] == edge->source_instance && fields[2] == edge->source_event
+        && fields[3] == edge->target_instance && fields[4] == edge->target_event;
+}
+
+static uint32_t outgoing_route_count(uint64_t source_instance, uint64_t source_event)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < g_surface.event_edge_count; i++)
+        if (g_surface.event_edges[i].source_instance == source_instance
+            && g_surface.event_edges[i].source_event == source_event) count++;
+    return count;
+}
+
+static int outgoing_route_at(uint64_t source_instance, uint64_t source_event,
+                             uint32_t ordinal,
+                             const i2_event_edge_t **edge)
+{
+    uint32_t seen = 0;
+    if (!edge) return 0;
+    for (uint32_t i = 0; i < g_surface.event_edge_count; i++)
+        if (g_surface.event_edges[i].source_instance == source_instance
+            && g_surface.event_edges[i].source_event == source_event) {
+            if (seen++ == ordinal) { *edge = &g_surface.event_edges[i]; return 1; }
+        }
+    return 0;
+}
+
+static int preflight_application_worklist(void)
+{
+    uint32_t root_count = 0;
+    uint64_t root_targets[I2_GRAPH_WORKLIST_CAPACITY * 2u];
+    for (uint32_t i = 0; i < g_surface.event_edge_count; i++) {
+        const i2_event_edge_t *edge = &g_surface.event_edges[i];
+        if (edge->source_instance != g_surface.ingress.instance) continue;
+        if (root_count >= I2_GRAPH_WORKLIST_CAPACITY) return 0;
+        for (uint32_t prior = 0; prior < root_count; prior++)
+            if (root_targets[prior] == edge->target_instance
+                && root_targets[I2_GRAPH_WORKLIST_CAPACITY + prior] == edge->target_event) return 0;
+        root_targets[root_count] = edge->target_instance;
+        root_targets[I2_GRAPH_WORKLIST_CAPACITY + root_count] = edge->target_event;
+        root_count++;
+    }
+    return root_count != 0 && root_count <= I2_GRAPH_CAUSE_BUDGET;
+}
+
+static int queued_destination(noun cause, uint64_t instance, uint64_t event)
+{
+    uint64_t fields[5]; noun samples;
+    return route_fields(cause, fields, &samples)
+        && fields[3] == instance && fields[4] == event;
+}
+
 static int drain_application_causes(noun candidate, noun causes,
                                     noun *final_candidate, noun *final_causes)
 {
-    noun current = candidate, pending = causes;
-    for (unsigned depth = 0; depth < 2; depth++) {
-        noun cause, rest, tag;
-        if (!take(pending, &cause, &rest) || !direct_is(rest, 0)
-            || !take(cause, &tag, &rest)) return 0;
-        if (noun_eq(tag, g_intent_tag)) {
-            *final_candidate = current; *final_causes = pending; return 1;
-        }
-        if (!i2_application_surface_tag_matches(tag, "i2-route-ei", 11)) return 0;
-        if (!slam_gate(current, cause, 0, &current, &pending)) return 0;
+    noun current = candidate, pending = causes, cause, rest, tag;
+    noun queue[I2_GRAPH_WORKLIST_CAPACITY];
+    uint32_t head = 0, tail = 0, cause_count = 0, work_count = 1;
+    uint32_t final_intent_count = 0;
+    uint64_t root_instance = g_surface.ingress.instance;
+    while (take(pending, &cause, &rest)) {
+        uint64_t fields[5]; noun samples;
+        const i2_event_edge_t *root_edge;
+        if (tail >= I2_GRAPH_WORKLIST_CAPACITY || cause_count >= I2_GRAPH_CAUSE_BUDGET
+            || !root_route_at(tail, &root_edge)
+            || !route_fields(cause, fields, &samples)
+            || !route_record_matches(fields, root_edge)
+            || root_edge->source_instance != root_instance) return 0;
+        for (uint32_t prior = 0; prior < tail; prior++)
+            if (queued_destination(queue[prior], fields[3], fields[4])) return 0;
+        queue[tail++] = cause; cause_count++;
+        pending = rest;
     }
-    return 0;
+    if (!direct_is(pending, 0) || tail == 0) return 0;
+    while (head < tail) {
+        uint64_t fields[5]; noun samples, next_causes = NOUN_ZERO;
+        const i2_event_edge_t *expected;
+        noun children[I2_GRAPH_WORKLIST_CAPACITY];
+        uint32_t outgoing, child_count = 0, intent_count = 0;
+        noun next_candidate;
+        if (work_count >= I2_GRAPH_WORK_BUDGET
+            || !route_fields(queue[head], fields, &samples)) return 0;
+        outgoing = outgoing_route_count(fields[3], fields[2]);
+        if (tail - head - 1u + outgoing > I2_GRAPH_WORKLIST_CAPACITY
+            || cause_count + outgoing > I2_GRAPH_CAUSE_BUDGET) return 0;
+        for (uint32_t i = 0; i < outgoing; i++) {
+            const i2_event_edge_t *edge;
+            if (!outgoing_route_at(fields[3], fields[2], i, &edge)) return 0;
+            for (uint32_t j = head + 1u; j < tail; j++) {
+                uint64_t queued_fields[5]; noun queued_samples;
+                if (!route_fields(queue[j], queued_fields, &queued_samples)) return 0;
+                if (queued_fields[3] == edge->target_instance
+                    && queued_fields[4] == edge->target_event) return 0;
+            }
+            for (uint32_t j = 0; j < i; j++) {
+                const i2_event_edge_t *old_edge;
+                if (!outgoing_route_at(fields[3], fields[2], j, &old_edge)
+                    || (old_edge->target_instance == edge->target_instance
+                        && old_edge->target_event == edge->target_event)) return 0;
+            }
+        }
+        if (!slam_gate(current, queue[head], 0, &next_candidate, &next_causes)) return 0;
+        noun scan = next_causes, scan_tail, cause_body;
+        while (take(scan, &cause, &scan_tail)) {
+            if (!take(cause, &tag, &cause_body)) return 0;
+            if (noun_eq(tag, g_intent_tag)) intent_count++;
+            else if (i2_application_surface_tag_matches(tag, "i2-route-ei", 11)) {
+                uint64_t child_fields[5]; noun child_samples;
+                if (child_count >= outgoing || !route_fields(cause, child_fields, &child_samples)
+                    || !outgoing_route_at(fields[3], fields[2], child_count, &expected)
+                    || !route_record_matches(child_fields, expected)) return 0;
+                children[child_count] = cause; child_count++;
+            } else return 0;
+            scan = scan_tail;
+        }
+        if (!direct_is(scan, 0) || child_count != outgoing
+            || (outgoing == 0 && intent_count > 1)
+            || (outgoing != 0 && intent_count != 0)) return 0;
+        if (tail - head - 1u + child_count > I2_GRAPH_WORKLIST_CAPACITY) return 0;
+        {
+            uint32_t remaining = tail - head - 1u;
+            for (uint32_t i = 0; i < remaining; i++) queue[i] = queue[head + 1u + i];
+            for (uint32_t i = 0; i < child_count; i++) queue[remaining + i] = children[i];
+            head = 0; tail = remaining + child_count;
+        }
+        cause_count += child_count; work_count++;
+        if (intent_count) {
+            *final_causes = next_causes;
+            final_intent_count = intent_count;
+        }
+        current = next_candidate;
+    }
+    *final_candidate = current;
+    return final_intent_count == 1 && *final_causes != NOUN_ZERO;
 }
 
 static int build_external(uint64_t a, uint64_t b, noun *out)
@@ -551,7 +701,11 @@ int m25_target_step(void)
         heap_scratch_reset(); heap_set_mode(HEAP_MODE_SCRATCH);
         noun candidate, causes, final_causes; uint64_t value;
         uint8_t frame[M25_HEADER_BYTES + M25_MAX_PAYLOAD]; uint32_t frame_len;
-        if (!slam(g_pending_event, &candidate, &causes)
+        /* Static candidate-derived fan-out reservation is checked before the
+         * live root is slammed.  The root, queue, and publication remain
+         * untouched on every refusal below. */
+        if (!preflight_application_worklist()
+            || !slam(g_pending_event, &candidate, &causes)
             || !drain_application_causes(candidate, causes, &candidate, &final_causes)
             || !parse_intent(final_causes, &value)
             || !build_publication(value, g_next_sequence, frame, &frame_len)) {

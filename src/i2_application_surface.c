@@ -4,11 +4,11 @@
 
 #define SURFACE_MAX_TYPES 16u
 #define SURFACE_MAX_FB_TYPES 16u
-#define SURFACE_MAX_INSTANCES 2u
+#define SURFACE_MAX_INSTANCES 4u
 #define SURFACE_MAX_EVENTS 8u
 #define SURFACE_MAX_VARS 8u
-#define SURFACE_MAX_EVENT_EDGES 2u
-#define SURFACE_MAX_DATA_EDGES 4u
+#define SURFACE_MAX_EVENT_EDGES I2_SURFACE_MAX_EVENT_EDGES
+#define SURFACE_MAX_DATA_EDGES 8u
 
 typedef struct {
     uint64_t id;
@@ -227,10 +227,11 @@ static int parse_event_edges(noun list, surface_event_edge_t *edges, uint32_t *c
         if (*count >= SURFACE_MAX_EVENT_EDGES || !take(list, &entry, &list)) return 0;
         if (!fixed_positive_fields(entry, fields, 5)) return 0;
         for (uint32_t i = 0; i < *count; i++) {
-            if (edges[i].ordinal == fields[0] && edges[i].source_instance == fields[1]
-                && edges[i].source_event == fields[2]
-                && edges[i].target_instance == fields[3]
-                && edges[i].target_event == fields[4]) return 0;
+            if (edges[i].ordinal == fields[0]
+                || (edges[i].source_instance == fields[1]
+                    && edges[i].source_event == fields[2]
+                    && edges[i].target_instance == fields[3]
+                    && edges[i].target_event == fields[4])) return 0;
         }
         edges[*count].ordinal = fields[0]; edges[*count].source_instance = fields[1];
         edges[*count].source_event = fields[2]; edges[*count].target_instance = fields[3];
@@ -311,6 +312,28 @@ static surface_var_t *find_var(surface_var_t *vars, uint32_t count, uint64_t id)
 {
     for (uint32_t i = 0; i < count; i++) if (vars[i].id == id) return &vars[i];
     return NULL;
+}
+
+static int instance_pos(surface_instance_t *instances, uint32_t count,
+                        uint64_t id)
+{
+    for (uint32_t i = 0; i < count; i++)
+        if (instances[i].id == id) return (int)i;
+    return -1;
+}
+
+static int graph_cycle(uint8_t adjacency[SURFACE_MAX_INSTANCES][SURFACE_MAX_INSTANCES],
+                       uint32_t count, uint32_t node,
+                       uint8_t color[SURFACE_MAX_INSTANCES])
+{
+    color[node] = 1;
+    for (uint32_t next = 0; next < count; next++) {
+        if (!adjacency[node][next]) continue;
+        if (color[next] == 1) return 1;
+        if (color[next] == 0 && graph_cycle(adjacency, count, next, color)) return 1;
+    }
+    color[node] = 2;
+    return 0;
 }
 
 static int has_with(const surface_event_t *event, uint64_t variable)
@@ -400,33 +423,110 @@ static int validate_surface(noun base, noun services,
 
     if (instance_count == 1) {
         if (event_count != 0 || data_count != 0) return 0;
-    } else if (instance_count == 2) {
-        if (event_count != 1 || data_count != 2) return 0;
-        surface_event_edge_t *edge = &event_edges[0];
-        if (edge->source_instance == edge->target_instance
-            || edge->source_instance != surface->ingress.instance) return 0;
-        surface_fb_t *source = instance_fb(fbs, fb_count, instances, instance_count,
-                                            edge->source_instance);
-        surface_fb_t *target = instance_fb(fbs, fb_count, instances, instance_count,
-                                            edge->target_instance);
-        surface_event_t *source_event = source ? find_event(source->event_outputs,
-                                                             source->event_output_count,
-                                                             edge->source_event) : NULL;
-        surface_event_t *target_event = target ? find_event(target->event_inputs,
-                                                             target->event_input_count,
-                                                             edge->target_event) : NULL;
-        if (!source_event || !target_event) return 0;
-        for (uint32_t i = 0; i < data_count; i++) {
-            surface_data_edge_t *data = &data_edges[i];
-            surface_var_t *source_var = data->source_instance == edge->source_instance
-                ? find_var(source->data_outputs, source->data_output_count, data->source_data) : NULL;
-            surface_var_t *target_var = data->target_instance == edge->target_instance
-                ? find_var(target->data_inputs, target->data_input_count, data->target_data) : NULL;
-            if (!source_var || !target_var || source_var->type != target_var->type
-                || source_var->type != 1 || !has_with(source_event, source_var->id)
-                || !has_with(target_event, target_var->id)) return 0;
+    } else {
+        uint8_t adjacency[SURFACE_MAX_INSTANCES][SURFACE_MAX_INSTANCES] = {{0}};
+        uint32_t indegree[SURFACE_MAX_INSTANCES] = {0};
+        uint32_t outdegree[SURFACE_MAX_INSTANCES] = {0};
+        int root = instance_pos(instances, instance_count, surface->ingress.instance);
+        int sink = surface->publication_count == 1
+            ? instance_pos(instances, instance_count,
+                           surface->publications[0].source_instance) : -1;
+        if (event_count == 0 || event_count > SURFACE_MAX_EVENT_EDGES
+            || data_count == 0 || root < 0 || sink < 0) return 0;
+        for (uint32_t i = 0; i < event_count; i++) {
+            surface_event_edge_t *edge = &event_edges[i];
+            int source_pos = instance_pos(instances, instance_count, edge->source_instance);
+            int target_pos = instance_pos(instances, instance_count, edge->target_instance);
+            surface_fb_t *source = instance_fb(fbs, fb_count, instances, instance_count,
+                                                edge->source_instance);
+            surface_fb_t *target = instance_fb(fbs, fb_count, instances, instance_count,
+                                                edge->target_instance);
+            surface_event_t *source_event = source ? find_event(source->event_outputs,
+                                                                 source->event_output_count,
+                                                                 edge->source_event) : NULL;
+            surface_event_t *target_event = target ? find_event(target->event_inputs,
+                                                                 target->event_input_count,
+                                                                 edge->target_event) : NULL;
+            uint32_t matched_data = 0;
+            if (edge->ordinal != (uint64_t)(i + 1u) || source_pos < 0 || target_pos < 0
+                || source_pos == target_pos || !source_event || !target_event
+                || source_event->with_count == 0
+                || source_event->with_count != target_event->with_count) return 0;
+            adjacency[source_pos][target_pos] = 1;
+            indegree[target_pos]++; outdegree[source_pos]++;
+            for (uint32_t d = 0; d < data_count; d++) {
+                surface_data_edge_t *data = &data_edges[d];
+                if (data->source_instance != edge->source_instance
+                    || data->target_instance != edge->target_instance) continue;
+                surface_var_t *source_var = find_var(source->data_outputs,
+                                                     source->data_output_count,
+                                                     data->source_data);
+                surface_var_t *target_var = find_var(target->data_inputs,
+                                                     target->data_input_count,
+                                                     data->target_data);
+                if (!source_var || !target_var || source_var->type != 1
+                    || target_var->type != 1 || source_var->type != target_var->type
+                    || !has_with(source_event, source_var->id)
+                    || !has_with(target_event, target_var->id)) return 0;
+                for (uint32_t prior = 0; prior < d; prior++)
+                    if (data_edges[prior].source_instance == data->source_instance
+                        && data_edges[prior].source_data == data->source_data
+                        && data_edges[prior].target_instance == data->target_instance
+                        && data_edges[prior].target_data == data->target_data) return 0;
+                matched_data++;
+            }
+            if (matched_data != source_event->with_count) return 0;
+            for (uint32_t with = 0; with < source_event->with_count; with++) {
+                uint64_t source_var = source_event->with_vars[with];
+                uint32_t source_hits = 0;
+                for (uint32_t d = 0; d < data_count; d++)
+                    if (data_edges[d].source_instance == edge->source_instance
+                        && data_edges[d].target_instance == edge->target_instance
+                        && data_edges[d].source_data == source_var) source_hits++;
+                if (source_hits != 1) return 0;
+            }
+            for (uint32_t with = 0; with < target_event->with_count; with++) {
+                uint64_t target_var = target_event->with_vars[with];
+                uint32_t target_hits = 0;
+                for (uint32_t d = 0; d < data_count; d++)
+                    if (data_edges[d].source_instance == edge->source_instance
+                        && data_edges[d].target_instance == edge->target_instance
+                        && data_edges[d].target_data == target_var) target_hits++;
+                if (target_hits != 1) return 0;
+            }
         }
-    } else return 0;
+        for (uint32_t d = 0; d < data_count; d++) {
+            int found = 0;
+            for (uint32_t e = 0; e < event_count; e++)
+                if (data_edges[d].source_instance == event_edges[e].source_instance
+                    && data_edges[d].target_instance == event_edges[e].target_instance) {
+                    found = 1; break;
+                }
+            if (!found) return 0;
+        }
+        if (indegree[root] != 0 || outdegree[sink] != 0
+            || graph_cycle(adjacency, instance_count, (uint32_t)root,
+                           (uint8_t[SURFACE_MAX_INSTANCES]){0})) return 0;
+        uint8_t forward[SURFACE_MAX_INSTANCES] = {0};
+        uint8_t reverse[SURFACE_MAX_INSTANCES] = {0};
+        forward[root] = 1; reverse[sink] = 1;
+        for (uint32_t pass = 0; pass < instance_count; pass++)
+            for (uint32_t i = 0; i < instance_count; i++)
+                for (uint32_t j = 0; j < instance_count; j++) {
+                    if (adjacency[i][j] && forward[i]) forward[j] = 1;
+                    if (adjacency[i][j] && reverse[j]) reverse[i] = 1;
+                }
+        for (uint32_t i = 0; i < instance_count; i++)
+            if (!forward[i] || !reverse[i]) return 0;
+        surface->event_edge_count = event_count;
+        for (uint32_t i = 0; i < event_count; i++) {
+            surface->event_edges[i].ordinal = event_edges[i].ordinal;
+            surface->event_edges[i].source_instance = event_edges[i].source_instance;
+            surface->event_edges[i].source_event = event_edges[i].source_event;
+            surface->event_edges[i].target_instance = event_edges[i].target_instance;
+            surface->event_edges[i].target_event = event_edges[i].target_event;
+        }
+    }
 
     for (uint32_t i = 0; i < surface->publication_count; i++) {
         i2_publication_attachment_t *p = &surface->publications[i];
@@ -441,7 +541,7 @@ static int validate_surface(noun base, noun services,
         if (!source || !event || !data || p->source_type != 1 || p->target_type != 1
             || p->source_service != 8 || p->target_service != 9
             || !has_with(event, p->source_data) || data->type != 1) return 0;
-        if (instance_count == 2 && p->source_instance != event_edges[0].target_instance)
+        if (instance_count > 1 && p->source_instance != surface->publications[0].source_instance)
             return 0;
         if ((surface->publication_count == 1 && p->source_ordinal != 8)
             || (surface->publication_count == 2

@@ -6,6 +6,7 @@
 
 #define I2_SURFACE_MAX_INGRESS_SAMPLES 2u
 #define I2_SURFACE_MAX_PUBLICATIONS 2u
+#define I2_SURFACE_MAX_EVENT_EDGES 8u
 
 typedef struct {
     uint64_t instance;
@@ -30,7 +31,17 @@ typedef struct {
 } i2_publication_attachment_t;
 
 typedef struct {
+    uint64_t ordinal;
+    uint64_t source_instance;
+    uint64_t source_event;
+    uint64_t target_instance;
+    uint64_t target_event;
+} i2_event_edge_t;
+
+typedef struct {
     i2_ingress_attachment_t ingress;
+    uint32_t event_edge_count;
+    i2_event_edge_t event_edges[I2_SURFACE_MAX_EVENT_EDGES];
     uint32_t publication_count;
     i2_publication_attachment_t publications[I2_SURFACE_MAX_PUBLICATIONS];
 } i2_application_service_surface_t;
