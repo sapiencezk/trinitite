@@ -3167,6 +3167,220 @@ defcode "M32RSEQ@", 8, m32_response_sequence_word, 0
     bl      m29_target_response_sequence
     str     x0, [DSP, #-8]!
     NEXT
+
+defcode "M32MRX@", 7, m32_management_rx_word, 0
+    bl      m29_target_diag_management_rx
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MDEC@", 8, m32_management_decode_word, 0
+    bl      m29_target_diag_decode_ok
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MDER@", 8, m32_management_decode_error_word, 0
+    bl      m29_target_diag_decode_failures
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MACC@", 8, m32_management_accepted_word, 0
+    bl      m29_target_diag_accepted
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MREF@", 8, m32_management_refused_word, 0
+    bl      m29_target_diag_refused
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MSEQ@", 8, m32_management_sequence_word, 0
+    bl      m29_target_diag_last_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MOP@", 7, m32_management_operation_word, 0
+    bl      m29_target_diag_last_operation
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MOFF@", 8, m32_management_offset_word, 0
+    bl      m29_target_diag_last_offset
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MDIG@", 8, m32_management_digest_word, 0
+    ldr     x0, [DSP], #8
+    bl      m29_target_diag_last_digest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MHIT@", 8, m32_management_cache_hit_word, 0
+    bl      m29_target_diag_cache_hits
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MMIS@", 8, m32_management_cache_miss_word, 0
+    bl      m29_target_diag_cache_misses
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MCON@", 8, m32_management_cache_conflict_word, 0
+    bl      m29_target_diag_cache_conflicts
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MPRE@", 8, m32_management_cache_presence_word, 0
+    bl      m29_target_diag_cache_presence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MCAP@", 8, m32_management_cache_used_word, 0
+    bl      m29_target_diag_cache_used
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MEXE@", 8, m32_management_execute_word, 0
+    bl      m29_target_diag_execute_count
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MPR@", 7, m32_management_pending_replay_word, 0
+    bl      m29_target_diag_pending_replays
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MPRF@", 8, m32_management_pending_refusal_word, 0
+    bl      m29_target_diag_pending_refusals
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32POP@", 7, m32_pending_operation_word, 0
+    bl      m29_target_diag_pending_operation
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32PDIG@", 8, m32_pending_digest_word, 0
+    ldr     x0, [DSP], #8
+    bl      m29_target_diag_pending_digest
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32SOPN@", 8, m32_stage_open_word, 0
+    bl      m29_target_diag_stage_open
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32SSEA@", 8, m32_stage_sealed_word, 0
+    bl      m29_target_diag_stage_sealed
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32SREC@", 8, m32_stage_received_word, 0
+    bl      m29_target_diag_stage_received
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32SCHN@", 8, m32_stage_chunks_word, 0
+    bl      m29_target_diag_stage_chunks
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32SLST@", 8, m32_stage_lease_start_word, 0
+    bl      m29_target_diag_lease_start
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32SLRM@", 8, m32_stage_lease_remaining_word, 0
+    bl      m29_target_diag_lease_remaining
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32SLEX@", 8, m32_stage_lease_expired_word, 0
+    bl      m29_target_diag_lease_expired
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32MOHW@", 8, m32_operation_high_word, 0
+    bl      m29_target_diag_operation_high
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32NRX@", 7, m32_native_rx_packets_word, 0
+    bl      m29_native_test_rx_packets
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32NRE@", 7, m32_native_rx_errors_word, 0
+    bl      m29_native_test_rx_errors
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32NRST@", 8, m32_native_rx_status_word, 0
+    bl      m29_native_test_rx_last_status
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32NTS@", 7, m32_native_tx_submit_word, 0
+    bl      m29_native_test_tx_submit_attempts
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32NTF@", 7, m32_native_tx_failures_word, 0
+    bl      m29_native_test_tx_submit_failures
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32NTST@", 8, m32_native_tx_status_word, 0
+    bl      m29_native_test_tx_last_status
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32NTC@", 7, m32_native_tx_completion_word, 0
+    bl      m29_native_test_tx_completion_calls
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32NTCL@", 8, m32_native_tx_completion_status_word, 0
+    bl      m29_native_test_tx_last_completion
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32VRX@", 7, m32_virtio_rx_packets_word, 0
+    bl      virtio_net_rx_packets
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32VERR@", 8, m32_virtio_error_word, 0
+    bl      virtio_net_last_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32VQ0@", 7, m32_virtio_rx_ready_word, 0
+    mov     x0, #0
+    bl      virtio_net_debug_queue_ready
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32VQ1@", 7, m32_virtio_tx_ready_word, 0
+    mov     x0, #1
+    bl      virtio_net_debug_queue_ready
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32VTUA@", 8, m32_virtio_tx_avail_word, 0
+    bl      virtio_net_debug_tx_avail
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32VTUU@", 8, m32_virtio_tx_used_word, 0
+    bl      virtio_net_debug_tx_used
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M32VTXP@", 8, m32_virtio_tx_packets_word, 0
+    bl      virtio_net_debug_tx_packets
+    str     x0, [DSP, #-8]!
+    NEXT
 #endif
 
 // M21 fixed two-slot authority probes.  The only external ingress accepts

@@ -28,8 +28,17 @@ static const uint8_t MANAGER_IP[16] = {0xfd,0,0x14,0x99,0x27,0,0,0,0,0,0,0,0,0,0
 static uint8_t g_rx[FRAME_BYTES] __attribute__((aligned(16)));
 static uint8_t g_tx[FRAME_BYTES] __attribute__((aligned(16)));
 static int g_initialized;
+static int g_last_send_submitted;
 #ifdef M32_TEST_CONTROLS
 static int g_m32_submit_failure;
+static uint64_t g_m32_rx_packets;
+static uint64_t g_m32_rx_errors;
+static uint64_t g_m32_rx_last_status;
+static uint64_t g_m32_tx_submit_attempts;
+static uint64_t g_m32_tx_submit_failures;
+static uint64_t g_m32_tx_last_status;
+static uint64_t g_m32_tx_completion_calls;
+static uint64_t g_m32_tx_last_completion;
 #endif
 
 static uint16_t be16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; }
@@ -55,36 +64,64 @@ static uint16_t checksum(const uint8_t *ip, const uint8_t *udp, uint32_t n)
 
 int m29_native_init(void)
 {
-    uint8_t mac[6]; g_initialized=0;
+    uint8_t mac[6]; g_initialized=0; g_last_send_submitted=0;
+#ifdef M32_TEST_CONTROLS
+    g_m32_rx_packets=0; g_m32_rx_errors=0; g_m32_rx_last_status=M29_NATIVE_NO_PACKET;
+    g_m32_tx_submit_attempts=0; g_m32_tx_submit_failures=0;
+    g_m32_tx_last_status=M29_NATIVE_DEVICE;
+    g_m32_tx_completion_calls=0; g_m32_tx_last_completion=-1;
+#endif
     if (virtio_net_config_mac(mac) != 0 || !same(mac, LOCAL_MAC, 6)) return -1;
     m25_native_set_shared_demux(1); g_initialized=1; return 0;
 }
+
+#ifdef M32_TEST_CONTROLS
+static m29_native_status_t record_rx(m29_native_status_t status)
+{
+    g_m32_rx_last_status=(uint64_t)status;
+    if (status != M29_NATIVE_NO_PACKET) g_m32_rx_packets++;
+    if (status != M29_NATIVE_OK && status != M29_NATIVE_NO_PACKET) g_m32_rx_errors++;
+    return status;
+}
+#define M29_RECORD_RX(status) record_rx(status)
+#else
+#define M29_RECORD_RX(status) (status)
+#endif
 
 m29_native_status_t m29_native_receive(m29_native_datagram_t *out)
 {
     uint32_t length=0; if (!out || !g_initialized) return M29_NATIVE_MALFORMED;
     virtio_net_status_t got=virtio_net_receive(g_rx,sizeof g_rx,&length);
+#ifdef M32_TEST_CONTROLS
+    if (got==VIRTIO_NET_NO_PACKET) return M29_RECORD_RX(M29_NATIVE_NO_PACKET);
+    if (got!=VIRTIO_NET_OK || length<ETH_BYTES+IPV6_BYTES+UDP_BYTES || length>sizeof g_rx) return M29_RECORD_RX(M29_NATIVE_DEVICE);
+#else
     if (got==VIRTIO_NET_NO_PACKET) return M29_NATIVE_NO_PACKET;
     if (got!=VIRTIO_NET_OK || length<ETH_BYTES+IPV6_BYTES+UDP_BYTES || length>sizeof g_rx) return M29_NATIVE_DEVICE;
+#endif
     const uint8_t *eth=g_rx,*ip=eth+ETH_BYTES;
     if (be16(eth+12)!=0x86ddu || !same(eth,LOCAL_MAC,6) || !same(eth+6,MANAGER_MAC,6)
         || (ip[0]>>4)!=6 || ip[6]!=17 || ip[7]!=64 || !same(ip+8,MANAGER_IP,16)
-        || !same(ip+24,LOCAL_IP,16)) { m25_native_accept_frame(g_rx,length); return M29_NATIVE_NO_PACKET; }
+        || !same(ip+24,LOCAL_IP,16)) { m25_native_accept_frame(g_rx,length); return M29_RECORD_RX(M29_NATIVE_NO_PACKET); }
     uint32_t udp_len=be16(ip+4); const uint8_t *udp=ip+IPV6_BYTES;
     if (udp_len<UDP_BYTES+HEADER_BYTES || udp_len>UDP_BYTES+MAX_FRAME_PAYLOAD
         || length!=ETH_BYTES+IPV6_BYTES+udp_len || be16(udp)!=MANAGER_PORT
-        || be16(udp+2)!=TARGET_PORT || be16(udp+6)==0 || checksum(ip,udp,udp_len)!=0) return M29_NATIVE_CHECKSUM;
+        || be16(udp+2)!=TARGET_PORT || be16(udp+6)==0 || checksum(ip,udp,udp_len)!=0) return M29_RECORD_RX(M29_NATIVE_CHECKSUM);
     out->header=udp+UDP_BYTES; out->payload=udp+UDP_BYTES+HEADER_BYTES;
     out->payload_len=udp_len-UDP_BYTES-HEADER_BYTES;
-    return out->payload_len ? M29_NATIVE_OK : M29_NATIVE_MALFORMED;
+    return M29_RECORD_RX(out->payload_len ? M29_NATIVE_OK : M29_NATIVE_MALFORMED);
 }
 
 m29_native_status_t m29_native_send(const uint8_t *payload, uint32_t payload_len)
 {
+    g_last_send_submitted=0;
     if (!payload || !payload_len || payload_len>MAX_FRAME_PAYLOAD || !g_initialized) return M29_NATIVE_MALFORMED;
 #ifdef M32_TEST_CONTROLS
     if (g_m32_submit_failure) {
         if (g_m32_submit_failure == 1) g_m32_submit_failure = 0;
+        g_m32_tx_submit_attempts++;
+        g_m32_tx_submit_failures++;
+        g_m32_tx_last_status=M29_NATIVE_DEVICE;
         return M29_NATIVE_DEVICE;
     }
 #endif
@@ -96,13 +133,29 @@ m29_native_status_t m29_native_send(const uint8_t *payload, uint32_t payload_len
     put16(udp,TARGET_PORT);put16(udp+2,MANAGER_PORT);put16(udp+4,UDP_BYTES+payload_len);put16(udp+6,0);
     for(uint32_t i=0;i<payload_len;i++) udp[UDP_BYTES+i]=payload[i];
     put16(udp+6,checksum(ip,udp,UDP_BYTES+payload_len));
+#ifdef M32_TEST_CONTROLS
+    g_m32_tx_submit_attempts++;
+#endif
+    uint64_t avail_before=virtio_net_debug_tx_avail();
     virtio_net_status_t status=virtio_net_send(g_tx,ETH_BYTES+IPV6_BYTES+UDP_BYTES+payload_len);
+    g_last_send_submitted=virtio_net_debug_tx_avail()!=avail_before;
+#ifdef M32_TEST_CONTROLS
+    g_m32_tx_last_status=(uint64_t)status;
+    if (status != VIRTIO_NET_OK) g_m32_tx_submit_failures++;
+#endif
     return status==VIRTIO_NET_OK?M29_NATIVE_OK:(status==VIRTIO_NET_RING_FULL?M29_NATIVE_RING_FULL:M29_NATIVE_DEVICE);
 }
 
+int m29_native_last_send_submitted(void) { return g_last_send_submitted; }
+
 int m29_native_tx_complete(void)
 {
-    return virtio_net_tx_complete();
+    int result=virtio_net_tx_complete();
+#ifdef M32_TEST_CONTROLS
+    g_m32_tx_completion_calls++;
+    g_m32_tx_last_completion=(uint64_t)(result < 0 ? UINT64_MAX : result);
+#endif
+    return result;
 }
 
 #ifdef M32_TEST_CONTROLS
@@ -119,4 +172,13 @@ int m29_native_test_fail_tx_persistent(void)
     g_m32_submit_failure = 2;
     return 0;
 }
+
+uint64_t m29_native_test_rx_packets(void) { return g_m32_rx_packets; }
+uint64_t m29_native_test_rx_errors(void) { return g_m32_rx_errors; }
+uint64_t m29_native_test_rx_last_status(void) { return g_m32_rx_last_status; }
+uint64_t m29_native_test_tx_submit_attempts(void) { return g_m32_tx_submit_attempts; }
+uint64_t m29_native_test_tx_submit_failures(void) { return g_m32_tx_submit_failures; }
+uint64_t m29_native_test_tx_last_status(void) { return g_m32_tx_last_status; }
+uint64_t m29_native_test_tx_completion_calls(void) { return g_m32_tx_completion_calls; }
+uint64_t m29_native_test_tx_last_completion(void) { return g_m32_tx_last_completion; }
 #endif

@@ -104,6 +104,17 @@ static m29_cache_t g_checkpoint_cache[M29_CACHE_ENTRIES];
 static uint8_t g_checkpoint_replay_digest[32];
 static uint8_t g_active_policy_digest[32], g_active_program_identity[32];
 static uint8_t g_checkpoint_policy_digest[32], g_checkpoint_program_identity[32];
+#ifdef M32_TEST_CONTROLS
+static uint64_t g_diag_management_rx, g_diag_decode_ok, g_diag_decode_failures;
+static uint64_t g_diag_accepted, g_diag_refused;
+static uint64_t g_diag_last_sequence, g_diag_last_operation, g_diag_last_offset;
+static uint8_t g_diag_last_digest[32];
+static uint64_t g_diag_cache_hits, g_diag_cache_misses, g_diag_cache_conflicts;
+static uint64_t g_diag_cache_presence, g_diag_execute_count, g_diag_pending_replays;
+static uint64_t g_diag_pending_refusals;
+static uint64_t g_diag_lease_start, g_diag_lease_expiry;
+static uint64_t g_diag_lease_expired;
+#endif
 
 static int take(noun n,noun *h,noun *t){if(!noun_is_cell(n)||!h||!t)return 0;cell_t*c=(cell_t*)(uintptr_t)cell_ptr(n);*h=c->head;*t=c->tail;return 1;}
 static int direct_is(noun n,uint64_t v){return noun_is_direct(n)&&direct_val(n)==v;}
@@ -488,7 +499,13 @@ static int execute(const m29_request_t*r,uint8_t*out,uint16_t*length)
                 g_stage_pill_sha256[i]=r->pill_sha256[i];
             }
             g_stage_open=1;g_stage_sealed=0;
-            g_lease=now()+freq()*M29_LEASE_SECONDS;result=M29_DONE;
+            uint64_t lease_start=now();
+            g_lease=lease_start+freq()*M29_LEASE_SECONDS;
+#ifdef M32_TEST_CONTROLS
+            g_diag_lease_start=lease_start; g_diag_lease_expiry=g_lease;
+            g_diag_lease_expired=0;
+#endif
+            result=M29_DONE;
         }
     } else if(r->op==M29_CHUNK){
         if(g_lifecycle==M29_STOPPED&&g_stage_open&&!g_stage_sealed
@@ -500,7 +517,13 @@ static int execute(const m29_request_t*r,uint8_t*out,uint16_t*length)
             }else if(r->offset==g_received&&g_chunks<M29_MAX_CHUNKS){
                 for(uint32_t i=0;i<r->data_len;i++)g_stage[g_received+i]=r->data[i];
                 g_received+=r->data_len;g_chunks++;
-                g_lease=now()+freq()*M29_LEASE_SECONDS;result=M29_DONE;
+                uint64_t lease_start=now();
+                g_lease=lease_start+freq()*M29_LEASE_SECONDS;
+#ifdef M32_TEST_CONTROLS
+                g_diag_lease_start=lease_start; g_diag_lease_expiry=g_lease;
+                g_diag_lease_expired=0;
+#endif
+                result=M29_DONE;
             }
         }
     } else if(r->op==M29_SEAL){
@@ -534,7 +557,18 @@ int m29_target_boot(noun gate,const runtime_identity_t*identity,uint8_t capabili
        ||!identity||capability!=RUNTIME_CAPABILITY_PROFILE_M25||identity->generation!=1
        ||!equal_bytes(identity->program_hash,M29_PREDECESSOR_PROGRAM,32)
        ||!equal_bytes(identity->package_hash,M29_PREDECESSOR_ANCHOR,32))return -1;
-    (void)gate;g_identity=*identity;g_management_tag=cord_from_bytes("aethernet-management-m29",24);if(!noun_is_atom(g_management_tag))return -1;for(unsigned i=0;i<M29_CACHE_ENTRIES;i++)g_cache[i].used=0;g_pending.used=0;g_lifecycle=M29_RUNNING;g_selected=0;g_terminal=0;g_generation=1;g_terminal_installation=0;g_sequence_high=0;g_operation_high=0;g_response_sequence=1;g_rate_start=g_rate_count=0;g_stage_open=g_stage_sealed=0;g_initialized=0;g_checkpoint_valid=0;return 0;
+    (void)gate;g_identity=*identity;g_management_tag=cord_from_bytes("aethernet-management-m29",24);if(!noun_is_atom(g_management_tag))return -1;for(unsigned i=0;i<M29_CACHE_ENTRIES;i++)g_cache[i].used=0;g_pending.used=0;g_lifecycle=M29_RUNNING;g_selected=0;g_terminal=0;g_generation=1;g_terminal_installation=0;g_sequence_high=0;g_operation_high=0;g_response_sequence=1;g_rate_start=g_rate_count=0;g_stage_open=g_stage_sealed=0;g_initialized=0;g_checkpoint_valid=0;
+#ifdef M32_TEST_CONTROLS
+    g_diag_management_rx=g_diag_decode_ok=g_diag_decode_failures=0;
+    g_diag_accepted=g_diag_refused=0;
+    g_diag_last_sequence=g_diag_last_operation=g_diag_last_offset=0;
+    for (unsigned i=0;i<32;i++) g_diag_last_digest[i]=0;
+    g_diag_cache_hits=g_diag_cache_misses=g_diag_cache_conflicts=0;
+    g_diag_cache_presence=g_diag_execute_count=g_diag_pending_replays=0;
+    g_diag_pending_refusals=0;
+    g_diag_lease_start=g_diag_lease_expiry=g_diag_lease_expired=0;
+#endif
+    return 0;
 }
 
 static m29_pending_tx_t pending_tx_state(void)
@@ -548,9 +582,21 @@ static int pending_store(uint64_t operation,const uint8_t digest[32],
 {
     if(g_pending.used||!digest||!payload||!length||length>M29_MAX_PAYLOAD
        ||g_response_sequence==UINT64_MAX)return 0;
+    /* virtio_net_send may report a bounded poll failure after the descriptor
+     * has already reached the used ring.  A completion observed here is an
+     * authenticated local proof that the retained response was submitted;
+     * keeping a stale slot in that case would fence the next mutation even
+     * after the host has correlated this response.  If the host did not see
+     * it, the normal exact cache replay remains available. */
+    int submitted=m29_native_last_send_submitted();
+    int completion=m29_native_tx_complete();
+    if(submitted && completion>0){
+        g_response_sequence++;
+        return 1;
+    }
     g_pending.used=1;g_pending.operation=operation;g_pending.len=length;
     g_pending.response_sequence=g_response_sequence;g_pending.attempts=1;
-    g_pending.tx_state=pending_tx_state();
+    g_pending.tx_state=(!submitted||completion<0)?M29_PENDING_UNSENT:M29_PENDING_IN_FLIGHT;
     for(unsigned i=0;i<32;i++)g_pending.digest[i]=digest[i];
     for(unsigned i=0;i<length;i++)g_pending.payload[i]=payload[i];
     return 1;
@@ -602,6 +648,9 @@ int m29_target_service_tick(void)
         g_initialized=1;
     }
     if(g_stage_open&&g_lease&&now()>=g_lease){
+#ifdef M32_TEST_CONTROLS
+        g_diag_lease_expired=1;
+#endif
         g_stage_open=g_stage_sealed=0;g_received=g_chunks=g_total=g_policy_bytes=g_pill_bytes=0;
         for(unsigned i=0;i<32;i++){g_stage_policy_sha256[i]=0;g_stage_pill_sha256[i]=0;}
     }
@@ -609,21 +658,66 @@ int m29_target_service_tick(void)
     m29_native_datagram_t d;
     m29_native_status_t native=m29_native_receive(&d);
     if(native!=M29_NATIVE_OK)return 0;
+#ifdef M32_TEST_CONTROLS
+    g_diag_management_rx++;
+#endif
     uint8_t digest[32];
     sha256_hash(d.payload,d.payload_len,digest);
     m29_request_t r;
-    if(!decode_request(d.header,d.payload,d.payload_len,&r))return 0;
+    if(!decode_request(d.header,d.payload,d.payload_len,&r)){
+#ifdef M32_TEST_CONTROLS
+        g_diag_decode_failures++;
+#endif
+        return 0;
+    }
+#ifdef M32_TEST_CONTROLS
+    g_diag_decode_ok++;
+    g_diag_last_sequence=r.sequence; g_diag_last_operation=r.operation;
+    g_diag_last_offset=r.offset;
+    for (unsigned i=0;i<32;i++) g_diag_last_digest[i]=digest[i];
+#endif
     if(noun_tx_active())noun_tx_abort();
     if(g_pending.used){
-        if(r.operation!=g_pending.operation)return 0;
-        if(!equal_bytes(digest,g_pending.digest,32))return 0;
+        if(r.operation!=g_pending.operation){
+#ifdef M32_TEST_CONTROLS
+            g_diag_pending_refusals++;
+#endif
+            return 0;
+        }
+        if(!equal_bytes(digest,g_pending.digest,32)){
+#ifdef M32_TEST_CONTROLS
+            g_diag_pending_refusals++;
+#endif
+            return 0;
+        }
         if(g_pending.attempts>=M29_RESPONSE_ATTEMPTS)return 0;
-        if(!accept_sequence(r.sequence))return 0;
+        if(!accept_sequence(r.sequence)){
+#ifdef M32_TEST_CONTROLS
+            g_diag_refused++;
+#endif
+            return 0;
+        }
+#ifdef M32_TEST_CONTROLS
+        g_diag_accepted++; g_diag_pending_replays++; g_diag_cache_presence=1;
+#endif
         return pending_retry(&r,digest);
     }
-    if(!accept_sequence(r.sequence))return 0;
+    if(!accept_sequence(r.sequence)){
+#ifdef M32_TEST_CONTROLS
+        g_diag_refused++;
+#endif
+        return 0;
+    }
+#ifdef M32_TEST_CONTROLS
+    g_diag_accepted++;
+#endif
     if(g_response_sequence==UINT64_MAX)return 0;
     int found=cache_find(r.operation,digest);
+#ifdef M32_TEST_CONTROLS
+    if (found>=0) { g_diag_cache_hits++; g_diag_cache_presence=1; }
+    else if (found==-2) { g_diag_cache_conflicts++; g_diag_cache_presence=2; }
+    else { g_diag_cache_misses++; g_diag_cache_presence=0; }
+#endif
     uint8_t response[M29_MAX_PAYLOAD];uint16_t n=0;
     if(found>=0){
         for(unsigned i=0;i<g_cache[found].len;i++)response[i]=g_cache[found].payload[i];
@@ -632,6 +726,9 @@ int m29_target_service_tick(void)
         if(!response_payload(r.operation,M29_REJECTED,NOUN_ZERO,response,&n))return 0;
     }else{
         if(r.operation==0||r.operation==UINT64_MAX||r.operation<=g_operation_high)return 0;
+#ifdef M32_TEST_CONTROLS
+        g_diag_execute_count++;
+#endif
         if(!cache_free()||!execute(&r,response,&n))return 0;
         if(!cache_put(r.operation,digest,response,n))return 0;
         g_operation_high=r.operation;
@@ -713,3 +810,55 @@ uint64_t m29_target_pending(void){return g_pending.used?1:0;}
 uint64_t m29_target_pending_attempts(void){return g_pending.used?g_pending.attempts:0;}
 uint64_t m29_target_pending_tx_state(void){return g_pending.used?(uint64_t)g_pending.tx_state:0;}
 uint64_t m29_target_response_sequence(void){return g_response_sequence;}
+#ifdef M32_TEST_CONTROLS
+static uint64_t diag_digest_part(const uint8_t digest[32], uint64_t index)
+{
+    if (!digest || index >= 4) return UINT64_MAX;
+    uint64_t value=0;
+    for (unsigned i=0;i<8;i++) value|=(uint64_t)digest[index*8u+i]<<(8u*i);
+    return value;
+}
+
+static uint64_t diag_cache_used(void)
+{
+    uint64_t used=0;
+    for (unsigned i=0;i<M29_CACHE_ENTRIES;i++) if (g_cache[i].used) used++;
+    return used;
+}
+
+uint64_t m29_target_diag_management_rx(void){return g_diag_management_rx;}
+uint64_t m29_target_diag_decode_ok(void){return g_diag_decode_ok;}
+uint64_t m29_target_diag_decode_failures(void){return g_diag_decode_failures;}
+uint64_t m29_target_diag_accepted(void){return g_diag_accepted;}
+uint64_t m29_target_diag_refused(void){return g_diag_refused;}
+uint64_t m29_target_diag_last_sequence(void){return g_diag_last_sequence;}
+uint64_t m29_target_diag_last_operation(void){return g_diag_last_operation;}
+uint64_t m29_target_diag_last_offset(void){return g_diag_last_offset;}
+uint64_t m29_target_diag_last_digest(uint64_t index){return diag_digest_part(g_diag_last_digest,index);}
+uint64_t m29_target_diag_cache_hits(void){return g_diag_cache_hits;}
+uint64_t m29_target_diag_cache_misses(void){return g_diag_cache_misses;}
+uint64_t m29_target_diag_cache_conflicts(void){return g_diag_cache_conflicts;}
+uint64_t m29_target_diag_cache_presence(void){return g_diag_cache_presence;}
+uint64_t m29_target_diag_cache_used(void){return diag_cache_used();}
+uint64_t m29_target_diag_execute_count(void){return g_diag_execute_count;}
+uint64_t m29_target_diag_pending_replays(void){return g_diag_pending_replays;}
+uint64_t m29_target_diag_pending_refusals(void){return g_diag_pending_refusals;}
+uint64_t m29_target_diag_pending_operation(void){return g_pending.used?g_pending.operation:0;}
+uint64_t m29_target_diag_pending_digest(uint64_t index)
+{
+    return g_pending.used?diag_digest_part(g_pending.digest,index):0;
+}
+uint64_t m29_target_diag_stage_open(void){return g_stage_open?1:0;}
+uint64_t m29_target_diag_stage_sealed(void){return g_stage_sealed?1:0;}
+uint64_t m29_target_diag_stage_received(void){return g_received;}
+uint64_t m29_target_diag_stage_chunks(void){return g_chunks;}
+uint64_t m29_target_diag_lease_start(void){return g_diag_lease_start;}
+uint64_t m29_target_diag_lease_remaining(void)
+{
+    if (!g_stage_open || !g_lease) return 0;
+    uint64_t current=now();
+    return current>=g_lease?0:g_lease-current;
+}
+uint64_t m29_target_diag_lease_expired(void){return g_diag_lease_expired;}
+uint64_t m29_target_diag_operation_high(void){return g_operation_high;}
+#endif
