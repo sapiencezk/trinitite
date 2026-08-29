@@ -16,6 +16,7 @@
 #include "m26_target_core.h"
 #include "m29_aethernet_native.h"
 #include "m29_target_core.h"
+#include "m34_local_allocation.h"
 #include "memory.h"
 #include "noun.h"
 #include "runtime_identity.h"
@@ -53,14 +54,6 @@ static const uint8_t M29_SCHEMA[32] = {
     0xac,0x17,0x40,0xa6,0xef,0x90,0x34,0xd0,0x6f,0x02,0xc3,0x20,0x58,0x72,0xb2,0x3b,
 };
 /* All hash atoms use the PILL/runtime canonical little-endian byte order. */
-static const uint8_t M29_PREDECESSOR_PROGRAM[32] = {
-    0x77,0x0b,0x73,0x7b,0x49,0x4c,0xbb,0xdc,0x14,0x1c,0xa1,0x4d,0x2e,0xf4,0xd1,0xcc,
-    0xa0,0xef,0xaa,0x2f,0xc1,0x16,0xba,0x2c,0xb0,0x91,0x44,0x52,0x75,0xc8,0x67,0x45,
-};
-static const uint8_t M29_PREDECESSOR_ANCHOR[32] = {
-    0x96,0x9c,0x64,0x82,0xa8,0xa0,0xa2,0x22,0x29,0x41,0x83,0xc4,0xee,0xce,0x6f,0xc8,
-    0x0c,0xe8,0x93,0x98,0x7e,0x74,0x38,0x64,0x18,0x5e,0x66,0x41,0xcc,0x1e,0x52,0xed,
-};
 static const uint8_t M29_FORMULA_ID[32] = {
     0x0d,0x8f,0x97,0x0d,0x15,0xd7,0x69,0x89,0x79,0xe2,0xdf,0xe0,0xce,0x2a,0xdd,0x41,
     0x40,0x40,0xed,0x48,0x60,0xde,0xd3,0x17,0x3e,0xb8,0xf3,0xa1,0x32,0x57,0x7c,0xb0,
@@ -379,11 +372,12 @@ reject:
 static int policy_bootstrap_valid(const m29_policy_t *p)
 {
     return p && p->generation == 2 && p->manager == M29_MANAGER
-        && p->device == M29_TARGET && p->resource == 1 && p->slot == 1
+        && m34_local_allocation_matches(p->device, p->resource, p->slot)
         && p->schema == 1 && p->predecessor_generation == 1
         && p->pill_bytes > 0 && p->pill_bytes <= M29_STAGE_BYTES
         && p->runtime_major == 1 && p->runtime_minor == 9
         && p->installation > 0 && p->operation > 0
+        && m34_local_allocation_predecessor_matches(&g_identity)
         && equal_bytes(p->predecessor, g_identity.program_hash, 32)
         && equal_bytes(p->battery, g_identity.battery_hash, 32)
         && equal_bytes(p->formula, M29_FORMULA_ID, 32)
@@ -552,11 +546,17 @@ static int execute(const m29_request_t*r,uint8_t*out,uint16_t*length)
 
 int m29_target_boot(noun gate,const runtime_identity_t*identity,uint8_t capability)
 {
+    const m34_local_allocation_t *allocation = m34_local_allocation();
     uint64_t rid=0;
-    if(!gate_resource_id(gate,&rid)||rid!=1
-       ||!identity||capability!=RUNTIME_CAPABILITY_PROFILE_M25||identity->generation!=1
-       ||!equal_bytes(identity->program_hash,M29_PREDECESSOR_PROGRAM,32)
-       ||!equal_bytes(identity->package_hash,M29_PREDECESSOR_ANCHOR,32))return -1;
+    if(!allocation || M29_TARGET != allocation->device_id
+       || !allocation->transport_plan || !m26_plan_record_validate()
+       || allocation->transport_plan->source_device_id != allocation->device_id
+       || allocation->transport_plan->source_resource_id != allocation->resource_id
+       ||!gate_resource_id(gate,&rid)
+       ||!m34_local_allocation_matches(M29_TARGET, allocation->resource_id, allocation->slot)
+       ||rid != allocation->resource_id || !identity
+       ||capability!=RUNTIME_CAPABILITY_PROFILE_M25
+       ||!m34_local_allocation_predecessor_matches(identity))return -1;
     (void)gate;g_identity=*identity;g_management_tag=cord_from_bytes("aethernet-management-m29",24);if(!noun_is_atom(g_management_tag))return -1;for(unsigned i=0;i<M29_CACHE_ENTRIES;i++)g_cache[i].used=0;g_pending.used=0;g_lifecycle=M29_RUNNING;g_selected=0;g_terminal=0;g_generation=1;g_terminal_installation=0;g_sequence_high=0;g_operation_high=0;g_response_sequence=1;g_rate_start=g_rate_count=0;g_stage_open=g_stage_sealed=0;g_initialized=0;g_checkpoint_valid=0;
 #ifdef M32_TEST_CONTROLS
     g_diag_management_rx=g_diag_decode_ok=g_diag_decode_failures=0;

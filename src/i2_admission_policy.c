@@ -6,6 +6,8 @@
 #include "memory.h"
 #include "sha256.h"
 
+#define I2_DEPLOYMENT_BINDING_LOCAL_ORDINAL 1u
+
 static int bytes_eq(const uint8_t *a, const uint8_t *b, size_t n)
 {
     uint8_t diff = 0;
@@ -412,18 +414,19 @@ int i2_candidate_binding_digest(noun gate, uint64_t resource_id,
         || !digest_atom(battery_hash, &battery)
         || !alloc_cell_checked(direct(1), direct(3), &schema))
         return 0;
-    /* pack_binding() receives the same canonical (1,3) tuple for both
+    /* DeploymentBinding.device is the retained local ordinal, not the IEC
+     * Device identity. pack_binding() receives the same canonical (1,3) tuple for both
      * version fields, so its host Jam emits the second field as a backref. */
     host_abi = schema;
 
     /* Right-associated equivalent of host pack_binding():
-     * [tag schema host_abi 1 resource generation package battery limits 0]. */
+     * [tag schema host_abi local-ordinal resource generation package battery limits 0]. */
     if (!alloc_cell_checked(limits, NOUN_ZERO, &tail)
         || !alloc_cell_checked(battery, tail, &tail)
         || !alloc_cell_checked(package, tail, &tail)
         || !alloc_cell_checked(direct(generation), tail, &tail)
         || !alloc_cell_checked(direct(resource_id), tail, &tail)
-        || !alloc_cell_checked(direct(1), tail, &tail)
+        || !alloc_cell_checked(direct(I2_DEPLOYMENT_BINDING_LOCAL_ORDINAL), tail, &tail)
         || !alloc_cell_checked(host_abi, tail, &tail)
         || !alloc_cell_checked(schema, tail, &tail)
         || !alloc_cell_checked(cord_from_bytes("i2-binding", 10), tail, &binding)

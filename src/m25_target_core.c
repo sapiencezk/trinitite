@@ -758,13 +758,14 @@ int m25_target_step(void)
     /* The typed SUBSCRIBE IND is the authoritative service transition before
      * the application delivery.  Keep the same order as the host endpoint:
      * both candidates are private until the final persistent copy commits. */
-    noun service_state;
+    noun service_state, final_causes;
     uint64_t effect_value;
     if (!service_candidate(g_gate, g_surface.publications[0].target_service,
                            4, value, &service_state)
         || !build_delivery(value, &event)
         || !slam_gate(service_state, event, 0, &candidate, &causes)
-        || !parse_intent(causes, &effect_value)) {
+        || !drain_application_causes(candidate, causes, &candidate, &final_causes)
+        || !parse_intent(final_causes, &effect_value)) {
         g_last_error = 6; return -1;
     }
     (void)effect_value;
