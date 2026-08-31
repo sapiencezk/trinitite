@@ -9,6 +9,7 @@
 #define M37_A_R_FIFO_CAPACITY 16u
 #define M37_A_R_DESCRIPTOR_FIELDS 11u
 #define M37_A_R_ROUTE_CAPACITY 8u
+#define M37_A_R_ERROR_TERMINAL_FENCE 11u
 
 typedef struct {
     m37_a_r_transport_binding_t binding;
@@ -41,6 +42,7 @@ typedef struct {
 int candidate_execution_core_r_prepare(
     const M37ARNativeExecutionSurface *, noun, const runtime_identity_t *,
     m37_a_r_prepared_t *);
+int candidate_execution_core_r_cold_boot(void);
 int candidate_execution_core_r_activate(const m37_a_r_prepared_t *);
 int candidate_execution_core_r_init(void);
 int candidate_execution_core_r_set_running(int);
@@ -55,6 +57,7 @@ uint64_t candidate_execution_core_r_high_water(void);
 uint64_t candidate_execution_core_r_error(void);
 uint64_t candidate_execution_core_r_root_commits(void);
 uint64_t candidate_execution_core_r_publications(void);
+uint64_t candidate_execution_core_r_terminal_fence(void);
 int candidate_execution_core_r_test_hold_processing(int);
 int candidate_execution_core_r_test_clear_error(void);
 int candidate_execution_core_r_test_rate_exhaust(void);

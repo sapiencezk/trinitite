@@ -18,6 +18,7 @@ uint64_t m37_a_r_target_high_water(void);
 uint64_t m37_a_r_target_error(void);
 uint64_t m37_a_r_target_root_commits(void);
 uint64_t m37_a_r_target_publications(void);
+uint64_t m37_a_r_target_terminal_fence(void);
 int m37_a_r_target_prepare_gate(noun, const runtime_identity_t *, uint8_t, noun *);
 void m37_a_r_target_publish_gate(noun, const runtime_identity_t *, uint8_t);
 int m37_a_r_target_test_hold_processing(int);

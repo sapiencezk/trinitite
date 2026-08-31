@@ -57,6 +57,7 @@ static uint64_t g_rate_start, g_rate_count, g_last_output;
 static uint64_t g_root_commits, g_publications;
 static uint8_t g_output_valid, g_hold_processing, g_allocation_pressure;
 static uint8_t g_tx_recovery_pending, g_tx_recovery_attempts;
+static uint8_t g_terminal_fence;
 
 static int take(noun n, noun *head, noun *tail)
 {
@@ -263,10 +264,11 @@ static int source_pump(void)
 
 int candidate_execution_core_r_prepare(const M37ARNativeExecutionSurface*s,noun gate,const runtime_identity_t*i,m37_a_r_prepared_t*out)
 {
-    if(!s||!i||!out||!s->route_count||s->route_count>M37_A_R_ROUTE_CAPACITY||s->binding.max_payload!=M37_A_R_MAX_PAYLOAD||s->binding.max_ops!=OPS||s->binding.max_cells!=CELLS||s->binding.local_device!=(uint64_t)M24_NODE_ID||s->binding.peer_device==s->binding.local_device||!runtime_identity_validate_gate_header(gate,i,0))return -1;
+    if(!s||!i||!out||g_terminal_fence||!s->route_count||s->route_count>M37_A_R_ROUTE_CAPACITY||s->binding.max_payload!=M37_A_R_MAX_PAYLOAD||s->binding.max_ops!=OPS||s->binding.max_cells!=CELLS||s->binding.local_device!=(uint64_t)M24_NODE_ID||s->binding.peer_device==s->binding.local_device||!runtime_identity_validate_gate_header(gate,i,0))return -1;
     for(unsigned x=0;x<11;x++)if(!s->publication[x]||!s->binding.peer_descriptor[x])return -1;
     out->gate=gate;out->identity=*i;out->surface=*s;return 0;
 }
+int candidate_execution_core_r_cold_boot(void){if(g_active)return -1;g_terminal_fence=0;return 0;}
 int candidate_execution_core_r_activate(const m37_a_r_prepared_t*p)
 {
     if(!p)return -1;
@@ -276,15 +278,16 @@ int candidate_execution_core_r_activate(const m37_a_r_prepared_t*p)
     runtime_identity_set(&g_identity);runtime_identity_set_capability_profile(RUNTIME_CAPABILITY_PROFILE_M25);
     g_pending_event=NOUN_ZERO;g_pending_valid=0;g_fifo_head=g_fifo_count=0;g_next_sequence=1;g_high_water=g_admitted_high_water=0;g_last_error=0;g_last_output=0;g_output_valid=0;g_rate_start=g_rate_count=0;g_root_commits=1;g_publications=0;g_active=1;g_running=0;g_source=g_surface.binding.role==1;g_native_initialized=0;g_hold_processing=0;g_allocation_pressure=0;g_tx_recovery_pending=0;g_tx_recovery_attempts=0;return 0;
 }
-int candidate_execution_core_r_init(void){if(!g_active||g_pending_valid||g_fifo_count||m37_a_r_adapter_tx_pending()||m37_a_r_adapter_init(&g_surface.binding)!=0)return -1;g_native_initialized=1;return 0;}
-int candidate_execution_core_r_set_running(int running){if(!g_active||g_pending_valid||g_fifo_count||m37_a_r_adapter_tx_pending()||(running&&!g_native_initialized))return -1;g_running=running!=0;return 0;}
+int candidate_execution_core_r_init(void){if(!g_active||g_terminal_fence){if(g_active)g_last_error=M37_A_R_ERROR_TERMINAL_FENCE;return -1;}if(g_pending_valid||g_fifo_count||m37_a_r_adapter_tx_pending()||m37_a_r_adapter_init(&g_surface.binding)!=0)return -1;g_native_initialized=1;return 0;}
+int candidate_execution_core_r_set_running(int running){if(!g_active||g_pending_valid||g_fifo_count||m37_a_r_adapter_tx_pending()||(running&&(!g_native_initialized||g_terminal_fence))){if(g_active&&running&&g_terminal_fence)g_last_error=M37_A_R_ERROR_TERMINAL_FENCE;return -1;}g_running=running!=0;return 0;}
 int candidate_execution_core_r_submit(const m37_a_r_ingress_t*i){
     if(!i||!g_active||!g_running||!g_source||g_pending_valid
        ||i->type!=g_surface.ingress_type
        ||(i->type==1&&i->value>1)||(i->type==4&&i->value>UINT_MAX))return -1;
+    if(g_terminal_fence){g_last_error=M37_A_R_ERROR_TERMINAL_FENCE;return -1;}
     g_pending_value=i->value;g_pending_valid=1;g_last_error=0;return 0;
 }
-int candidate_execution_core_r_pump(void){if(!g_active||!g_running||!g_native_initialized)return 0;if(g_source)return source_pump();if(g_fifo_count&&!g_hold_processing)return process_head();m37_a_r_datagram_t d;m37_a_r_native_status_t s=m37_a_r_adapter_receive(&g_surface.binding,&d);if(s==M37_A_R_NATIVE_NO_PACKET)return 0;if(s!=M37_A_R_NATIVE_OK){g_last_error=1;return -1;}return candidate_execution_core_r_deliver(&(candidate_execution_delivery_r_t){d.payload,d.payload_len,d.sequence});}
+int candidate_execution_core_r_pump(void){if(!g_active||!g_running||!g_native_initialized)return 0;if(g_terminal_fence){g_last_error=M37_A_R_ERROR_TERMINAL_FENCE;return -1;}if(g_source)return source_pump();if(g_fifo_count&&!g_hold_processing)return process_head();m37_a_r_datagram_t d;m37_a_r_native_status_t s=m37_a_r_adapter_receive(&g_surface.binding,&d);if(s==M37_A_R_NATIVE_NO_PACKET)return 0;if(s!=M37_A_R_NATIVE_OK){g_last_error=1;return -1;}return candidate_execution_core_r_deliver(&(candidate_execution_delivery_r_t){d.payload,d.payload_len,d.sequence});}
 int candidate_execution_core_r_deliver(const candidate_execution_delivery_r_t*d)
 {
     if(!d||!g_active||!g_running||g_source||!d->payload||!d->payload_len||d->payload_len>M37_A_R_MAX_PAYLOAD||!d->sequence||d->sequence==UINT64_MAX||d->sequence<=g_admitted_high_water||g_fifo_count>=M37_A_R_FIFO_CAPACITY){g_last_error=2;return -1;}
@@ -295,7 +298,7 @@ int candidate_execution_core_r_recover_tx(void)
 {
     if(!g_pending_valid||!g_tx_recovery_pending)return -1;
     while(g_pending_valid&&g_tx_recovery_attempts<RECOVERY_ATTEMPTS)candidate_execution_core_r_pump();
-    if(g_pending_valid){if(m37_a_r_adapter_recover()!=0)return -1;g_pending_valid=0;g_pending_event=NOUN_ZERO;g_tx_recovery_pending=0;g_tx_recovery_attempts=0;g_last_error=9;return 0;}
+    if(g_pending_valid){if(m37_a_r_adapter_recover()!=0)return -1;g_pending_valid=0;g_pending_event=NOUN_ZERO;g_tx_recovery_pending=0;g_tx_recovery_attempts=0;g_terminal_fence=1;g_last_error=9;return 0;}
     return 0;
 }
 uint64_t candidate_execution_core_r_queue_len(void){return g_active?g_fifo_count:UINT64_MAX;}
@@ -305,6 +308,7 @@ uint64_t candidate_execution_core_r_high_water(void){return g_high_water;}
 uint64_t candidate_execution_core_r_error(void){return g_last_error;}
 uint64_t candidate_execution_core_r_root_commits(void){return g_root_commits;}
 uint64_t candidate_execution_core_r_publications(void){return g_publications;}
+uint64_t candidate_execution_core_r_terminal_fence(void){return g_terminal_fence?1:0;}
 int candidate_execution_core_r_test_hold_processing(int enabled){if(!g_active||!g_running||g_source)return -1;g_hold_processing=enabled!=0;return 0;}
 int candidate_execution_core_r_test_clear_error(void){if(!g_active)return -1;g_last_error=0;return 0;}
 int candidate_execution_core_r_test_rate_exhaust(void){if(!g_active||!g_running||g_source)return -1;g_rate_start=runtime_counter_now();g_rate_count=RATE_LIMIT;g_last_error=10;return 0;}
@@ -314,8 +318,9 @@ int candidate_execution_core_r_test_allocation_release(void){if(!g_active||!g_so
 
 #else
 int candidate_execution_core_r_prepare(const M37ARNativeExecutionSurface*s,noun g,const runtime_identity_t*i,m37_a_r_prepared_t*o){(void)s;(void)g;(void)i;(void)o;return -1;}
+int candidate_execution_core_r_cold_boot(void){return -1;}
 int candidate_execution_core_r_activate(const m37_a_r_prepared_t*p){(void)p;return -1;}
 int candidate_execution_core_r_init(void){return -1;}int candidate_execution_core_r_set_running(int r){(void)r;return -1;}int candidate_execution_core_r_submit(const m37_a_r_ingress_t*i){(void)i;return -1;}int candidate_execution_core_r_pump(void){return 0;}int candidate_execution_core_r_recover_tx(void){return -1;}
-uint64_t candidate_execution_core_r_queue_len(void){return UINT64_MAX;}uint64_t candidate_execution_core_r_output(void){return UINT64_MAX;}uint64_t candidate_execution_core_r_sequence(void){return 0;}uint64_t candidate_execution_core_r_high_water(void){return 0;}uint64_t candidate_execution_core_r_error(void){return 0;}uint64_t candidate_execution_core_r_root_commits(void){return 0;}uint64_t candidate_execution_core_r_publications(void){return 0;}
+uint64_t candidate_execution_core_r_queue_len(void){return UINT64_MAX;}uint64_t candidate_execution_core_r_output(void){return UINT64_MAX;}uint64_t candidate_execution_core_r_sequence(void){return 0;}uint64_t candidate_execution_core_r_high_water(void){return 0;}uint64_t candidate_execution_core_r_error(void){return 0;}uint64_t candidate_execution_core_r_root_commits(void){return 0;}uint64_t candidate_execution_core_r_publications(void){return 0;}uint64_t candidate_execution_core_r_terminal_fence(void){return 0;}
 int candidate_execution_core_r_test_hold_processing(int e){(void)e;return -1;}int candidate_execution_core_r_test_clear_error(void){return -1;}int candidate_execution_core_r_test_rate_exhaust(void){return -1;}int candidate_execution_core_r_test_rate_reset(void){return -1;}int candidate_execution_core_r_test_allocation_pressure(void){return -1;}int candidate_execution_core_r_test_allocation_release(void){return -1;}
 #endif

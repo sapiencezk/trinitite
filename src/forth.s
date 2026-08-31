@@ -3118,6 +3118,11 @@ defcode "M37ARPUB", 8, m37_ar_publications_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "M37ARFNC", 8, m37_ar_terminal_fence_word, 0
+    bl      m37_a_r_target_terminal_fence
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "M37ARPAU", 8, m37_ar_pause_word, 0
     mov     x0, #1
     bl      m37_a_r_target_test_hold_processing
