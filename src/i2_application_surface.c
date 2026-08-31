@@ -357,6 +357,9 @@ static int validate_surface(noun base, noun services,
     uint32_t event_count = 0, data_count = 0, external_count = 0;
     uint64_t type_ids[SURFACE_MAX_TYPES];
     int bool_type = 0;
+#ifdef M37_A_R
+    int typed_type = 0;
+#endif
 
     if (!take(base, &tag, &rest) || !tag_is(tag, "i2-program", 10)
         || !take(rest, &schema, &rest) || !take(rest, &type_table, &rest)
@@ -392,10 +395,21 @@ static int validate_surface(noun base, noun services,
                 || !tag_is(kind, "bool", 4) || width != 1) return 0;
             bool_type = 1;
         }
+#ifdef M37_A_R
+        if (type_id == 4) {
+            if (!tag_is(symbol, "elementary", 10)
+                || !tag_is(kind, "uint", 4) || width != 16) return 0;
+            typed_type = 1;
+        }
+#endif
         type_ids[type_count - 1] = type_id;
         (void)symbol; (void)elementary; (void)limit;
     }
-    if (!bool_type) return 0;
+    if (!bool_type
+#ifdef M37_A_R
+        && !typed_type
+#endif
+        ) return 0;
 
     noun ext = external;
     noun ext_entry;
@@ -414,7 +428,11 @@ static int validate_surface(noun base, noun services,
         for (uint32_t i = 0; i < event_decl->with_count; i++) {
             surface_var_t *var = find_var(fb->data_inputs, fb->data_input_count,
                                           event_decl->with_vars[i]);
-            if (!var || var->type != 1) return 0;
+            if (!var || (var->type != 1
+#ifdef M37_A_R
+                         && var->type != 4
+#endif
+                         )) return 0;
             surface->ingress.sample_id[i] = var->id;
             surface->ingress.sample_type[i] = var->type;
         }
@@ -464,8 +482,11 @@ static int validate_surface(noun base, noun services,
                 surface_var_t *target_var = find_var(target->data_inputs,
                                                      target->data_input_count,
                                                      data->target_data);
-                if (!source_var || !target_var || source_var->type != 1
-                    || target_var->type != 1 || source_var->type != target_var->type
+                if (!source_var || !target_var || (source_var->type != 1
+#ifdef M37_A_R
+                    && source_var->type != 4
+#endif
+                    ) || target_var->type != source_var->type
                     || !has_with(source_event, source_var->id)
                     || !has_with(target_event, target_var->id)) return 0;
                 for (uint32_t prior = 0; prior < d; prior++)
@@ -538,9 +559,14 @@ static int validate_surface(noun base, noun services,
         surface_var_t *data = source ? find_var(source->data_outputs,
                                                 source->data_output_count,
                                                 p->source_data) : NULL;
-        if (!source || !event || !data || p->source_type != 1 || p->target_type != 1
+        if (!source || !event || !data || p->source_type != p->target_type
+#ifndef M37_A_R
+            || p->source_type != 1
+#else
+            || (p->source_type != 1 && p->source_type != 4)
+#endif
             || p->source_service != 8 || p->target_service != 9
-            || !has_with(event, p->source_data) || data->type != 1) return 0;
+            || !has_with(event, p->source_data) || data->type != p->source_type) return 0;
         if (instance_count > 1 && p->source_instance != surface->publications[0].source_instance)
             return 0;
         if ((surface->publication_count == 1 && p->source_ordinal != 8)

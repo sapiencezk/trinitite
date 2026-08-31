@@ -2045,7 +2045,9 @@ defcode "QUIT", 4, quit, 0
     ldr     x0, =UART_FR
     #endif
     stp     x5, x6, [sp, #-16]!
- #ifdef M37_A
+ #ifdef M37_A_R
+    bl      m37_a_r_target_service_tick
+ #elif defined(M37_A)
     bl      m37_target_service_tick
  #elif defined(M36_TYPED)
     bl      m36_target_service_tick
@@ -3067,6 +3069,118 @@ defcode "M26CKR?", 7, m26_checkpoint_restore_word, 0
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
+#endif
+
+#ifdef M37_A_R
+// M37-A-R is the bounded candidate-derived successor. Its transport payload
+// is the exact M36 typed UINT16 envelope; M37ARIN consumes (type value).
+defcode "M37ARIN", 7, m37_ar_input_word, 0
+    ldr     x1, [DSP]
+    ldr     x0, [DSP, #8]
+    add     DSP, DSP, #16
+    bl      m37_a_r_target_input
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARQ", 6, m37_ar_queue_word, 0
+    bl      m37_a_r_target_queue_len
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37AROUT", 8, m37_ar_output_word, 0
+    bl      m37_a_r_target_output
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARSEQ", 8, m37_ar_sequence_word, 0
+    bl      m37_a_r_target_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARHWM", 8, m37_ar_high_water_word, 0
+    bl      m37_a_r_target_high_water
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARERR", 8, m37_ar_error_word, 0
+    bl      m37_a_r_target_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARROT", 8, m37_ar_root_word, 0
+    bl      m37_a_r_target_root_commits
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARPUB", 8, m37_ar_publications_word, 0
+    bl      m37_a_r_target_publications
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARPAU", 8, m37_ar_pause_word, 0
+    mov     x0, #1
+    bl      m37_a_r_target_test_hold_processing
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARRSM", 8, m37_ar_resume_word, 0
+    mov     x0, #0
+    bl      m37_a_r_target_test_hold_processing
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARCLR", 8, m37_ar_clear_error_word, 0
+    bl      m37_a_r_target_test_clear_error
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARRAT", 8, m37_ar_rate_word, 0
+    bl      m37_a_r_target_test_rate_exhaust
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARST", 7, m37_ar_rate_reset_word, 0
+    bl      m37_a_r_target_test_rate_reset
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARALC", 8, m37_ar_alloc_word, 0
+    bl      m37_a_r_target_test_allocation_pressure
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARALR", 8, m37_ar_alloc_release_word, 0
+    bl      m37_a_r_target_test_allocation_release
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARTXP", 8, m37_ar_tx_pending_word, 0
+    bl      m37_a_r_target_test_hold_tx
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARTXR", 8, m37_ar_tx_release_word, 0
+    bl      m37_a_r_target_test_release_tx
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARLST", 8, m37_ar_lost_word, 0
+    bl      m37_a_r_target_test_lost_completion
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37ARREC", 8, m37_ar_recover_word, 0
+    bl      m37_a_r_target_recover_tx
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 #endif
 
 #ifdef M37_A

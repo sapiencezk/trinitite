@@ -604,7 +604,11 @@ int m25_target_init(void)
 {
     if (!g_active || g_pending_event != NOUN_ZERO || g_fifo_count != 0
         || m25_native_tx_pending()) return -1;
+#ifndef M37_A_R
     if (m25_native_init() != 0) return -1;
+#else
+    if (m25_native_prepare_platform() != 0) return -1;
+#endif
     noun staged, persisted;
     uint64_t instance = g_is_source ? g_surface.publications[0].source_service
                                     : g_surface.publications[0].target_service;

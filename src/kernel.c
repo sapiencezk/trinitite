@@ -41,6 +41,9 @@
 #ifdef M37_A
 #include "m37_a_target_core.h"
 #endif
+#ifdef M37_A_R
+#include "m37_a_r_target_core.h"
+#endif
 #include "m22_provider_core.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
@@ -2426,7 +2429,9 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
  #elif defined(M27_COMMISSION)
         (void)m27_target_service_tick();
  #endif
- #ifdef M37_A
+ #ifdef M37_A_R
+        (void)m37_a_r_target_service_tick();
+ #elif defined(M37_A)
         (void)m37_target_service_tick();
  #elif defined(M36_TYPED)
         (void)m36_target_service_tick();
@@ -2557,7 +2562,9 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 #elif defined(M27_COMMISSION)
                 (void)m27_target_service_tick();
                 #endif
- #ifdef M37_A
+ #ifdef M37_A_R
+                (void)m37_a_r_target_service_tick();
+ #elif defined(M37_A)
                 (void)m37_target_service_tick();
  #elif defined(M36_TYPED)
                 (void)m36_target_service_tick();
@@ -5320,7 +5327,11 @@ int kernel_prepare_pill(void)
             status = m27_target_boot(
                 gate, &g_pill_candidate_identity, g_pill_candidate_capability);
 #endif
-#ifdef M37_A
+#ifdef M37_A_R
+        if (status == 0)
+            status = m37_a_r_target_boot(
+                gate, &g_pill_candidate_identity, g_pill_candidate_capability);
+#elif defined(M37_A)
         if (status == 0)
             status = m37_target_boot(
                 gate, &g_pill_candidate_identity, g_pill_candidate_capability);

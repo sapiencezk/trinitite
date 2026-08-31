@@ -21,6 +21,9 @@
 #ifdef M37_A
 #include "m37_a_target_core.h"
 #endif
+#ifdef M37_A_R
+#include "m37_a_r_target_core.h"
+#endif
 #include "m29_aethernet_native.h"
 #include "m29_target_core.h"
 #include "m34_local_allocation.h"
@@ -65,7 +68,7 @@ static const uint8_t M29_FORMULA_ID[32] = {
     0x0d,0x8f,0x97,0x0d,0x15,0xd7,0x69,0x89,0x79,0xe2,0xdf,0xe0,0xce,0x2a,0xdd,0x41,
     0x40,0x40,0xed,0x48,0x60,0xde,0xd3,0x17,0x3e,0xb8,0xf3,0xa1,0x32,0x57,0x7c,0xb0,
 };
-#if !defined(M36_TYPED) && !defined(M37_A)
+#if !defined(M36_TYPED) && !defined(M37_A) && !defined(M37_A_R)
 static const uint8_t M29_DATA_PLAN_ID[32] = {
     0x41,0x2e,0xe3,0xf4,0x29,0x32,0xdb,0x66,0xbd,0x56,0x9c,0x99,0xe2,0x88,0x4a,0x28,
     0x47,0xd7,0x66,0xb0,0x44,0x25,0x51,0xad,0x19,0xf7,0xa0,0x4a,0xb0,0x14,0xd5,0x50,
@@ -77,6 +80,14 @@ static const uint8_t M37_A_DATA_PLAN_ID[32] = {
     0x43,0x8a,0x20,0x0b,0xf7,0x12,0x81,0x0e,
     0x77,0x11,0xf7,0x60,0xd4,0x54,0x17,0xc0,
     0x37,0x29,0x00,0xd3,0xbc,0x40,0xc9,0x9f,
+};
+#endif
+#ifdef M37_A_R
+static const uint8_t M37_A_R_DATA_PLAN_ID[32] = {
+    0x92,0xbb,0x93,0xaa,0x97,0x35,0x9e,0xa2,
+    0x34,0x83,0x03,0xdb,0xd1,0x61,0x22,0xda,
+    0x87,0x8a,0x3d,0x95,0x58,0x8d,0x0a,0x85,
+    0xd5,0xe4,0x0f,0x65,0xd4,0x34,0xda,0x72,
 };
 #endif
 #ifdef M36_TYPED
@@ -201,7 +212,7 @@ static int response_payload(uint64_t id,m29_result_t result,noun body,uint8_t*ou
     for(uint64_t i=0;i<n;i++)out[i]=b[i];
     noun_tx_abort();*length=(uint16_t)n;return 1;
 }
-#ifdef M37_A
+#if defined(M37_A) || defined(M37_A_R)
 static int m37_rejected_response(uint64_t id,noun body,uint8_t*out,uint16_t*length)
 {
     if (noun_tx_active()) noun_tx_abort();
@@ -419,6 +430,8 @@ static int policy_bootstrap_valid(const m29_policy_t *p)
         || !equal_bytes(p->formula, M29_FORMULA_ID, 32)) return 0;
 #ifdef M36_TYPED
     if (!equal_bytes(p->data_plan, M36_DATA_PLAN_ID, 32)) return 0;
+#elif defined(M37_A_R)
+    if (!equal_bytes(p->data_plan, M37_A_R_DATA_PLAN_ID, 32)) return 0;
 #elif defined(M37_A)
     if (!equal_bytes(p->data_plan, M37_A_DATA_PLAN_ID, 32)) return 0;
 #else
@@ -446,7 +459,18 @@ static int validate_program_projection(noun gate,
     if(!take(rest,&ignored,&tables) || !take(tables,&ignored,&tables)
        || !take(tables,&ignored,&tables) || !take(tables,&ignored,&tables)
        || !take(tables,&exports,&services)) return 0;
- #ifdef M37_A
+ #ifdef M37_A_R
+    noun binding_tag, binding_body, source_noun, binding_noun;
+    return cord_is(tag, "i2-resource-program-v1")
+        && noun_is_cell(exports)
+        && take(exports, &source_noun, &binding_noun)
+        && atom_bytes(source_noun, actual_source, 32, 32)
+        && equal_bytes(actual_source, policy->successor_source, 32)
+        && take(binding_noun, &binding_tag, &binding_body)
+        && i2_application_surface_tag_matches(
+            binding_tag, "m37-a-r-transport-binding-v1", 28)
+        && noun_is_cell(services);
+ #elif defined(M37_A)
     noun binding_tag, binding_body, source_noun, binding_noun;
     return cord_is(tag, "i2-resource-program-v1")
         && noun_is_cell(exports)
@@ -491,7 +515,7 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
        ||!equal_bytes(pill_sha,g_stage_pill_sha256,32)
        ||!equal_bytes(pill_sha,policy.pill_sha256,32)
        ||!equal_bytes(pill_b3,policy.pill_blake3,32)){
-#ifdef M37_A
+#if defined(M37_A) || defined(M37_A_R)
         return m37_rejected_response(r->operation,direct(820),reserved,reserved_len);
 #else
         goto reject;
@@ -505,14 +529,14 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
         g_stage+g_policy_bytes,g_pill_bytes,HEAP_MODE_PERSIST,
         &candidate,&identity,&capability);
     if(candidate_status!=PILL_I2_OK){
-#ifdef M37_A
+#if defined(M37_A) || defined(M37_A_R)
         return m37_rejected_response(r->operation,direct(821),reserved,reserved_len);
 #else
         goto reject;
 #endif
     }
     if(capability!=RUNTIME_CAPABILITY_PROFILE_M25){
-#ifdef M37_A
+#if defined(M37_A) || defined(M37_A_R)
         return m37_rejected_response(r->operation,direct(822),reserved,reserved_len);
 #else
         goto reject;
@@ -521,7 +545,7 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
     if(identity.generation!=2 || identity.runtime_abi[0]!=1
        ||identity.runtime_abi[1]!=9 || identity.formula_abi[0]!=1
        ||identity.formula_abi[1]!=9){
-#ifdef M37_A
+#if defined(M37_A) || defined(M37_A_R)
         return m37_rejected_response(r->operation,direct(823),reserved,reserved_len);
 #else
         goto reject;
@@ -530,7 +554,7 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
     if(!equal_bytes(identity.program_hash,policy.successor_program,32)
        ||!equal_bytes(identity.package_hash,policy.successor_package,32)
        ||!equal_bytes(identity.battery_hash,policy.battery,32)){
-#ifdef M37_A
+#if defined(M37_A) || defined(M37_A_R)
         return m37_rejected_response(r->operation,direct(824),reserved,reserved_len);
 #else
         goto reject;
@@ -538,7 +562,7 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
     }
     if(!i2_admission_limits_hash(candidate,got_limits)
        ||!equal_bytes(got_limits,policy.successor_limits,32)){
-#ifdef M37_A
+#if defined(M37_A) || defined(M37_A_R)
         return m37_rejected_response(r->operation,direct(825),reserved,reserved_len);
 #else
         goto reject;
@@ -548,20 +572,23 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
                                     identity.package_hash,identity.battery_hash,
                                     capability_binding)
        ||!equal_bytes(capability_binding,policy.successor_binding,32)){
-#ifdef M37_A
+#if defined(M37_A) || defined(M37_A_R)
         return m37_rejected_response(r->operation,direct(826),reserved,reserved_len);
 #else
         goto reject;
 #endif
     }
     if(!validate_program_projection(candidate,&identity,&policy)){
-#ifdef M37_A
+#if defined(M37_A) || defined(M37_A_R)
         return m37_rejected_response(r->operation,direct(827),reserved,reserved_len);
 #else
         goto reject;
 #endif
     }
-#ifdef M37_A
+#if defined(M37_A_R)
+    if(m37_a_r_target_prepare_gate(candidate,&identity,capability,&prepared)!=0)
+        return m37_rejected_response(r->operation,direct(828),reserved,reserved_len);
+ #elif defined(M37_A)
     if(m37_target_prepare_gate(candidate,&identity,capability,&prepared)!=0)
         return m37_rejected_response(r->operation,direct(828),reserved,reserved_len);
  #elif defined(M36_TYPED)
@@ -571,7 +598,9 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
  #endif
     /* No fallible operation follows this local publication boundary. */
     noun_tx_commit();heap_persist_commit_tx();
-#ifdef M37_A
+#ifdef M37_A_R
+    m37_a_r_target_publish_gate(prepared,&identity,capability);
+ #elif defined(M37_A)
     m37_target_publish_gate(prepared,&identity,capability);
  #elif defined(M36_TYPED)
     m36_target_publish_gate(prepared,&identity,capability);
@@ -598,7 +627,9 @@ static int execute(const m29_request_t*r,uint8_t*out,uint16_t*length)
     if(r->op==M29_STATUS){if(!status_body(&body))return 0;result=M29_DONE;}
     else if(r->op==M29_STOP){
         int stopped = 0;
- #ifdef M37_A
+ #ifdef M37_A_R
+        stopped = (g_selected ? m37_a_r_target_set_running(0) : m26_target_set_running(0)) == 0;
+ #elif defined(M37_A)
         stopped = (g_selected ? m37_target_set_running(0) : m26_target_set_running(0)) == 0;
  #elif defined(M36_TYPED)
         stopped = (g_selected ? m36_target_set_running(0) : m26_target_set_running(0)) == 0;
@@ -669,7 +700,10 @@ static int execute(const m29_request_t*r,uint8_t*out,uint16_t*length)
     else if(r->op==M29_CANCEL){if(g_lifecycle==M29_STOPPED&&g_stage_open&&r->installation==g_installation){g_stage_open=g_stage_sealed=0;g_received=g_chunks=g_total=g_policy_bytes=g_pill_bytes=0;result=M29_DONE;}}
     else if(r->op==M29_START){
         int initialized = 0, running = 0;
- #ifdef M37_A
+ #ifdef M37_A_R
+        initialized = g_selected && m37_a_r_target_init() == 0;
+        running = initialized && m29_native_init() == 0 && m37_a_r_target_set_running(1) == 0;
+ #elif defined(M37_A)
         initialized = g_selected && m37_target_init() == 0;
         running = initialized && m29_native_init() == 0 && m37_target_set_running(1) == 0;
  #elif defined(M36_TYPED)

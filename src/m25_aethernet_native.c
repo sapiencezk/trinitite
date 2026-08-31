@@ -14,7 +14,17 @@
 #define MAX_PAYLOAD 1200u
 #define FRAME_BYTES (ETH_BYTES + IPV6_BYTES + UDP_BYTES + MAX_PAYLOAD)
 
-#if defined(M24_NODE_ID) && M24_NODE_ID == 11
+#ifdef M37_A_R
+static uint16_t g_local_port, g_peer_port;
+static uint8_t g_local_mac[6], g_peer_mac[6], g_local_ip[16], g_peer_ip[16];
+static int g_endpoint_configured;
+#define LOCAL_PORT g_local_port
+#define PEER_PORT g_peer_port
+#define LOCAL_MAC g_local_mac
+#define PEER_MAC g_peer_mac
+#define LOCAL_IP g_local_ip
+#define PEER_IP g_peer_ip
+#elif defined(M24_NODE_ID) && M24_NODE_ID == 11
 #define LOCAL_PORT 25911u
 #define PEER_PORT 25922u
 static const uint8_t LOCAL_MAC[6] = {2,0,0,0,0,0x0b};
@@ -36,6 +46,9 @@ static uint8_t g_pending[MAX_PAYLOAD];
 static uint32_t g_pending_len;
 static int g_pending_tx;
 static int g_test_hold_tx;
+#ifdef M37_A_R
+static int g_test_lost_completion;
+#endif
 static uint32_t g_inbox_len;
 static int g_inbox;
 static int g_shared_demux;
@@ -87,11 +100,48 @@ int m25_native_init(void)
 {
     uint8_t mac[6];
     g_pending_tx = 0; g_pending_len = 0; g_test_hold_tx = 0;
+#ifdef M37_A_R
+    g_test_lost_completion = 0;
+#endif
     g_inbox = 0; g_inbox_len = 0;
     g_shared_demux = 0;
+#ifdef M37_A_R
+    if (!g_endpoint_configured) return -1;
+#endif
     return virtio_net_init() != 0 || virtio_net_config_mac(mac) != 0
         || !same(mac, LOCAL_MAC, 6) ? -1 : 0;
 }
+
+#ifdef M37_A_R
+int m25_native_prepare_platform(void)
+{
+    uint8_t mac[6];
+    return virtio_net_init() != 0 || virtio_net_config_mac(mac) != 0 ? -1 : 0;
+}
+
+int m25_native_configure_endpoint(const uint8_t *local_mac,
+                                  const uint8_t *peer_mac,
+                                  const uint8_t *local_ip,
+                                  const uint8_t *peer_ip,
+                                  uint64_t local_port, uint64_t peer_port)
+{
+    if (!local_mac || !peer_mac || !local_ip || !peer_ip
+        || !local_port || local_port > 65535u
+        || !peer_port || peer_port > 65535u) return -1;
+    for (unsigned i = 0; i < 6; i++) {
+        g_local_mac[i] = local_mac[i];
+        g_peer_mac[i] = peer_mac[i];
+    }
+    for (unsigned i = 0; i < 16; i++) {
+        g_local_ip[i] = local_ip[i];
+        g_peer_ip[i] = peer_ip[i];
+    }
+    g_local_port = (uint16_t)local_port;
+    g_peer_port = (uint16_t)peer_port;
+    g_endpoint_configured = 1;
+    return 0;
+}
+#endif
 
 m25_native_status_t m25_native_receive(m25_native_datagram_t *out)
 {
@@ -133,6 +183,9 @@ m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len
     if (!payload || payload_len == 0 || payload_len > MAX_PAYLOAD) return M25_NATIVE_MALFORMED;
     if (g_test_hold_tx) return M25_NATIVE_RING_FULL;
     if (g_pending_tx) {
+#ifdef M37_A_R
+        if (g_test_lost_completion) return M25_NATIVE_RING_FULL;
+#endif
         int complete = virtio_net_tx_complete();
         if (complete == 1) {
             int equal = payload_len == g_pending_len;
@@ -153,6 +206,16 @@ m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len
     for (uint32_t i = 0; i < payload_len; i++) udp[UDP_BYTES+i] = payload[i];
     put16(udp + 6, checksum(ip, udp, UDP_BYTES + payload_len));
     virtio_net_status_t status = virtio_net_send(g_tx, ETH_BYTES + IPV6_BYTES + UDP_BYTES + payload_len);
+#ifdef M37_A_R
+    if (g_test_lost_completion && status == VIRTIO_NET_OK) {
+        /* The frame has crossed the native submit boundary.  Keep its exact
+         * bytes for the normal completion poll, but report the completion as
+         * lost until the bounded recovery path resets this adapter. */
+        g_pending_tx = 1; g_pending_len = payload_len;
+        for (uint32_t i = 0; i < payload_len; i++) g_pending[i] = payload[i];
+        return M25_NATIVE_RING_FULL;
+    }
+#endif
     if (status == VIRTIO_NET_OK || virtio_net_tx_complete() == 1) return M25_NATIVE_OK;
     if (status == VIRTIO_NET_RING_FULL || status == VIRTIO_NET_DEVICE_FAILURE) {
         g_pending_tx = 1; g_pending_len = payload_len;
@@ -177,3 +240,7 @@ void m25_native_set_shared_demux(int enabled) { g_shared_demux = enabled != 0; }
 
 void m25_native_test_hold_tx(void) { g_test_hold_tx = 1; }
 void m25_native_test_release_tx(void) { g_test_hold_tx = 0; }
+#ifdef M37_A_R
+void m25_native_test_lost_completion(void) { g_test_lost_completion = 1; }
+void m25_native_test_release_lost_completion(void) { g_test_lost_completion = 0; }
+#endif
