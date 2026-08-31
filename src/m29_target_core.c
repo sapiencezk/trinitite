@@ -14,6 +14,9 @@
 #include "i2_admission_policy.h"
 #include "jam.h"
 #include "m26_target_core.h"
+#ifdef M36_TYPED
+#include "m36_target_core.h"
+#endif
 #include "m29_aethernet_native.h"
 #include "m29_target_core.h"
 #include "m34_local_allocation.h"
@@ -58,10 +61,23 @@ static const uint8_t M29_FORMULA_ID[32] = {
     0x0d,0x8f,0x97,0x0d,0x15,0xd7,0x69,0x89,0x79,0xe2,0xdf,0xe0,0xce,0x2a,0xdd,0x41,
     0x40,0x40,0xed,0x48,0x60,0xde,0xd3,0x17,0x3e,0xb8,0xf3,0xa1,0x32,0x57,0x7c,0xb0,
 };
+#ifndef M36_TYPED
 static const uint8_t M29_DATA_PLAN_ID[32] = {
     0x41,0x2e,0xe3,0xf4,0x29,0x32,0xdb,0x66,0xbd,0x56,0x9c,0x99,0xe2,0x88,0x4a,0x28,
     0x47,0xd7,0x66,0xb0,0x44,0x25,0x51,0xad,0x19,0xf7,0xa0,0x4a,0xb0,0x14,0xd5,0x50,
 };
+#endif
+#ifdef M36_TYPED
+/* SHA-256 of the canonical M36-T transport plan at the fixed host port base.
+ * It is policy data, not a runtime registry; the target still validates the
+ * independent typed wire schema and binding before application mutation. */
+static const uint8_t M36_DATA_PLAN_ID[32] = {
+    0x55,0x82,0x23,0x71,0x99,0xf0,0xed,0x12,
+    0x9e,0xc0,0x54,0x4c,0x18,0x0e,0xc8,0x51,
+    0x20,0x74,0x1b,0x3e,0x0a,0x3f,0x14,0x45,
+    0x96,0xd8,0xaf,0xed,0x46,0x7b,0x69,0x97,
+};
+#endif
 typedef enum { M29_RUNNING=1, M29_STOPPED=2, M29_IDLE=3 } m29_lifecycle_t;
 typedef enum { M29_DONE=1, M29_REJECTED=2, M29_FAILED=3 } m29_result_t;
 typedef enum { M29_STATUS=1, M29_STOP, M29_BEGIN, M29_CHUNK, M29_SEAL, M29_ACTIVATE, M29_CANCEL, M29_START } m29_op_t;
@@ -371,17 +387,23 @@ reject:
 
 static int policy_bootstrap_valid(const m29_policy_t *p)
 {
-    return p && p->generation == 2 && p->manager == M29_MANAGER
-        && m34_local_allocation_matches(p->device, p->resource, p->slot)
-        && p->schema == 1 && p->predecessor_generation == 1
-        && p->pill_bytes > 0 && p->pill_bytes <= M29_STAGE_BYTES
-        && p->runtime_major == 1 && p->runtime_minor == 9
-        && p->installation > 0 && p->operation > 0
-        && m34_local_allocation_predecessor_matches(&g_identity)
-        && equal_bytes(p->predecessor, g_identity.program_hash, 32)
-        && equal_bytes(p->battery, g_identity.battery_hash, 32)
-        && equal_bytes(p->formula, M29_FORMULA_ID, 32)
-        && equal_bytes(p->data_plan, M29_DATA_PLAN_ID, 32);
+    if (!p
+        || p->generation != 2 || p->manager != M29_MANAGER
+        || !m34_local_allocation_matches(p->device, p->resource, p->slot)
+        || p->schema != 1 || p->predecessor_generation != 1
+        || p->pill_bytes == 0 || p->pill_bytes > M29_STAGE_BYTES
+        || p->runtime_major != 1 || p->runtime_minor != 9
+        || p->installation == 0 || p->operation == 0
+        || !m34_local_allocation_predecessor_matches(&g_identity)
+        || !equal_bytes(p->predecessor, g_identity.program_hash, 32)
+        || !equal_bytes(p->battery, g_identity.battery_hash, 32)
+        || !equal_bytes(p->formula, M29_FORMULA_ID, 32)) return 0;
+#ifdef M36_TYPED
+    if (!equal_bytes(p->data_plan, M36_DATA_PLAN_ID, 32)) return 0;
+#else
+    if (!equal_bytes(p->data_plan, M29_DATA_PLAN_ID, 32)) return 0;
+#endif
+    return 1;
 }
 
 static int validate_program_projection(noun gate,
@@ -422,8 +444,8 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
     if(!response_payload(r->operation,M29_DONE,NOUN_ZERO,reserved,reserved_len))return 0;
 
     m29_policy_t policy;
-    if(!parse_policy(g_stage,g_policy_bytes,&policy)
-       ||!policy_bootstrap_valid(&policy)
+    if(!parse_policy(g_stage,g_policy_bytes,&policy))goto reject;
+    if(!policy_bootstrap_valid(&policy)
        ||policy.installation!=r->installation
        ||policy.operation==0
        ||policy.pill_bytes!=g_pill_bytes)goto reject;
@@ -457,10 +479,18 @@ static int activate_install(const m29_request_t*r,uint8_t*reserved,uint16_t*rese
                                     capability_binding)
        ||!equal_bytes(capability_binding,policy.successor_binding,32))goto reject;
     if(!validate_program_projection(candidate,&identity,&policy))goto reject;
+ #ifdef M36_TYPED
+    if(m36_target_prepare_gate(candidate,&identity,capability,&prepared)!=0)goto reject;
+ #else
     if(m26_target_prepare_gate(candidate,&identity,capability,&prepared)!=0)goto reject;
+ #endif
     /* No fallible operation follows this local publication boundary. */
     noun_tx_commit();heap_persist_commit_tx();
+ #ifdef M36_TYPED
+    m36_target_publish_gate(prepared,&identity,capability);
+ #else
     m26_target_publish_gate(prepared,&identity,capability);
+ #endif
     g_selected=1;g_generation=2;g_lifecycle=M29_IDLE;g_terminal=1;
     g_terminal_installation=r->installation;
     for(unsigned i=0;i<32;i++){
@@ -479,7 +509,16 @@ static int execute(const m29_request_t*r,uint8_t*out,uint16_t*length)
 {
     m29_result_t result=M29_REJECTED;noun body=NOUN_ZERO;
     if(r->op==M29_STATUS){if(!status_body(&body))return 0;result=M29_DONE;}
-    else if(r->op==M29_STOP){if(g_lifecycle==M29_RUNNING&&!g_stage_open&&m26_target_set_running(0)==0){g_lifecycle=M29_STOPPED;result=M29_DONE;}if(result==M29_DONE&&!status_body(&body))return 0;}
+    else if(r->op==M29_STOP){
+        int stopped = 0;
+ #ifdef M36_TYPED
+        stopped = (g_selected ? m36_target_set_running(0) : m26_target_set_running(0)) == 0;
+ #else
+        stopped = m26_target_set_running(0) == 0;
+ #endif
+        if(g_lifecycle==M29_RUNNING&&!g_stage_open&&stopped){g_lifecycle=M29_STOPPED;result=M29_DONE;}
+        if(result==M29_DONE&&!status_body(&body))return 0;
+    }
     else if(r->op==M29_BEGIN){
         if(g_lifecycle==M29_STOPPED&&!g_stage_open&&!g_terminal
            &&r->installation>0&&r->total>0&&r->total<=M29_STAGE_BYTES
@@ -539,7 +578,17 @@ static int execute(const m29_request_t*r,uint8_t*out,uint16_t*length)
     }
     else if(r->op==M29_ACTIVATE){if(activate_install(r,out,length))return 1;}
     else if(r->op==M29_CANCEL){if(g_lifecycle==M29_STOPPED&&g_stage_open&&r->installation==g_installation){g_stage_open=g_stage_sealed=0;g_received=g_chunks=g_total=g_policy_bytes=g_pill_bytes=0;result=M29_DONE;}}
-    else if(r->op==M29_START){if(g_selected&&(g_lifecycle==M29_IDLE||g_lifecycle==M29_STOPPED)&&!g_stage_open&&m26_target_init()==0&&m29_native_init()==0&&m26_target_set_running(1)==0){g_lifecycle=M29_RUNNING;result=M29_DONE;if(!status_body(&body))return 0;}}
+    else if(r->op==M29_START){
+        int initialized = 0, running = 0;
+ #ifdef M36_TYPED
+        initialized = g_selected && m36_target_init() == 0;
+        running = initialized && m29_native_init() == 0 && m36_target_set_running(1) == 0;
+ #else
+        initialized = m26_target_init() == 0;
+        running = initialized && m29_native_init() == 0 && m26_target_set_running(1) == 0;
+ #endif
+        if(g_selected&&(g_lifecycle==M29_IDLE||g_lifecycle==M29_STOPPED)&&!g_stage_open&&running){g_lifecycle=M29_RUNNING;result=M29_DONE;if(!status_body(&body))return 0;}
+    }
     if(!response_payload(r->operation,result,body,out,length))return 0;
     return 1;
 }

@@ -35,6 +35,9 @@
 #ifdef M29_COMMISSION
 #include "m29_target_core.h"
 #endif
+#ifdef M36_TYPED
+#include "m36_target_core.h"
+#endif
 #include "m22_provider_core.h"
 
 /* Effect tag cords (Urbit cord encoding: LSB = first char of name) */
@@ -2420,7 +2423,11 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
  #elif defined(M27_COMMISSION)
         (void)m27_target_service_tick();
  #endif
+ #ifdef M36_TYPED
+        (void)m36_target_service_tick();
+ #else
         (void)m26_target_service_tick();
+ #endif
 #endif
         if (jr == NOCK_ABORT_CRASH) {
             if (nock_budget_get() != 0) {
@@ -2545,7 +2552,11 @@ static int kernel_loop(noun kernel_init, int shrine, uint64_t max_commits)
                 #elif defined(M27_COMMISSION)
                 (void)m27_target_service_tick();
                 #endif
+ #ifdef M36_TYPED
+                (void)m36_target_service_tick();
+ #else
                 (void)m26_target_service_tick();
+ #endif
 #endif
                 i2_operator_poll();
 #ifdef I2_OPERATOR

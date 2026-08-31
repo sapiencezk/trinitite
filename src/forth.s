@@ -2045,7 +2045,11 @@ defcode "QUIT", 4, quit, 0
     ldr     x0, =UART_FR
     #endif
     stp     x5, x6, [sp, #-16]!
+ #ifdef M36_TYPED
+    bl      m36_target_service_tick
+ #else
     bl      m26_target_service_tick
+ #endif
     ldp     x5, x6, [sp], #16
     ldr     x0, =UART_FR
 #endif
@@ -3059,6 +3063,57 @@ defcode "M26CKS?", 7, m26_checkpoint_save_word, 0
 defcode "M26CKR?", 7, m26_checkpoint_restore_word, 0
     bl      m26_target_checkpoint_restore
     sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
+#ifdef M36_TYPED
+// M36-T post-commissioning controls.  M36 execution is autonomous; M36IN
+// only admits a bounded external BOOL trigger and the remaining words expose
+// observations for the host witness.
+defcode "M36INIT", 7, m36_init_word, 0
+    bl      m36_target_init
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36RST", 6, m36_restart_word, 0
+    bl      m36_target_restart_source
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36IN", 5, m36_input_word, 0
+    ldr     x1, [DSP]
+    ldr     x0, [DSP, #8]
+    add     DSP, DSP, #16
+    bl      m36_target_input
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36Q", 4, m36_queue_word, 0
+    bl      m36_target_queue_len
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36IND@", 7, m36_indication_word, 0
+    bl      m36_target_sink_value
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36SEQ@", 7, m36_sequence_word, 0
+    bl      m36_target_next_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36HWM@", 7, m36_high_water_word, 0
+    bl      m36_target_high_water
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36ERR@", 7, m36_error_word, 0
+    bl      m36_target_last_error
     str     x0, [DSP, #-8]!
     NEXT
 #endif
