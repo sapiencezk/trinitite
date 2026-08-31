@@ -469,7 +469,16 @@ static int m36_step(void)
         }
         m36_native_status_t sent = m36_native_send(frame, frame_len);
         if (sent != M36_NATIVE_OK) {
-            heap_persist_abort_tx(); g_last_error = 5; return -1;
+            heap_persist_abort_tx(); g_last_error = 5;
+#ifdef M36_TEST_CONTROLS
+            /* A held qualification failure must not rebuild the same Nock
+             * candidate on every idle-loop tick.  Stop the service retry
+             * until M36TXR releases the injected status; this keeps UART
+             * observation responsive while the pending event remains
+             * unchanged for the retry witness. */
+            g_test_hold_step = 1;
+#endif
+            return -1;
         }
         g_gate = staged; g_root_commits++; g_pending_event = NOUN_ZERO;
         g_next_sequence++; g_publication_count++;

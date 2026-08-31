@@ -3185,6 +3185,8 @@ defcode "M36TXF", 6, m36_tx_failure_word, 0
 
 defcode "M36TXR", 6, m36_tx_release_word, 0
     bl      m36_native_test_release
+    mov     x0, #0
+    bl      m36_target_test_hold_step
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
