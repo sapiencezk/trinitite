@@ -2045,7 +2045,9 @@ defcode "QUIT", 4, quit, 0
     ldr     x0, =UART_FR
     #endif
     stp     x5, x6, [sp, #-16]!
- #ifdef M36_TYPED
+ #ifdef M37_A
+    bl      m37_target_service_tick
+ #elif defined(M36_TYPED)
     bl      m36_target_service_tick
  #else
     bl      m26_target_service_tick
@@ -3064,6 +3066,112 @@ defcode "M26CKR?", 7, m26_checkpoint_restore_word, 0
     bl      m26_target_checkpoint_restore
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
+#ifdef M37_A
+// M37-A exposes only the bounded candidate input and observations.  The
+// transport adapter and Nock candidate step remain inside the native service
+// loop; no provider or application selector is exposed here.
+defcode "M37INIT", 7, m37_init_word, 0
+    bl      m37_target_init
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37IN", 5, m37_input_word, 0
+    ldr     x0, [DSP]
+    add     DSP, DSP, #8
+    bl      m37_target_input
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37Q", 4, m37_queue_word, 0
+    bl      m37_target_queue_len
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37OUT@", 7, m37_output_word, 0
+    bl      m37_target_output
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SEQ@", 7, m37_sequence_word, 0
+    bl      m37_target_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37HWM@", 7, m37_high_water_word, 0
+    bl      m37_target_high_water
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ERR@", 7, m37_error_word, 0
+    bl      m37_target_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ROOT@", 8, m37_root_word, 0
+    bl      m37_target_root_commits
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37PUB@", 7, m37_publications_word, 0
+    bl      m37_target_publications
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37PAUSE", 8, m37_pause_word, 0
+    mov     x0, #1
+    bl      m37_target_test_hold_processing
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37RESUME", 9, m37_resume_word, 0
+    mov     x0, #0
+    bl      m37_target_test_hold_processing
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37CLR", 6, m37_clear_error_word, 0
+    bl      m37_target_test_clear_error
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37RATE", 7, m37_rate_word, 0
+    bl      m37_target_test_rate_exhaust
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37RATER", 8, m37_rate_reset_word, 0
+    bl      m37_target_test_rate_reset
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ALLOC", 8, m37_alloc_word, 0
+    bl      m37_target_test_allocation_pressure
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37ALLOCF", 9, m37_alloc_release_word, 0
+    bl      m37_target_test_allocation_release
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37TXP", 6, m37_tx_pending_word, 0
+    bl      m25_native_test_hold_tx
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37TXR", 6, m37_tx_release_word, 0
+    bl      m25_native_test_release_tx
+    str     xzr, [DSP, #-8]!
     NEXT
 #endif
 
