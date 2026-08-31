@@ -24,3 +24,16 @@ void m36_target_publish_gate(noun gate, const runtime_identity_t *identity,
                             uint8_t capability_profile);
 int m36_target_identity_matches(const runtime_identity_t *identity);
 int m36_target_native_ready(void);
+#ifdef M36_TEST_CONTROLS
+int m36_target_test_hold_step(int enabled);
+int m36_target_test_rate_exhaust(void);
+int m36_target_test_rate_reset(void);
+uint64_t m36_target_test_rate_state(void);
+int m36_target_test_clear_error(void);
+int m36_target_test_allocation_pressure(void);
+int m36_target_test_allocation_release(void);
+uint64_t m36_target_test_root_commits(void);
+uint64_t m36_target_test_pending(void);
+uint64_t m36_target_test_publications(void);
+uint64_t m36_target_test_persist_cells(void);
+#endif

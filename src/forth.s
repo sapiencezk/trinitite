@@ -3116,6 +3116,99 @@ defcode "M36ERR@", 7, m36_error_word, 0
     bl      m36_target_last_error
     str     x0, [DSP, #-8]!
     NEXT
+
+#ifdef M36_TEST_CONTROLS
+// Qualification-only native M36 controls.  These inject one bounded refusal
+// or pause one fixed target seam; they never select a profile or application.
+defcode "M36PAUSE", 8, m36_pause_word, 0
+    mov     x0, #1
+    bl      m36_target_test_hold_step
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M36RESUME", 9, m36_resume_word, 0
+    mov     x0, #0
+    bl      m36_target_test_hold_step
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M36RATE", 7, m36_rate_word, 0
+    bl      m36_target_test_rate_exhaust
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36RATER", 8, m36_rate_reset_word, 0
+    bl      m36_target_test_rate_reset
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36RATE@", 8, m36_rate_state_word, 0
+    bl      m36_target_test_rate_state
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36CLR", 6, m36_clear_error_word, 0
+    bl      m36_target_test_clear_error
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36ALLOC", 8, m36_alloc_word, 0
+    bl      m36_target_test_allocation_pressure
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36ALLOCF", 9, m36_alloc_release_word, 0
+    bl      m36_target_test_allocation_release
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36TXP", 6, m36_tx_pending_word, 0
+    bl      m36_native_test_pending
+    mov     x0, #0
+    bl      m36_target_test_hold_step
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36TXF", 6, m36_tx_failure_word, 0
+    bl      m36_native_test_failure
+    mov     x0, #0
+    bl      m36_target_test_hold_step
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36TXR", 6, m36_tx_release_word, 0
+    bl      m36_native_test_release
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36ROOT@", 8, m36_root_commits_word, 0
+    bl      m36_target_test_root_commits
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36PEND@", 8, m36_pending_word, 0
+    bl      m36_target_test_pending
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36PUB@", 7, m36_publications_word, 0
+    bl      m36_target_test_publications
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M36PC@", 6, m36_persist_cells_word, 0
+    bl      m36_target_test_persist_cells
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
 #endif
 
 #ifdef M27_COMMISSION

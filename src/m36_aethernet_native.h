@@ -24,3 +24,8 @@ int m36_native_init(void);
 m36_native_status_t m36_native_receive(m36_native_datagram_t *out);
 m36_native_status_t m36_native_send(const uint8_t *payload, uint32_t payload_len);
 int m36_native_tx_pending(void);
+#ifdef M36_TEST_CONTROLS
+int m36_native_test_pending(void);
+int m36_native_test_failure(void);
+int m36_native_test_release(void);
+#endif

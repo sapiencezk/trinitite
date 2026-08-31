@@ -74,8 +74,14 @@ static uint64_t g_fifo_sequence[M36_FIFO_CAPACITY];
 static uint32_t g_fifo_head, g_fifo_count;
 static uint64_t g_next_sequence, g_high_water, g_last_indication, g_last_error;
 static uint64_t g_rate_window_start, g_rate_successes;
+static uint64_t g_root_commits, g_publication_count;
 static int g_indication_valid, g_active, g_is_source, g_native_initialized;
 static int g_lifecycle_running;
+#ifdef M36_TEST_CONTROLS
+static int g_test_hold_step;
+static int g_test_input_alloc_failure;
+static int g_test_rate_exhausted;
+#endif
 static uint8_t g_initial_jam[JAM_MAX_BYTES];
 static uint64_t g_initial_jam_len;
 
@@ -205,6 +211,12 @@ static int exact_route(noun cause, uint64_t source_instance,
 static int build_external(uint64_t value, noun *out)
 {
     noun typed, variable, sample_list, body, target;
+#ifdef M36_TEST_CONTROLS
+    if (g_test_input_alloc_failure) {
+        g_test_input_alloc_failure = 0;
+        return 0;
+    }
+#endif
     if (!out || value > 1
         || !cons(direct(1), direct(value), &typed)
         || !cons(direct(1), typed, &variable)
@@ -424,6 +436,13 @@ static void init_tags(void)
 static int m36_step(void)
 {
     if (!g_active || !g_lifecycle_running) return 0;
+#ifdef M36_TEST_CONTROLS
+    if (g_is_source && g_pending_event != NOUN_ZERO && g_test_rate_exhausted) {
+        g_last_error = 10;
+        return -1;
+    }
+    if (g_test_hold_step) return 0;
+#endif
     if (g_is_source && g_pending_event != NOUN_ZERO) {
         noun candidate, confirmed, staged;
         uint64_t value;
@@ -452,7 +471,8 @@ static int m36_step(void)
         if (sent != M36_NATIVE_OK) {
             heap_persist_abort_tx(); g_last_error = 5; return -1;
         }
-        g_gate = staged; g_pending_event = NOUN_ZERO; g_next_sequence++;
+        g_gate = staged; g_root_commits++; g_pending_event = NOUN_ZERO;
+        g_next_sequence++; g_publication_count++;
         g_rate_window_start = start; g_rate_successes = count + 1;
         heap_persist_commit_tx(); g_last_error = 0; return 1;
     }
@@ -470,7 +490,7 @@ static int m36_step(void)
     if (!noun_copy_checked(next_gate, &staged)) {
         heap_persist_abort_tx(); g_last_error = 7; return -1;
     }
-    g_gate = staged;
+    g_gate = staged; g_root_commits++;
     g_fifo_head = (g_fifo_head + 1u) % M36_FIFO_CAPACITY;
     g_fifo_count--; g_high_water = sequence;
     g_last_indication = output; g_indication_valid = 1;
@@ -488,7 +508,7 @@ int m36_target_init(void)
     if (!noun_copy_checked(service_state, &staged)) {
         heap_persist_abort_tx(); return -1;
     }
-    g_gate = staged; heap_persist_commit_tx();
+    g_gate = staged; g_root_commits++; heap_persist_commit_tx();
     g_native_initialized = 1; return 0;
 }
 
@@ -502,7 +522,7 @@ int m36_target_restart_source(void)
                           HEAP_MODE_PERSIST, &staged) != CUE_BOUNDED_OK) {
         heap_persist_abort_tx(); return -1;
     }
-    g_gate = staged; noun_tx_commit(); heap_persist_commit_tx();
+    g_gate = staged; g_root_commits++; noun_tx_commit(); heap_persist_commit_tx();
     return 0;
 }
 
@@ -511,9 +531,25 @@ int m36_target_input(uint64_t a, uint64_t b)
     noun event;
     if (!g_active || !g_is_source || !g_lifecycle_running
         || g_pending_event != NOUN_ZERO || b != 0 || a > 1) return -1;
+#ifdef M36_TEST_CONTROLS
+    if (g_test_rate_exhausted) {
+        g_last_error = 10;
+        return -1;
+    }
+#endif
+    /* Keep this admission in the current persistent semispace.  The noun
+     * transaction records the bump and atom marks; unlike a root transition,
+     * input admission must not flip the semispace before it knows the whole
+     * pending event was constructed. */
+    if (!noun_tx_begin(HEAP_MODE_PERSIST)) return -1;
     heap_set_mode(HEAP_MODE_PERSIST);
-    if (!build_external(a, &event)) return -1;
-    g_pending_event = event; return 0;
+    if (!build_external(a, &event)) {
+        noun_tx_abort();
+        return -1;
+    }
+    g_pending_event = event;
+    noun_tx_commit();
+    return 0;
 }
 
 static int m36_poll(void)
@@ -578,7 +614,8 @@ void m36_target_publish_gate(noun gate, const runtime_identity_t *identity,
     const uint8_t *encoded;
     uint64_t encoded_len;
     init_tags();
-    g_gate = gate; g_identity = *identity;
+    g_gate = gate; g_identity = *identity; g_root_commits = 1;
+    g_publication_count = 0;
     runtime_identity_set(identity);
     runtime_identity_set_capability_profile(capability_profile);
     g_is_source = M24_NODE_ID == M36_SOURCE_NODE;
@@ -587,6 +624,10 @@ void m36_target_publish_gate(noun gate, const runtime_identity_t *identity,
     g_next_sequence = 1; g_high_water = 0; g_last_indication = 0;
     g_last_error = 0; g_indication_valid = 0;
     g_rate_window_start = g_rate_successes = 0;
+#ifdef M36_TEST_CONTROLS
+    g_test_hold_step = 0;
+    g_test_rate_exhausted = 0;
+#endif
     g_initial_jam_len = 0;
     if (jam_encode_bytes_checked(gate, &encoded, &encoded_len) == 0
         && encoded_len > 0 && encoded_len <= sizeof g_initial_jam) {
@@ -604,6 +645,68 @@ int m36_target_native_ready(void)
 {
     return g_active && g_native_initialized;
 }
+
+#ifdef M36_TEST_CONTROLS
+int m36_target_test_hold_step(int enabled)
+{
+    g_test_hold_step = enabled != 0;
+    return 0;
+}
+
+int m36_target_test_rate_exhaust(void)
+{
+    if (!g_active || !g_is_source) return -1;
+    g_rate_window_start = runtime_counter_now();
+    g_rate_successes = M36_RATE_LIMIT;
+    g_test_rate_exhausted = 1;
+    g_test_hold_step = 0;
+    /* Make the injected refusal observable even if the next service tick is
+     * delayed by a UART observer command.  The target root and event remain
+     * untouched until the subsequent reset/retry. */
+    g_last_error = 10;
+    return 0;
+}
+
+int m36_target_test_rate_reset(void)
+{
+    if (!g_active || !g_is_source) return -1;
+    g_rate_window_start = g_rate_successes = 0;
+    g_test_rate_exhausted = 0;
+    return 0;
+}
+
+uint64_t m36_target_test_rate_state(void)
+{
+    return g_test_rate_exhausted != 0;
+}
+
+int m36_target_test_clear_error(void)
+{
+    if (!g_active) return -1;
+    g_last_error = 0;
+    return 0;
+}
+
+int m36_target_test_allocation_pressure(void)
+{
+    if (!g_active || !g_is_source) return -1;
+    g_test_input_alloc_failure = 1;
+    g_test_hold_step = 0;
+    return 0;
+}
+
+int m36_target_test_allocation_release(void)
+{
+    g_test_input_alloc_failure = 0;
+    return 0;
+}
+
+uint64_t m36_target_test_root_commits(void) { return g_root_commits; }
+uint64_t m36_target_test_pending(void) { return g_pending_event != NOUN_ZERO; }
+uint64_t m36_target_test_publications(void) { return g_publication_count; }
+uint64_t m36_target_test_persist_cells(void)
+{ return heap_cells_used(HEAP_MODE_PERSIST); }
+#endif
 
 #else
 
