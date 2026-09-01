@@ -245,23 +245,23 @@ else
 $(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake))
 endif
 
-NATIVE_OBJS =
+NATIVE_OBJS = sha256.o
 ifeq ($(M24_NATIVE),1)
-NATIVE_OBJS = sha256.o virtio_net.o aethernet_native.o
+NATIVE_OBJS += virtio_net.o aethernet_native.o
 endif
 ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)
-NATIVE_OBJS += sha256.o virtio_net.o m25_aethernet_native.o
+NATIVE_OBJS += virtio_net.o m25_aethernet_native.o
 else ifeq ($(M25_TARGET),1)
-NATIVE_OBJS += sha256.o virtio_net.o m25_aethernet_native.o
+NATIVE_OBJS += virtio_net.o m25_aethernet_native.o
 endif
 ifeq ($(M27_COMMISSION),1)
-NATIVE_OBJS += sha256.o virtio_net.o m27_aethernet_native.o
+NATIVE_OBJS += virtio_net.o m27_aethernet_native.o
 endif
 ifeq ($(M28_COMMISSION),1)
-NATIVE_OBJS += sha256.o virtio_net.o m28_aethernet_native.o
+NATIVE_OBJS += virtio_net.o m28_aethernet_native.o
 endif
 ifeq ($(M29_COMMISSION),1)
-NATIVE_OBJS += sha256.o virtio_net.o m29_aethernet_native.o
+NATIVE_OBJS += virtio_net.o m29_aethernet_native.o
 endif
 ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)
 M26_OBJS = m26_admission.o m26_plan_record.o m26_target_core.o
