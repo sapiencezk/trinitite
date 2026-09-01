@@ -9,10 +9,13 @@ int m37_a_r_target_boot(noun, const runtime_identity_t *, uint8_t);
 int m37_a_r_target_init(void);
 int m37_a_r_target_set_running(int);
 int m37_a_r_target_input(uint64_t type, uint64_t value);
+int m37_a_r_target_forward_provider(uint64_t type, uint64_t value,
+                                     uint64_t sequence);
 int m37_a_r_target_service_tick(void);
 int m37_a_r_target_recover_tx(void);
 uint64_t m37_a_r_target_queue_len(void);
 uint64_t m37_a_r_target_output(void);
+uint64_t m37_a_r_target_transport_value(void);
 uint64_t m37_a_r_target_sequence(void);
 uint64_t m37_a_r_target_high_water(void);
 uint64_t m37_a_r_target_error(void);

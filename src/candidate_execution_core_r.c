@@ -53,6 +53,8 @@ static uint32_t g_fifo_length[M37_A_R_FIFO_CAPACITY];
 static uint64_t g_fifo_sequence[M37_A_R_FIFO_CAPACITY];
 static uint32_t g_fifo_head, g_fifo_count;
 static uint64_t g_next_sequence, g_high_water, g_admitted_high_water, g_last_error;
+static uint64_t g_transport_value;
+static uint8_t g_transport_valid;
 static uint64_t g_rate_start, g_rate_count, g_last_output;
 static uint64_t g_root_commits, g_publications;
 static uint8_t g_output_valid, g_hold_processing, g_allocation_pressure;
@@ -276,7 +278,7 @@ int candidate_execution_core_r_activate(const m37_a_r_prepared_t*p)
     g_graph_intent_tag=cord_from_bytes("i2-m25-intent-v1",16);
     if(!noun_is_atom(g_graph_intent_tag))return -1;
     runtime_identity_set(&g_identity);runtime_identity_set_capability_profile(RUNTIME_CAPABILITY_PROFILE_M25);
-    g_pending_event=NOUN_ZERO;g_pending_valid=0;g_fifo_head=g_fifo_count=0;g_next_sequence=1;g_high_water=g_admitted_high_water=0;g_last_error=0;g_last_output=0;g_output_valid=0;g_rate_start=g_rate_count=0;g_root_commits=1;g_publications=0;g_active=1;g_running=0;g_source=g_surface.binding.role==1;g_native_initialized=0;g_hold_processing=0;g_allocation_pressure=0;g_tx_recovery_pending=0;g_tx_recovery_attempts=0;return 0;
+    g_pending_event=NOUN_ZERO;g_pending_valid=0;g_fifo_head=g_fifo_count=0;g_next_sequence=1;g_high_water=g_admitted_high_water=0;g_last_error=0;g_last_output=0;g_output_valid=0;g_transport_value=0;g_transport_valid=0;g_rate_start=g_rate_count=0;g_root_commits=1;g_publications=0;g_active=1;g_running=0;g_source=g_surface.binding.role==1;g_native_initialized=0;g_hold_processing=0;g_allocation_pressure=0;g_tx_recovery_pending=0;g_tx_recovery_attempts=0;return 0;
 }
 int candidate_execution_core_r_init(void){if(!g_active||g_terminal_fence){if(g_active)g_last_error=M37_A_R_ERROR_TERMINAL_FENCE;return -1;}if(g_pending_valid||g_fifo_count||m37_a_r_adapter_tx_pending()||m37_a_r_adapter_init(&g_surface.binding)!=0)return -1;g_native_initialized=1;return 0;}
 int candidate_execution_core_r_set_running(int running){if(!g_active||g_pending_valid||g_fifo_count||m37_a_r_adapter_tx_pending()||(running&&(!g_native_initialized||g_terminal_fence))){if(g_active&&running&&g_terminal_fence)g_last_error=M37_A_R_ERROR_TERMINAL_FENCE;return -1;}g_running=running!=0;return 0;}
@@ -287,11 +289,29 @@ int candidate_execution_core_r_submit(const m37_a_r_ingress_t*i){
     if(g_terminal_fence){g_last_error=M37_A_R_ERROR_TERMINAL_FENCE;return -1;}
     g_pending_value=i->value;g_pending_valid=1;g_last_error=0;return 0;
 }
+int candidate_execution_core_r_forward_provider(uint64_t type,uint64_t value,uint64_t sequence)
+{
+    m37_a_r_intent_t intent;
+    m37_a_r_native_status_t status;
+    if(!g_active||!g_running||!g_source||g_terminal_fence||g_pending_valid
+       ||type!=UINT_TYPE||value>UINT_MAX||sequence==UINT64_MAX
+       ||sequence!=g_next_sequence
+       ||m37_a_r_adapter_tx_pending()){g_last_error=4;return -1;}
+    heap_scratch_reset();heap_set_mode(HEAP_MODE_SCRATCH);
+    /* This is the retained M36 typed-scalar serializer.  The facade supplies
+       only the candidate-selected descriptor and typed value; it does not
+       decode an IEC declaration or lifecycle event. */
+    if(!build_wire(g_surface.publication,value,&intent)){g_last_error=4;return -1;}
+    status=m37_a_r_adapter_send(&g_surface.binding,intent.payload,intent.payload_len,sequence);
+    if(status!=M37_A_R_NATIVE_OK){g_last_error=status==M37_A_R_NATIVE_RING_FULL?6:5;return -1;}
+    g_next_sequence++;g_last_error=0;return 0;
+}
 int candidate_execution_core_r_pump(void){if(!g_active||!g_running||!g_native_initialized)return 0;if(g_terminal_fence){g_last_error=M37_A_R_ERROR_TERMINAL_FENCE;return -1;}if(g_source)return source_pump();if(g_fifo_count&&!g_hold_processing)return process_head();m37_a_r_datagram_t d;m37_a_r_native_status_t s=m37_a_r_adapter_receive(&g_surface.binding,&d);if(s==M37_A_R_NATIVE_NO_PACKET)return 0;if(s!=M37_A_R_NATIVE_OK){g_last_error=1;return -1;}return candidate_execution_core_r_deliver(&(candidate_execution_delivery_r_t){d.payload,d.payload_len,d.sequence});}
 int candidate_execution_core_r_deliver(const candidate_execution_delivery_r_t*d)
 {
     if(!d||!g_active||!g_running||g_source||!d->payload||!d->payload_len||d->payload_len>M37_A_R_MAX_PAYLOAD||!d->sequence||d->sequence==UINT64_MAX||d->sequence<=g_admitted_high_water||g_fifo_count>=M37_A_R_FIFO_CAPACITY){g_last_error=2;return -1;}
     uint64_t value;if(!parse_wire(d->payload,d->payload_len,&value)){g_last_error=3;return -1;}
+    g_transport_value=value;g_transport_valid=1;
     uint32_t at=(g_fifo_head+g_fifo_count)%M37_A_R_FIFO_CAPACITY;for(uint32_t i=0;i<d->payload_len;i++)g_fifo_payload[at][i]=d->payload[i];g_fifo_length[at]=d->payload_len;g_fifo_sequence[at]=d->sequence;g_fifo_count++;g_admitted_high_water=d->sequence;if(g_hold_processing)return 1;return process_head();
 }
 int candidate_execution_core_r_recover_tx(void)
@@ -303,6 +323,7 @@ int candidate_execution_core_r_recover_tx(void)
 }
 uint64_t candidate_execution_core_r_queue_len(void){return g_active?g_fifo_count:UINT64_MAX;}
 uint64_t candidate_execution_core_r_output(void){return g_output_valid?g_last_output:UINT64_MAX;}
+uint64_t candidate_execution_core_r_transport_value(void){return g_active&&g_transport_valid?g_transport_value:UINT64_MAX;}
 uint64_t candidate_execution_core_r_sequence(void){return g_next_sequence;}
 uint64_t candidate_execution_core_r_high_water(void){return g_high_water;}
 uint64_t candidate_execution_core_r_error(void){return g_last_error;}
@@ -320,7 +341,7 @@ int candidate_execution_core_r_test_allocation_release(void){if(!g_active||!g_so
 int candidate_execution_core_r_prepare(const M37ARNativeExecutionSurface*s,noun g,const runtime_identity_t*i,m37_a_r_prepared_t*o){(void)s;(void)g;(void)i;(void)o;return -1;}
 int candidate_execution_core_r_cold_boot(void){return -1;}
 int candidate_execution_core_r_activate(const m37_a_r_prepared_t*p){(void)p;return -1;}
-int candidate_execution_core_r_init(void){return -1;}int candidate_execution_core_r_set_running(int r){(void)r;return -1;}int candidate_execution_core_r_submit(const m37_a_r_ingress_t*i){(void)i;return -1;}int candidate_execution_core_r_pump(void){return 0;}int candidate_execution_core_r_recover_tx(void){return -1;}
-uint64_t candidate_execution_core_r_queue_len(void){return UINT64_MAX;}uint64_t candidate_execution_core_r_output(void){return UINT64_MAX;}uint64_t candidate_execution_core_r_sequence(void){return 0;}uint64_t candidate_execution_core_r_high_water(void){return 0;}uint64_t candidate_execution_core_r_error(void){return 0;}uint64_t candidate_execution_core_r_root_commits(void){return 0;}uint64_t candidate_execution_core_r_publications(void){return 0;}uint64_t candidate_execution_core_r_terminal_fence(void){return 0;}
+int candidate_execution_core_r_init(void){return -1;}int candidate_execution_core_r_set_running(int r){(void)r;return -1;}int candidate_execution_core_r_submit(const m37_a_r_ingress_t*i){(void)i;return -1;}int candidate_execution_core_r_forward_provider(uint64_t t,uint64_t v,uint64_t s){(void)t;(void)v;(void)s;return -1;}int candidate_execution_core_r_pump(void){return 0;}int candidate_execution_core_r_recover_tx(void){return -1;}
+uint64_t candidate_execution_core_r_queue_len(void){return UINT64_MAX;}uint64_t candidate_execution_core_r_output(void){return UINT64_MAX;}uint64_t candidate_execution_core_r_transport_value(void){return UINT64_MAX;}uint64_t candidate_execution_core_r_sequence(void){return 0;}uint64_t candidate_execution_core_r_high_water(void){return 0;}uint64_t candidate_execution_core_r_error(void){return 0;}uint64_t candidate_execution_core_r_root_commits(void){return 0;}uint64_t candidate_execution_core_r_publications(void){return 0;}uint64_t candidate_execution_core_r_terminal_fence(void){return 0;}
 int candidate_execution_core_r_test_hold_processing(int e){(void)e;return -1;}int candidate_execution_core_r_test_clear_error(void){return -1;}int candidate_execution_core_r_test_rate_exhaust(void){return -1;}int candidate_execution_core_r_test_rate_reset(void){return -1;}int candidate_execution_core_r_test_allocation_pressure(void){return -1;}int candidate_execution_core_r_test_allocation_release(void){return -1;}
 #endif

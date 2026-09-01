@@ -47,11 +47,14 @@ int candidate_execution_core_r_activate(const m37_a_r_prepared_t *);
 int candidate_execution_core_r_init(void);
 int candidate_execution_core_r_set_running(int);
 int candidate_execution_core_r_submit(const m37_a_r_ingress_t *);
+int candidate_execution_core_r_forward_provider(uint64_t type, uint64_t value,
+                                                uint64_t sequence);
 int candidate_execution_core_r_pump(void);
 int candidate_execution_core_r_deliver(const candidate_execution_delivery_r_t *);
 int candidate_execution_core_r_recover_tx(void);
 uint64_t candidate_execution_core_r_queue_len(void);
 uint64_t candidate_execution_core_r_output(void);
+uint64_t candidate_execution_core_r_transport_value(void);
 uint64_t candidate_execution_core_r_sequence(void);
 uint64_t candidate_execution_core_r_high_water(void);
 uint64_t candidate_execution_core_r_error(void);

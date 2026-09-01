@@ -3188,6 +3188,26 @@ defcode "M37ARREC", 8, m37_ar_recover_word, 0
 
 #endif
 
+#ifdef M37_IEC_SERVICE
+// The Service candidate supplies an already-typed opaque provider fact.  The
+// native facade forwards only its UINT16 pair into the frozen M37-A-R seam;
+// it does not inspect FB declarations, IEC event names, or lifecycle state.
+defcode "M37SVIN", 7, m37_service_input_word, 0
+    ldr     x2, [DSP]
+    ldr     x1, [DSP, #8]
+    ldr     x0, [DSP, #16]
+    add     DSP, DSP, #24
+    bl      m37_service_facade_forward
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SVRD", 7, m37_service_read_word, 0
+    bl      m37_a_r_target_transport_value
+    str     x0, [DSP, #-8]!
+    NEXT
+#endif
+
 #ifdef M37_A
 // M37-A exposes only the bounded candidate input and observations.  The
 // transport adapter and Nock candidate step remain inside the native service
