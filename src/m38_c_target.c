@@ -96,6 +96,28 @@ static noun head(noun value, int *ok)
     return ((cell_t *)(uintptr_t)cell_ptr(value))->head;
 }
 
+static int stimuli_shape_valid(noun stimuli, noun expected_identity)
+{
+    static const uint8_t stimulus_tag[] = "38-stimul";
+    uint64_t count = 0;
+
+    while (stimuli != NOUN_ZERO) {
+        int ok = 1;
+        noun stimulus, body;
+        if (++count > QUEUE_LIMIT || !noun_is_cell(stimuli)) return 0;
+        stimulus = head(stimuli, &ok);
+        stimuli = tail(stimuli, &ok);
+        if (!ok || !noun_is_cell(stimulus)
+            || !atom_tag(head(stimulus, &ok), stimulus_tag,
+                         sizeof stimulus_tag - 1)) return 0;
+        body = tail(stimulus, &ok);
+        if (!ok || !noun_is_cell(body) || field(body, 0, &ok) != expected_identity
+            || !noun_is_direct(field(body, 1, &ok))
+            || !noun_is_direct(field(body, 2, &ok)) || !ok) return 0;
+    }
+    return 1;
+}
+
 static noun digest_atom(noun value)
 {
     const uint8_t *jammed;
@@ -176,7 +198,8 @@ static int image_validate(noun image, noun *runtime_plan, noun *base_plan, noun 
     if (expected_formula != expected_formula_digest(*mode)) return 0;
     *stimuli = field(body, 7, &ok);
     *state = field(body, 8, &ok);
-    return ok && noun_is_cell(*state) && noun_is_atom(expected_formula);
+    return ok && noun_is_cell(*state) && noun_is_atom(expected_formula)
+        && stimuli_shape_valid(*stimuli, expected_runtime);
 }
 
 static void reject(const char *reason)
