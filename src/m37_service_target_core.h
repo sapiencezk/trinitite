@@ -30,6 +30,7 @@ uint64_t m37_service_target_root_commits(void);
 uint64_t m37_service_target_publications(void);
 uint64_t m37_service_target_terminal_fence(void);
 uint64_t m37_service_target_tx_state(void);
+uint64_t m37_service_target_recovery_attempts(void);
 
 void m37_service_target_test_pre_submit_failure(void);
 void m37_service_target_test_release_pre_submit(void);

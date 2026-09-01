@@ -107,6 +107,7 @@ static noun g_state, g_formula, g_plan;
 static uint8_t g_active, g_running, g_source, g_initialized, g_plan_bound;
 static uint8_t g_provider_pending, g_pending_valid;
 static uint8_t g_retry_attempts, g_terminal_fence, g_recovery_paused;
+static uint8_t g_recovery_attempts;
 static m37_service_tx_state_t g_tx_state;
 static uint8_t g_completion_uncertain, g_test_lost_mode;
 static m37_service_pending_t g_pending;
@@ -362,6 +363,7 @@ static int submit_pending_transaction(void)
      * exact AET0 frame's used-ring completion before running CAUSE_COMPLETE. */
     g_tx_state = TX_IN_FLIGHT;
     g_provider_pending = 1;
+    g_recovery_attempts = 0;
     g_last_error = 0;
     return 0;
 }
@@ -380,6 +382,7 @@ static int retain_provider_transaction(noun next_state,uint64_t token,uint64_t v
      * a failed submit therefore retains the exact retry bytes and state. */
     g_state=staged; g_provider_pending=0; g_pending_valid=1;
     g_tx_state=TX_UNSENT; g_completion_uncertain=0; g_retry_attempts=0;
+    g_recovery_attempts=0;
     g_root_commits++; g_last_error=0; heap_persist_commit_tx();
     return submit_pending_transaction() == 0;
 }
@@ -400,7 +403,8 @@ static int fence_provider_transaction(void)
     g_pending_valid=0; g_provider_pending=0; g_tx_state=TX_NONE;
     g_completion_uncertain=0; g_retry_attempts=0; g_terminal_fence=1;
     g_last_error=9;
-    return recovered == 0 ? -1 : -1;
+    (void)recovered;
+    return -1;
 }
 
 static int mark_uncertain_completion(void)
@@ -431,8 +435,8 @@ static int retry_provider_transaction(void)
 {
     if (!g_pending_valid) return 0;
     if (g_completion_uncertain) {
-        if (g_retry_attempts >= RECOVERY_ATTEMPTS) return fence_provider_transaction();
-        g_retry_attempts++; g_last_error=5; return -1;
+        /* Normal scheduler ticks never spend explicit recovery attempts. */
+        g_last_error=5; return -1;
     }
     if (g_tx_state == TX_UNSENT) {
         if (g_retry_attempts >= RECOVERY_ATTEMPTS)
@@ -444,6 +448,37 @@ static int retry_provider_transaction(void)
         if (completion <= 0) return completion;
         return m37_service_target_internal_input(
             CAUSE_COMPLETE, 1, g_pending.sequence, g_pending.value, STATUS_OK);
+    }
+    return -1;
+}
+
+static int recover_provider_transaction_once(void)
+{
+    if (!g_pending_valid) return 0;
+    if (g_recovery_attempts >= RECOVERY_ATTEMPTS)
+        return fence_provider_transaction();
+    g_recovery_attempts++;
+    if (g_completion_uncertain) {
+        if (g_recovery_attempts >= RECOVERY_ATTEMPTS)
+            return fence_provider_transaction();
+        g_last_error=5; return -1;
+    }
+    if (g_tx_state == TX_UNSENT) {
+        if (g_retry_attempts >= RECOVERY_ATTEMPTS)
+            return fence_provider_transaction();
+        int submitted=submit_pending_transaction();
+        if (submitted < 0 && g_retry_attempts >= RECOVERY_ATTEMPTS)
+            return fence_provider_transaction();
+        return submitted;
+    }
+    if (g_tx_state == TX_IN_FLIGHT) {
+        int completion=poll_provider_completion();
+        if (completion > 0)
+            return m37_service_target_internal_input(
+                CAUSE_COMPLETE, 1, g_pending.sequence, g_pending.value, STATUS_OK);
+        if (g_recovery_attempts >= RECOVERY_ATTEMPTS)
+            return fence_provider_transaction();
+        return completion;
     }
     return -1;
 }
@@ -479,6 +514,7 @@ void m37_service_target_publish_gate(noun gate,const runtime_identity_t *identit
     g_retry_attempts=0; g_output_valid=0; g_last_error=0; g_root_commits=1; g_publications=0;
     g_rx_high=0; g_terminal_fence=0; g_prepared_valid=0;
     g_tx_state=TX_NONE; g_completion_uncertain=0; g_test_lost_mode=0;
+    g_recovery_attempts=0;
     g_recovery_paused=0;
 }
 
@@ -522,7 +558,7 @@ static int m37_service_target_internal_input(uint64_t kind,uint64_t qi,uint64_t 
     }
     if (kind==CAUSE_COMPLETE) {
         g_provider_pending=0; g_pending_valid=0; g_tx_state=TX_NONE;
-        g_completion_uncertain=0; g_retry_attempts=0;
+        g_completion_uncertain=0; g_retry_attempts=0; g_recovery_attempts=0;
     }
     return has_output ? 1 : 0;
 }
@@ -560,10 +596,9 @@ int m37_service_target_tick(void)
 
 int m37_service_target_recover_tx(void)
 {
-    while (g_pending_valid && !g_terminal_fence) {
-        if (retry_provider_transaction()<0 && g_retry_attempts>=RECOVERY_ATTEMPTS) break;
-    }
-    return g_terminal_fence ? -1 : 0;
+    /* Management recovery is deliberately one bounded poll/submit per call.
+     * A permanently absent used-ring entry must not monopolize the guest. */
+    return g_terminal_fence ? -1 : recover_provider_transaction_once();
 }
 
 uint64_t m37_service_target_output_field(uint64_t field)
@@ -582,6 +617,7 @@ uint64_t m37_service_target_root_commits(void){return g_root_commits;}
 uint64_t m37_service_target_publications(void){return g_publications;}
 uint64_t m37_service_target_terminal_fence(void){return g_terminal_fence?1:0;}
 uint64_t m37_service_target_tx_state(void){return (uint64_t)g_tx_state;}
+uint64_t m37_service_target_recovery_attempts(void){return g_recovery_attempts;}
 
 void m37_service_target_test_pre_submit_failure(void)
 {m25_native_test_hold_tx();g_recovery_paused=1;}
@@ -606,6 +642,6 @@ int m37_service_target_init(void){return -1;} int m37_service_target_set_running
 int m37_service_target_application_input(uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e){(void)a;(void)b;(void)c;(void)d;(void)e;return -1;}
 int m37_service_target_tick(void){return 0;} int m37_service_target_recover_tx(void){return -1;}
 uint64_t m37_service_target_output_field(uint64_t f){(void)f;return UINT64_MAX;}uint64_t m37_service_target_output_valid(void){return 0;}void m37_service_target_output_pop(void){}
-uint64_t m37_service_target_phase(void){return UINT64_MAX;}uint64_t m37_service_target_sequence(void){return UINT64_MAX;}uint64_t m37_service_target_pending(void){return 0;}uint64_t m37_service_target_intent_valid(void){return 0;}uint64_t m37_service_target_intent_token(void){return UINT64_MAX;}uint64_t m37_service_target_intent_value(void){return UINT64_MAX;}uint64_t m37_service_target_plan_bound(void){return 0;}uint64_t m37_service_target_error(void){return 0;}uint64_t m37_service_target_root_commits(void){return 0;}uint64_t m37_service_target_publications(void){return 0;}uint64_t m37_service_target_terminal_fence(void){return 0;}uint64_t m37_service_target_tx_state(void){return 0;}
+uint64_t m37_service_target_phase(void){return UINT64_MAX;}uint64_t m37_service_target_sequence(void){return UINT64_MAX;}uint64_t m37_service_target_pending(void){return 0;}uint64_t m37_service_target_intent_valid(void){return 0;}uint64_t m37_service_target_intent_token(void){return UINT64_MAX;}uint64_t m37_service_target_intent_value(void){return UINT64_MAX;}uint64_t m37_service_target_plan_bound(void){return 0;}uint64_t m37_service_target_error(void){return 0;}uint64_t m37_service_target_root_commits(void){return 0;}uint64_t m37_service_target_publications(void){return 0;}uint64_t m37_service_target_terminal_fence(void){return 0;}uint64_t m37_service_target_tx_state(void){return 0;}uint64_t m37_service_target_recovery_attempts(void){return 0;}
 void m37_service_target_test_pre_submit_failure(void){}void m37_service_target_test_release_pre_submit(void){}void m37_service_target_test_lost_completion(void){}void m37_service_target_test_release_lost_completion(void){}void m37_service_target_test_delayed_completion(void){}void m37_service_target_test_release_delayed_completion(void){}int m37_service_target_test_exhaust_pending(void){return -1;}
 #endif

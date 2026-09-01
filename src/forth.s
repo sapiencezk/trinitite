@@ -3290,6 +3290,11 @@ defcode "M37STXS", 7, m37_service_tx_state_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "M37SATT", 7, m37_service_recovery_attempts_word, 0
+    bl      m37_service_target_recovery_attempts
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "M37STPF", 7, m37_service_test_pre_submit_word, 0
     bl      m37_service_target_test_pre_submit_failure
     str     xzr, [DSP, #-8]!
