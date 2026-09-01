@@ -19,6 +19,8 @@ uint64_t m37_a_r_target_transport_value(void);
 uint64_t m37_a_r_target_sequence(void);
 uint64_t m37_a_r_target_high_water(void);
 uint64_t m37_a_r_target_error(void);
+uint64_t m37_a_r_target_pending(void);
+uint64_t m37_a_r_target_tx_pending(void);
 uint64_t m37_a_r_target_root_commits(void);
 uint64_t m37_a_r_target_publications(void);
 uint64_t m37_a_r_target_terminal_fence(void);

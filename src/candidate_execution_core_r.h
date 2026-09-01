@@ -58,6 +58,8 @@ uint64_t candidate_execution_core_r_transport_value(void);
 uint64_t candidate_execution_core_r_sequence(void);
 uint64_t candidate_execution_core_r_high_water(void);
 uint64_t candidate_execution_core_r_error(void);
+uint64_t candidate_execution_core_r_pending(void);
+uint64_t candidate_execution_core_r_tx_pending(void);
 uint64_t candidate_execution_core_r_root_commits(void);
 uint64_t candidate_execution_core_r_publications(void);
 uint64_t candidate_execution_core_r_terminal_fence(void);

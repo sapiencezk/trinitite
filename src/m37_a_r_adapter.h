@@ -59,3 +59,5 @@ int m37_a_r_adapter_tx_pending(void);
 int m37_a_r_adapter_recover(void);
 void m37_a_r_adapter_test_lost_completion(void);
 void m37_a_r_adapter_test_release_lost_completion(void);
+void m37_a_r_adapter_test_delayed_completion(void);
+void m37_a_r_adapter_test_release_delayed_completion(void);

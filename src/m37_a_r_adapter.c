@@ -138,6 +138,8 @@ int m37_a_r_adapter_tx_pending(void){return m36_native_tx_pending();}
 int m37_a_r_adapter_recover(void){return m36_native_init();}
 void m37_a_r_adapter_test_lost_completion(void){m25_native_test_lost_completion();}
 void m37_a_r_adapter_test_release_lost_completion(void){m25_native_test_release_lost_completion();}
+void m37_a_r_adapter_test_delayed_completion(void){m25_native_test_delayed_completion();}
+void m37_a_r_adapter_test_release_delayed_completion(void){m25_native_test_release_delayed_completion();}
 
 #else
 int m37_a_r_adapter_init(const m37_a_r_transport_binding_t *b){(void)b;return -1;}
@@ -145,4 +147,5 @@ m37_a_r_native_status_t m37_a_r_adapter_send(const m37_a_r_transport_binding_t*b
 m37_a_r_native_status_t m37_a_r_adapter_receive(const m37_a_r_transport_binding_t*b,m37_a_r_datagram_t*o){(void)b;(void)o;return M37_A_R_NATIVE_DEVICE;}
 int m37_a_r_adapter_tx_pending(void){return 0;} int m37_a_r_adapter_recover(void){return -1;}
 void m37_a_r_adapter_test_lost_completion(void){} void m37_a_r_adapter_test_release_lost_completion(void){}
+void m37_a_r_adapter_test_delayed_completion(void){} void m37_a_r_adapter_test_release_delayed_completion(void){}
 #endif

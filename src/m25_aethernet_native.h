@@ -43,4 +43,6 @@ void m25_native_test_release_tx(void);
  * models the real lost-completion window rather than pre-submit ring-full. */
 void m25_native_test_lost_completion(void);
 void m25_native_test_release_lost_completion(void);
+void m25_native_test_delayed_completion(void);
+void m25_native_test_release_delayed_completion(void);
 #endif

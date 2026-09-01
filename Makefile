@@ -306,7 +306,7 @@ M37_R_NATIVE_OBJS = m37_a_r_adapter.o m36_aethernet_native.o
 endif
 M37_SERVICE_OBJS =
 ifeq ($(M37_IEC_SERVICE),1)
-M37_SERVICE_OBJS = m37_service_facade.o
+M37_SERVICE_OBJS = m37_service_facade.o m37_service_target_core.o
 endif
 OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
 ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)

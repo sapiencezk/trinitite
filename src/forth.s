@@ -2045,7 +2045,9 @@ defcode "QUIT", 4, quit, 0
     ldr     x0, =UART_FR
     #endif
     stp     x5, x6, [sp, #-16]!
- #ifdef M37_A_R
+ #ifdef M37_IEC_SERVICE
+    bl      m37_service_target_tick
+ #elif defined(M37_A_R)
     bl      m37_a_r_target_service_tick
  #elif defined(M37_A)
     bl      m37_target_service_tick
@@ -3192,20 +3194,139 @@ defcode "M37ARREC", 8, m37_ar_recover_word, 0
 // The Service candidate supplies an already-typed opaque provider fact.  The
 // native facade forwards only its UINT16 pair into the frozen M37-A-R seam;
 // it does not inspect FB declarations, IEC event names, or lifecycle state.
-defcode "M37SVIN", 7, m37_service_input_word, 0
-    ldr     x2, [DSP]
-    ldr     x1, [DSP, #8]
-    ldr     x0, [DSP, #16]
-    add     DSP, DSP, #24
-    bl      m37_service_facade_forward
+defcode "M37SEV", 6, m37_service_event_word, 0
+    ldr     x4, [DSP]
+    ldr     x3, [DSP, #8]
+    ldr     x2, [DSP, #16]
+    ldr     x1, [DSP, #24]
+    ldr     x0, [DSP, #32]
+    add     DSP, DSP, #40
+    bl      m37_service_target_input
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
 
-defcode "M37SVRD", 7, m37_service_read_word, 0
-    bl      m37_a_r_target_transport_value
+defcode "M37SOK", 6, m37_service_output_valid_word, 0
+    bl      m37_service_target_output_valid
     str     x0, [DSP, #-8]!
     NEXT
+
+.macro M37S_FIELD name, len, label, field
+defcode "\name", \len, \label, 0
+    mov     x0, #\field
+    bl      m37_service_target_output_field
+    str     x0, [DSP, #-8]!
+    NEXT
+.endm
+
+M37S_FIELD "M37SKND", 7, m37_service_output_kind_word, 0
+M37S_FIELD "M37SQO", 6, m37_service_output_qo_word, 1
+M37S_FIELD "M37STOK", 7, m37_service_output_token_word, 2
+M37S_FIELD "M37SVAL", 7, m37_service_output_value_word, 3
+M37S_FIELD "M37SSTA", 7, m37_service_output_status_word, 4
+
+defcode "M37SPOP", 7, m37_service_output_pop_word, 0
+    bl      m37_service_target_output_pop
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37SPHS", 7, m37_service_phase_word, 0
+    bl      m37_service_target_phase
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SSEQ", 7, m37_service_sequence_word, 0
+    bl      m37_service_target_sequence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SPND", 7, m37_service_pending_word, 0
+    bl      m37_service_target_pending
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SINT", 7, m37_service_intent_valid_word, 0
+    bl      m37_service_target_intent_valid
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SITK", 7, m37_service_intent_token_word, 0
+    bl      m37_service_target_intent_token
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SIV", 6, m37_service_intent_value_word, 0
+    bl      m37_service_target_intent_value
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SPLN", 7, m37_service_plan_word, 0
+    bl      m37_service_target_plan_bound
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SERR", 7, m37_service_error_word, 0
+    bl      m37_service_target_error
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SROT", 7, m37_service_root_word, 0
+    bl      m37_service_target_root_commits
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SPUB", 7, m37_service_publications_word, 0
+    bl      m37_service_target_publications
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SFNC", 7, m37_service_fence_word, 0
+    bl      m37_service_target_terminal_fence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37STPF", 7, m37_service_test_pre_submit_word, 0
+    bl      m37_service_target_test_pre_submit_failure
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37STPR", 7, m37_service_test_pre_release_word, 0
+    bl      m37_service_target_test_release_pre_submit
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37STLF", 7, m37_service_test_lost_word, 0
+    bl      m37_service_target_test_lost_completion
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37STLR", 7, m37_service_test_lost_release_word, 0
+    bl      m37_service_target_test_release_lost_completion
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37STDF", 7, m37_service_test_delayed_word, 0
+    bl      m37_service_target_test_delayed_completion
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37STDR", 7, m37_service_test_delayed_release_word, 0
+    bl      m37_service_target_test_release_delayed_completion
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37STEX", 7, m37_service_test_exhaust_word, 0
+    bl      m37_service_target_test_exhaust_pending
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37SREC", 7, m37_service_recover_word, 0
+    bl      m37_service_target_recover_tx
+    sxtw    x0, w0
+    str     x0, [DSP, #-8]!
+    NEXT
+
 #endif
 
 #ifdef M37_A

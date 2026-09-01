@@ -327,6 +327,8 @@ uint64_t candidate_execution_core_r_transport_value(void){return g_active&&g_tra
 uint64_t candidate_execution_core_r_sequence(void){return g_next_sequence;}
 uint64_t candidate_execution_core_r_high_water(void){return g_high_water;}
 uint64_t candidate_execution_core_r_error(void){return g_last_error;}
+uint64_t candidate_execution_core_r_pending(void){return g_pending_valid?1:0;}
+uint64_t candidate_execution_core_r_tx_pending(void){return m37_a_r_adapter_tx_pending()?1:0;}
 uint64_t candidate_execution_core_r_root_commits(void){return g_root_commits;}
 uint64_t candidate_execution_core_r_publications(void){return g_publications;}
 uint64_t candidate_execution_core_r_terminal_fence(void){return g_terminal_fence?1:0;}

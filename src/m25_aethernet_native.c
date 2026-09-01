@@ -48,6 +48,7 @@ static int g_pending_tx;
 static int g_test_hold_tx;
 #ifdef M37_A_R
 static int g_test_lost_completion;
+static int g_test_delay_completion;
 #endif
 static uint32_t g_inbox_len;
 static int g_inbox;
@@ -102,6 +103,7 @@ int m25_native_init(void)
     g_pending_tx = 0; g_pending_len = 0; g_test_hold_tx = 0;
 #ifdef M37_A_R
     g_test_lost_completion = 0;
+    g_test_delay_completion = 0;
 #endif
     g_inbox = 0; g_inbox_len = 0;
     g_shared_demux = 0;
@@ -215,6 +217,13 @@ m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len
         for (uint32_t i = 0; i < payload_len; i++) g_pending[i] = payload[i];
         return M25_NATIVE_RING_FULL;
     }
+    if (g_test_delay_completion && status == VIRTIO_NET_OK) {
+        /* The frame crossed the submit boundary, but completion is held by
+         * the qualification control until M37STDR releases it. */
+        g_pending_tx = 1; g_pending_len = payload_len;
+        for (uint32_t i = 0; i < payload_len; i++) g_pending[i] = payload[i];
+        return M25_NATIVE_RING_FULL;
+    }
 #endif
     if (status == VIRTIO_NET_OK || virtio_net_tx_complete() == 1) return M25_NATIVE_OK;
     if (status == VIRTIO_NET_RING_FULL || status == VIRTIO_NET_DEVICE_FAILURE) {
@@ -243,4 +252,6 @@ void m25_native_test_release_tx(void) { g_test_hold_tx = 0; }
 #ifdef M37_A_R
 void m25_native_test_lost_completion(void) { g_test_lost_completion = 1; }
 void m25_native_test_release_lost_completion(void) { g_test_lost_completion = 0; }
+void m25_native_test_delayed_completion(void) { g_test_delay_completion = 1; }
+void m25_native_test_release_delayed_completion(void) { g_test_delay_completion = 0; }
 #endif
