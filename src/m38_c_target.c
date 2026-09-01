@@ -3,6 +3,7 @@
 
 #include "blake3.h"
 #include "jam.h"
+#include "memory.h"
 #include "nock.h"
 #include "noun.h"
 #include "uart.h"
@@ -38,19 +39,31 @@ static void put_hex_u64(uint64_t value)
         uart_putc(digits[(value >> shift) & 0x0f]);
 }
 
-static void put_digest(noun value)
+static int digest_bytes(noun value, uint8_t digest[32])
 {
     const uint8_t *jammed;
     uint64_t length;
-    uint8_t digest[32];
-    if (jam_encode_bytes_identity(value, &jammed, &length) != 0) {
-        uart_puts("digest-error");
-        return;
-    }
+    if (jam_encode_bytes_identity(value, &jammed, &length) != 0)
+        return 0;
     blake3_hash(jammed, (size_t)length, digest);
+    return 1;
+}
+
+static void put_digest_bytes(const uint8_t digest[32])
+{
     /* Host noun_hash renders the little-endian digest as a hex integer. */
     for (int i = 31; i >= 0; i--)
         put_hex_byte(digest[i]);
+}
+
+static void put_digest(noun value)
+{
+    uint8_t digest[32];
+    if (!digest_bytes(value, digest)) {
+        uart_puts("digest-error");
+        return;
+    }
+    put_digest_bytes(digest);
 }
 
 static int atom_tag(noun value, const uint8_t *bytes, size_t length)
@@ -96,6 +109,19 @@ static noun head(noun value, int *ok)
     return ((cell_t *)(uintptr_t)cell_ptr(value))->head;
 }
 
+extern uint8_t __core0_stack_base[];
+extern uint8_t __core0_stack_top[];
+
+static uint64_t native_stack_hwm_words(void)
+{
+    volatile const uint64_t *cursor =
+        (volatile const uint64_t *)(uintptr_t)__core0_stack_base;
+    const uint64_t *top = (const uint64_t *)(uintptr_t)__core0_stack_top;
+    while (cursor < top && *cursor == CORE0_STACK_PATTERN)
+        cursor++;
+    return (uint64_t)(top - (const uint64_t *)cursor);
+}
+
 static int stimuli_shape_valid(noun stimuli, noun expected_identity)
 {
     static const uint8_t stimulus_tag[] = "38-stimul";
@@ -116,6 +142,40 @@ static int stimuli_shape_valid(noun stimuli, noun expected_identity)
             || !noun_is_direct(field(body, 2, &ok)) || !ok) return 0;
     }
     return 1;
+}
+
+static void put_allocator_receipt(uint64_t persist_before,
+                                  uint64_t persist_hwm,
+                                  uint64_t persist_after,
+                                  uint64_t scratch_before,
+                                  uint64_t scratch_hwm,
+                                  uint64_t scratch_after,
+                                  uint64_t atoms_before,
+                                  uint64_t atoms_hwm,
+                                  uint64_t atoms_after,
+                                  uint64_t stack_words)
+{
+    uart_puts("M38C ALLOC persist=");
+    put_hex_u64(persist_before);
+    uart_putc('/');
+    put_hex_u64(persist_hwm);
+    uart_putc('/');
+    put_hex_u64(persist_after);
+    uart_puts(" scratch=");
+    put_hex_u64(scratch_before);
+    uart_putc('/');
+    put_hex_u64(scratch_hwm);
+    uart_putc('/');
+    put_hex_u64(scratch_after);
+    uart_puts(" atoms=");
+    put_hex_u64(atoms_before);
+    uart_putc('/');
+    put_hex_u64(atoms_hwm);
+    uart_putc('/');
+    put_hex_u64(atoms_after);
+    uart_puts(" stack_words=");
+    put_hex_u64(stack_words);
+    uart_puts("\r\n");
 }
 
 static noun digest_atom(noun value)
@@ -234,38 +294,71 @@ void m38_c_boot(void)
     put_digest(image);
     uart_puts("\r\n");
 
-    noun current = state;
-    unsigned ordinal = 0;
+    volatile noun current = state;
+    volatile unsigned ordinal = 0;
     while (stimuli != NOUN_ZERO) {
         int ok = 1;
         noun stimulus = head(stimuli, &ok);
         stimuli = tail(stimuli, &ok);
         if (!ok || !noun_is_cell(stimulus)) { reject("stimulus"); return; }
 
-        noun subject = alloc_cell(runtime_plan,
-                         alloc_cell(current,
-                         alloc_cell(stimulus,
-                         alloc_cell(runtime_bounds(), NOUN_ZERO))));
+        /* Every slam owns the scratch region and a rollback mark.  The
+         * retained state is always persistent, so a budget jump cannot leave
+         * current pointing into memory that is about to be rewound. */
+        volatile uint64_t persist_before = heap_cells_used(HEAP_MODE_PERSIST);
+        volatile uint64_t atoms_before = atom_store_bytes_used();
+        heap_scratch_reset();
+        heap_set_mode(HEAP_MODE_SCRATCH);
+        volatile uint64_t scratch_before = heap_cells_used(HEAP_MODE_SCRATCH);
+
         int slam_jump = setjmp(nock_abort);
         if (slam_jump != 0) {
             uint64_t ops = nock_ops_used();
             uint64_t cells = nock_cells_used();
+            uint64_t persist_hwm = heap_cells_used(HEAP_MODE_PERSIST);
+            uint64_t scratch_hwm = heap_cells_used(HEAP_MODE_SCRATCH);
+            uint64_t atoms_hwm = atom_store_bytes_used();
+            uint64_t stack_words = native_stack_hwm_words();
             nock_budget_finish();
+            noun_tx_abort();
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
             if (slam_jump == NOCK_ABORT_BUDGET) {
+                put_allocator_receipt(
+                    persist_before, persist_hwm, heap_cells_used(HEAP_MODE_PERSIST),
+                    scratch_before, scratch_hwm, heap_cells_used(HEAP_MODE_SCRATCH),
+                    atoms_before, atoms_hwm, atom_store_bytes_used(), stack_words);
                 uart_puts("M38C REFUSE cap-edge ops=");
                 put_hex_u64(ops);
                 uart_puts(" cells=");
                 put_hex_u64(cells);
                 uart_puts("\r\n");
+                if (stimuli != NOUN_ZERO)
+                    continue;
             } else {
                 reject("slam-crash");
             }
             return;
         }
+
+        if (!noun_tx_begin(HEAP_MODE_SCRATCH)) {
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
+            reject("scratch-transaction");
+            return;
+        }
+        noun subject = alloc_cell(runtime_plan,
+                         alloc_cell(current,
+                         alloc_cell(stimulus,
+                         alloc_cell(runtime_bounds(), NOUN_ZERO))));
         nock_budget_set_limits(POLICY_MAX_OPS, POLICY_MAX_CELLS);
         noun product = nock(subject, formula);
         uint64_t ops = nock_ops_used();
         uint64_t cells = nock_cells_used();
+        uint64_t persist_hwm = heap_cells_used(HEAP_MODE_PERSIST);
+        uint64_t scratch_hwm = heap_cells_used(HEAP_MODE_SCRATCH);
+        uint64_t atoms_hwm = atom_store_bytes_used();
+        uint64_t stack_words = native_stack_hwm_words();
         nock_budget_finish();
 
         static const uint8_t product_tag[] = "m38-product-v2";
@@ -274,12 +367,57 @@ void m38_c_boot(void)
         noun status = field(product_tail, 1, &ok);
         if (!ok || !atom_tag(head(product, &ok), product_tag, sizeof product_tag - 1)
             || !atom_tag(status, commit_tag, sizeof commit_tag - 1)) {
+            noun_tx_abort();
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
             reject("atomic-refusal");
             return;
         }
-        current = field(product_tail, 2, &ok);
+        noun candidate_state = field(product_tail, 2, &ok);
         noun observations = field(product_tail, 3, &ok);
-        if (!ok || !noun_is_cell(current)) { reject("product"); return; }
+        if (!ok || !noun_is_cell(candidate_state)) {
+            noun_tx_abort();
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
+            reject("product");
+            return;
+        }
+
+        uint8_t observations_digest[32];
+        if (!digest_bytes(observations, observations_digest)) {
+            noun_tx_abort();
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
+            reject("product");
+            return;
+        }
+
+        /* The product is still in scratch.  Promote only the retained state
+         * into a separate persistent transaction, then reset scratch. */
+        noun_tx_commit();
+        heap_set_mode(HEAP_MODE_PERSIST);
+        noun promoted_state;
+        if (!noun_tx_begin(HEAP_MODE_PERSIST)
+            || !noun_copy_checked(candidate_state, &promoted_state)) {
+            if (noun_tx_active()) noun_tx_abort();
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
+            reject("promotion");
+            return;
+        }
+        noun_tx_commit();
+        current = promoted_state;
+        uint64_t promoted_persist = heap_cells_used(HEAP_MODE_PERSIST);
+        if (promoted_persist > persist_hwm)
+            persist_hwm = promoted_persist;
+        heap_set_mode(HEAP_MODE_SCRATCH);
+        heap_scratch_reset();
+        uint64_t scratch_after = heap_cells_used(HEAP_MODE_SCRATCH);
+        heap_set_mode(HEAP_MODE_PERSIST);
+        put_allocator_receipt(
+            persist_before, persist_hwm, heap_cells_used(HEAP_MODE_PERSIST),
+            scratch_before, scratch_hwm, scratch_after,
+            atoms_before, atoms_hwm, atom_store_bytes_used(), stack_words);
         uart_puts("M38C SLAM ");
         put_hex_u64((uint64_t)ordinal++);
         uart_puts(" status=commit ops=");
@@ -289,7 +427,7 @@ void m38_c_boot(void)
         uart_puts(" state=");
         put_digest(current);
         uart_puts(" observations=");
-        put_digest(observations);
+        put_digest_bytes(observations_digest);
         uart_puts("\r\n");
     }
     uart_puts("M38C PASS\r\n");
