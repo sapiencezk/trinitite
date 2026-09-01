@@ -3191,9 +3191,9 @@ defcode "M37ARREC", 8, m37_ar_recover_word, 0
 #endif
 
 #ifdef M37_IEC_SERVICE
-// The Service candidate supplies an already-typed opaque provider fact.  The
-// native facade forwards only its UINT16 pair into the frozen M37-A-R seam;
-// it does not inspect FB declarations, IEC event names, or lifecycle state.
+// M37SEV is application ingress only: INIT, REQ, and RSP.  Provider causes
+// never enter through this word; the target tick creates COMPLETE after an
+// exact native descriptor poll, and authenticated receive creates DELIVER.
 defcode "M37SEV", 6, m37_service_event_word, 0
     ldr     x4, [DSP]
     ldr     x3, [DSP, #8]
@@ -3201,7 +3201,7 @@ defcode "M37SEV", 6, m37_service_event_word, 0
     ldr     x1, [DSP, #24]
     ldr     x0, [DSP, #32]
     add     DSP, DSP, #40
-    bl      m37_service_target_input
+    bl      m37_service_target_application_input
     sxtw    x0, w0
     str     x0, [DSP, #-8]!
     NEXT
@@ -3282,6 +3282,11 @@ defcode "M37SPUB", 7, m37_service_publications_word, 0
 
 defcode "M37SFNC", 7, m37_service_fence_word, 0
     bl      m37_service_target_terminal_fence
+    str     x0, [DSP, #-8]!
+    NEXT
+
+defcode "M37STXS", 7, m37_service_tx_state_word, 0
+    bl      m37_service_target_tx_state
     str     x0, [DSP, #-8]!
     NEXT
 

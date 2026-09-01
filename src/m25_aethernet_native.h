@@ -28,6 +28,12 @@ int m25_native_configure_endpoint(const uint8_t *local_mac,
                                    const uint8_t *local_ip,
                                    const uint8_t *peer_ip,
                                    uint64_t local_port, uint64_t peer_port);
+#ifdef M37_IEC_SERVICE
+/* M37 Service-only native seam.  submit() records an exact frame intent;
+ * poll_completion() accepts only the matching completed descriptor. */
+m25_native_status_t m25_native_submit(const uint8_t *payload, uint32_t payload_len);
+m25_native_status_t m25_native_poll_completion(const uint8_t *payload, uint32_t payload_len);
+#endif
 #endif
 /* M27's management demultiplexer receives from the same virtio RX ring. It
  * hands an already-captured data frame back to this adapter without touching

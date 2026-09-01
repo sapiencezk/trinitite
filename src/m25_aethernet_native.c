@@ -121,6 +121,52 @@ int m25_native_prepare_platform(void)
     return virtio_net_init() != 0 || virtio_net_config_mac(mac) != 0 ? -1 : 0;
 }
 
+#ifdef M37_IEC_SERVICE
+m25_native_status_t m25_native_submit(const uint8_t *payload, uint32_t payload_len)
+{
+    if (!payload || payload_len == 0 || payload_len > MAX_PAYLOAD)
+        return M25_NATIVE_MALFORMED;
+    if (g_test_hold_tx || g_pending_tx) return M25_NATIVE_RING_FULL;
+    volatile uint8_t *eth = g_tx, *ip = eth + ETH_BYTES, *udp = ip + IPV6_BYTES;
+    for (uint32_t i = 0; i < 6; i++) { eth[i] = PEER_MAC[i]; eth[6+i] = LOCAL_MAC[i]; }
+    put16(eth + 12, 0x86ddu);
+    ip[0] = 0x60; ip[1] = ip[2] = ip[3] = 0;
+    put16(ip + 4, UDP_BYTES + payload_len); ip[6] = 17; ip[7] = 64;
+    for (uint32_t i = 0; i < 16; i++) { ip[8+i] = LOCAL_IP[i]; ip[24+i] = PEER_IP[i]; }
+    put16(udp, LOCAL_PORT); put16(udp + 2, PEER_PORT);
+    put16(udp + 4, UDP_BYTES + payload_len); put16(udp + 6, 0);
+    for (uint32_t i = 0; i < payload_len; i++) udp[UDP_BYTES+i] = payload[i];
+    put16(udp + 6, checksum(ip, udp, UDP_BYTES + payload_len));
+    virtio_net_status_t status = virtio_net_submit(
+        g_tx, ETH_BYTES + IPV6_BYTES + UDP_BYTES + payload_len);
+    if (status != VIRTIO_NET_OK) {
+        return status == VIRTIO_NET_RING_FULL ? M25_NATIVE_RING_FULL : M25_NATIVE_DEVICE;
+    }
+    g_pending_tx = 1; g_pending_len = payload_len;
+    for (uint32_t i = 0; i < payload_len; i++) g_pending[i] = payload[i];
+    return M25_NATIVE_OK;
+}
+
+m25_native_status_t m25_native_poll_completion(const uint8_t *payload, uint32_t payload_len)
+{
+    if (!payload || payload_len == 0 || payload_len > MAX_PAYLOAD)
+        return M25_NATIVE_MALFORMED;
+    if (!g_pending_tx) return M25_NATIVE_DEVICE;
+    /* A lost completion is intentionally uncertain forever until recovery;
+     * accepting a later used-ring entry would turn uncertainty into a forged
+     * success.  Delayed completion, by contrast, is released explicitly. */
+    if (g_test_lost_completion || g_test_delay_completion)
+        return M25_NATIVE_RING_FULL;
+    int complete = virtio_net_tx_complete();
+    if (complete < 0) return M25_NATIVE_DEVICE;
+    if (complete == 0) return M25_NATIVE_RING_FULL;
+    int equal = payload_len == g_pending_len;
+    for (uint32_t i = 0; equal && i < payload_len; i++) equal = payload[i] == g_pending[i];
+    g_pending_tx = 0; g_pending_len = 0;
+    return equal ? M25_NATIVE_OK : M25_NATIVE_DEVICE;
+}
+#endif
+
 int m25_native_configure_endpoint(const uint8_t *local_mac,
                                   const uint8_t *peer_mac,
                                   const uint8_t *local_ip,

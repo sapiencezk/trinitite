@@ -10,8 +10,8 @@ int m37_service_target_prepare_gate(noun, const runtime_identity_t *, uint8_t, n
 void m37_service_target_publish_gate(noun, const runtime_identity_t *, uint8_t);
 int m37_service_target_init(void);
 int m37_service_target_set_running(int);
-int m37_service_target_input(uint64_t kind, uint64_t qi, uint64_t token,
-                             uint64_t value, uint64_t status);
+int m37_service_target_application_input(uint64_t kind, uint64_t qi, uint64_t token,
+                                         uint64_t value, uint64_t status);
 int m37_service_target_tick(void);
 int m37_service_target_recover_tx(void);
 
@@ -29,6 +29,7 @@ uint64_t m37_service_target_error(void);
 uint64_t m37_service_target_root_commits(void);
 uint64_t m37_service_target_publications(void);
 uint64_t m37_service_target_terminal_fence(void);
+uint64_t m37_service_target_tx_state(void);
 
 void m37_service_target_test_pre_submit_failure(void);
 void m37_service_target_test_release_pre_submit(void);

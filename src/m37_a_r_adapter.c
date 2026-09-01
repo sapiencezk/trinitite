@@ -109,6 +109,66 @@ m37_a_r_native_status_t m37_a_r_adapter_send(
     }
 }
 
+#ifdef M37_IEC_SERVICE
+static m37_a_r_native_status_t map_native(m25_native_status_t status)
+{
+    switch (status) {
+    case M25_NATIVE_OK: return M37_A_R_NATIVE_OK;
+    case M25_NATIVE_RING_FULL: return M37_A_R_NATIVE_RING_FULL;
+    case M25_NATIVE_MALFORMED: return M37_A_R_NATIVE_MALFORMED;
+    case M25_NATIVE_ENDPOINT: return M37_A_R_NATIVE_ENDPOINT;
+    case M25_NATIVE_CHECKSUM: return M37_A_R_NATIVE_CHECKSUM;
+    default: return M37_A_R_NATIVE_DEVICE;
+    }
+}
+
+static int build_service_frame(const m37_a_r_transport_binding_t *b,
+                               const uint8_t *payload, uint32_t payload_len,
+                               uint64_t sequence, uint8_t frame[HEADER_BYTES + M37_A_R_MAX_PAYLOAD],
+                               uint32_t *frame_len)
+{
+    uint8_t tag[AUTH_BYTES];
+    if (!endpoints(b) || !payload || !payload_len || payload_len > M37_A_R_MAX_PAYLOAD
+        || sequence == 0 || sequence == UINT64_MAX
+        || HEADER_BYTES + payload_len > MAX_DATAGRAM || !frame || !frame_len)
+        return 0;
+    frame[0]='A'; frame[1]='E'; frame[2]='T'; frame[3]='0'; frame[4]=WIRE_MAJOR;
+    frame[5]=WIRE_MINOR; frame[6]=PROFILE; frame[7]=MESSAGE_KIND;
+    put16(frame+8,HEADER_BYTES); put16(frame+10,payload_len);
+    put64(frame+12,b->local_device); put64(frame+20,b->peer_device);
+    for (unsigned i=0;i<16;i++) frame[28+i]=b->outbound_binding[i];
+    for (unsigned i=0;i<32;i++) frame[44+i]=b->schema_digest[i];
+    put32(frame+76,(uint32_t)b->key_id); put64(frame+80,b->epoch);
+    put64(frame+88,sequence);
+    for (unsigned i=96;i<HEADER_BYTES;i++) frame[i]=0;
+    for (uint32_t i=0;i<payload_len;i++) frame[HEADER_BYTES+i]=payload[i];
+    auth(frame,HEADER_BYTES+payload_len,tag);
+    for (unsigned i=0;i<AUTH_BYTES;i++) frame[96+i]=tag[i];
+    *frame_len=HEADER_BYTES+payload_len;
+    return 1;
+}
+
+m37_a_r_native_status_t m37_a_r_adapter_submit(
+    const m37_a_r_transport_binding_t *b, const uint8_t *payload,
+    uint32_t payload_len, uint64_t sequence)
+{
+    uint8_t frame[HEADER_BYTES+M37_A_R_MAX_PAYLOAD]; uint32_t frame_len;
+    if (!build_service_frame(b,payload,payload_len,sequence,frame,&frame_len))
+        return M37_A_R_NATIVE_MALFORMED;
+    return map_native(m25_native_submit(frame,frame_len));
+}
+
+m37_a_r_native_status_t m37_a_r_adapter_poll_completion(
+    const m37_a_r_transport_binding_t *b, const uint8_t *payload,
+    uint32_t payload_len, uint64_t sequence)
+{
+    uint8_t frame[HEADER_BYTES+M37_A_R_MAX_PAYLOAD]; uint32_t frame_len;
+    if (!build_service_frame(b,payload,payload_len,sequence,frame,&frame_len))
+        return M37_A_R_NATIVE_MALFORMED;
+    return map_native(m25_native_poll_completion(frame,frame_len));
+}
+#endif
+
 m37_a_r_native_status_t m37_a_r_adapter_receive(
     const m37_a_r_transport_binding_t *b, m37_a_r_datagram_t *out)
 {

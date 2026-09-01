@@ -314,6 +314,25 @@ virtio_net_status_t virtio_net_send(const uint8_t *frame, uint32_t len)
     g_last_error = 7; return VIRTIO_NET_DEVICE_FAILURE;
 }
 
+#ifdef M37_IEC_SERVICE
+virtio_net_status_t virtio_net_submit(const uint8_t *frame, uint32_t len)
+{
+    if (!g_ready) return VIRTIO_NET_NOT_READY;
+    if (!frame || len == 0 || len + TX_NET_HEADER_BYTES > RX_BUFFER_BYTES)
+        return VIRTIO_NET_MALFORMED;
+    if (reap_tx() < 0) return VIRTIO_NET_DEVICE_FAILURE;
+    if (g_tx_busy) { g_last_error = 6; return VIRTIO_NET_RING_FULL; }
+    for (uint32_t i = 0; i < TX_NET_HEADER_BYTES; i++) g_tx_buf[i] = 0;
+    for (uint32_t i = 0; i < len; i++) g_tx_buf[TX_NET_HEADER_BYTES + i] = frame[i];
+    g_tx_desc[0].len = TX_NET_HEADER_BYTES + len;
+    g_tx_avail.ring[g_tx_avail_idx % RING_COUNT] = 0;
+    g_tx_avail_idx++; g_tx_avail.idx = g_tx_avail_idx; g_tx_busy = 1; notify(1);
+    /* The caller must poll virtio_net_tx_complete().  In particular, a
+     * descriptor being visible in the avail ring is not a provider cause. */
+    return VIRTIO_NET_OK;
+}
+#endif
+
 int virtio_net_tx_complete(void)
 {
     if (!g_ready) return -1;
