@@ -281,9 +281,10 @@ void m38_c_boot(void)
     noun pill = pill_load();
     if (!pill) { reject("no-image"); return; }
     noun image = cue(pill);
-    noun runtime_plan, base_plan, formula, state, stimuli;
+    noun runtime_plan, base_plan, formula, state, decoded_stimuli;
     uint64_t mode;
-    if (!image_validate(image, &runtime_plan, &base_plan, &formula, &state, &stimuli, &mode)) {
+    if (!image_validate(image, &runtime_plan, &base_plan, &formula, &state,
+                        &decoded_stimuli, &mode)) {
         reject("image-auth");
         return;
     }
@@ -295,6 +296,7 @@ void m38_c_boot(void)
     uart_puts("\r\n");
 
     volatile noun current = state;
+    volatile noun stimuli = decoded_stimuli;
     volatile unsigned ordinal = 0;
     while (stimuli != NOUN_ZERO) {
         int ok = 1;
