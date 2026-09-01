@@ -114,6 +114,7 @@ static m37_service_pending_t g_pending;
 static uint64_t g_output[5];
 static uint8_t g_output_valid;
 static uint64_t g_last_error, g_root_commits, g_publications, g_rx_high;
+static uint64_t g_scheduler_ticks;
 
 static int take(noun n, noun *head, noun *tail)
 {
@@ -515,6 +516,7 @@ void m37_service_target_publish_gate(noun gate,const runtime_identity_t *identit
     g_rx_high=0; g_terminal_fence=0; g_prepared_valid=0;
     g_tx_state=TX_NONE; g_completion_uncertain=0; g_test_lost_mode=0;
     g_recovery_attempts=0;
+    g_scheduler_ticks=0;
     g_recovery_paused=0;
 }
 
@@ -577,6 +579,7 @@ int m37_service_target_application_input(uint64_t kind,uint64_t qi,uint64_t toke
 int m37_service_target_tick(void)
 {
     if (!g_active || !g_running || !g_initialized) return 0;
+    g_scheduler_ticks++;
     if (g_terminal_fence) return -1;
     if (g_source) {
         if (!g_pending_valid) return 0;
@@ -618,6 +621,7 @@ uint64_t m37_service_target_publications(void){return g_publications;}
 uint64_t m37_service_target_terminal_fence(void){return g_terminal_fence?1:0;}
 uint64_t m37_service_target_tx_state(void){return (uint64_t)g_tx_state;}
 uint64_t m37_service_target_recovery_attempts(void){return g_recovery_attempts;}
+uint64_t m37_service_target_scheduler_ticks(void){return g_scheduler_ticks;}
 
 void m37_service_target_test_pre_submit_failure(void)
 {m25_native_test_hold_tx();g_recovery_paused=1;}
@@ -629,6 +633,8 @@ void m37_service_target_test_release_lost_completion(void)
 {m37_a_r_adapter_test_release_lost_completion();g_recovery_paused=0;}
 void m37_service_target_test_delayed_completion(void)
 {m37_a_r_adapter_test_delayed_completion();g_recovery_paused=1;}
+void m37_service_target_test_delayed_scheduler(void)
+{m37_a_r_adapter_test_delayed_completion();g_recovery_paused=0;}
 void m37_service_target_test_release_delayed_completion(void)
 {m37_a_r_adapter_test_release_delayed_completion();g_recovery_paused=0;}
 int m37_service_target_test_exhaust_pending(void)
@@ -643,5 +649,6 @@ int m37_service_target_application_input(uint64_t a,uint64_t b,uint64_t c,uint64
 int m37_service_target_tick(void){return 0;} int m37_service_target_recover_tx(void){return -1;}
 uint64_t m37_service_target_output_field(uint64_t f){(void)f;return UINT64_MAX;}uint64_t m37_service_target_output_valid(void){return 0;}void m37_service_target_output_pop(void){}
 uint64_t m37_service_target_phase(void){return UINT64_MAX;}uint64_t m37_service_target_sequence(void){return UINT64_MAX;}uint64_t m37_service_target_pending(void){return 0;}uint64_t m37_service_target_intent_valid(void){return 0;}uint64_t m37_service_target_intent_token(void){return UINT64_MAX;}uint64_t m37_service_target_intent_value(void){return UINT64_MAX;}uint64_t m37_service_target_plan_bound(void){return 0;}uint64_t m37_service_target_error(void){return 0;}uint64_t m37_service_target_root_commits(void){return 0;}uint64_t m37_service_target_publications(void){return 0;}uint64_t m37_service_target_terminal_fence(void){return 0;}uint64_t m37_service_target_tx_state(void){return 0;}uint64_t m37_service_target_recovery_attempts(void){return 0;}
-void m37_service_target_test_pre_submit_failure(void){}void m37_service_target_test_release_pre_submit(void){}void m37_service_target_test_lost_completion(void){}void m37_service_target_test_release_lost_completion(void){}void m37_service_target_test_delayed_completion(void){}void m37_service_target_test_release_delayed_completion(void){}int m37_service_target_test_exhaust_pending(void){return -1;}
+uint64_t m37_service_target_scheduler_ticks(void){return 0;}
+void m37_service_target_test_pre_submit_failure(void){}void m37_service_target_test_release_pre_submit(void){}void m37_service_target_test_lost_completion(void){}void m37_service_target_test_release_lost_completion(void){}void m37_service_target_test_delayed_completion(void){}void m37_service_target_test_delayed_scheduler(void){}void m37_service_target_test_release_delayed_completion(void){}int m37_service_target_test_exhaust_pending(void){return -1;}
 #endif

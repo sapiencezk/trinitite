@@ -31,11 +31,13 @@ uint64_t m37_service_target_publications(void);
 uint64_t m37_service_target_terminal_fence(void);
 uint64_t m37_service_target_tx_state(void);
 uint64_t m37_service_target_recovery_attempts(void);
+uint64_t m37_service_target_scheduler_ticks(void);
 
 void m37_service_target_test_pre_submit_failure(void);
 void m37_service_target_test_release_pre_submit(void);
 void m37_service_target_test_lost_completion(void);
 void m37_service_target_test_release_lost_completion(void);
 void m37_service_target_test_delayed_completion(void);
+void m37_service_target_test_delayed_scheduler(void);
 void m37_service_target_test_release_delayed_completion(void);
 int m37_service_target_test_exhaust_pending(void);

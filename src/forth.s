@@ -3295,6 +3295,11 @@ defcode "M37SATT", 7, m37_service_recovery_attempts_word, 0
     str     x0, [DSP, #-8]!
     NEXT
 
+defcode "M37STCK", 7, m37_service_scheduler_ticks_word, 0
+    bl      m37_service_target_scheduler_ticks
+    str     x0, [DSP, #-8]!
+    NEXT
+
 defcode "M37STPF", 7, m37_service_test_pre_submit_word, 0
     bl      m37_service_target_test_pre_submit_failure
     str     xzr, [DSP, #-8]!
@@ -3317,6 +3322,11 @@ defcode "M37STLR", 7, m37_service_test_lost_release_word, 0
 
 defcode "M37STDF", 7, m37_service_test_delayed_word, 0
     bl      m37_service_target_test_delayed_completion
+    str     xzr, [DSP, #-8]!
+    NEXT
+
+defcode "M37STDS", 7, m37_service_test_delayed_scheduler_word, 0
+    bl      m37_service_target_test_delayed_scheduler
     str     xzr, [DSP, #-8]!
     NEXT
 
