@@ -6,7 +6,9 @@
 #include "i2_ingress.h"
 #include "i2_admission_metrics.h"
 #include "digital_out.h"
-#ifdef I2_OPERATOR
+#if defined(M38_C)
+#include "m38_c_target.h"
+#elif defined(I2_OPERATOR)
 #include "i2_operator.h"
 #else
 extern void forth_main(void);
@@ -25,7 +27,9 @@ void main(void) {
     i2_rx_init();
     cold_init();
 
-#ifdef I2_OPERATOR
+#if defined(M38_C)
+    m38_c_boot();
+#elif defined(I2_OPERATOR)
     i2_operator_boot();
 #else
     forth_main();   /* never returns */
