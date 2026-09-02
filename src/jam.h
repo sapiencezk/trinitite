@@ -30,6 +30,21 @@ int jam_encode_bytes_checked(noun n, const uint8_t **out,
 int jam_encode_bytes_identity(noun n, const uint8_t **out, uint64_t *out_bytes);
 uint64_t jam_encode_bytes_selftest(void);
 
+/* One cumulative, fallible budget for an untrusted identity-keyed Jam.  The
+ * caller owns the budget and may reuse it across several digest operations in
+ * one admission.  `work` is diagnostic evidence of every charged operation. */
+typedef struct {
+    uint64_t work;
+    uint64_t max_work;
+    uint8_t exhausted;
+} jam_admission_budget_t;
+
+void jam_admission_budget_init(jam_admission_budget_t *budget,
+                               uint64_t max_work);
+int jam_encode_bytes_identity_bounded(noun n, const uint8_t **out,
+                                      uint64_t *out_bytes,
+                                      jam_admission_budget_t *budget);
+
 /* The target jam writer has a fixed 128 KiB output buffer.  This checked
  * preflight uses the same cache and encoding choices as jam(), but performs
  * no writes and therefore fails closed before the writer can overflow. */

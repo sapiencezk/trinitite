@@ -27,6 +27,15 @@
 #define WORKLIST_LIMIT 32u
 #define TRACE_LIMIT 128u
 #define EXPR_DEPTH_LIMIT 32u
+#define M38_D1_JAM_WORK_LIMIT 4000000ULL
+
+#ifndef M38_D1_STATE_COPY_PROBE
+#define M38_D1_STATE_COPY_PROBE 0
+#endif
+#ifndef M38_D1_REPEAT_REFUSAL_PROBE
+#define M38_D1_REPEAT_REFUSAL_PROBE 0
+#endif
+#define M38_D1_REPEAT_COUNT 4u
 
 #define M38_MAX_TYPES 8u
 #define M38_MAX_EVENTS 8u
@@ -45,7 +54,11 @@
 #define M38_D1_IMAGE_COPY_FAIL_AFTER (-1)
 #endif
 #ifndef M38_D1_STATE_COPY_FAIL_AFTER
+#if M38_D1_STATE_COPY_PROBE
+#define M38_D1_STATE_COPY_FAIL_AFTER 1
+#else
 #define M38_D1_STATE_COPY_FAIL_AFTER (-1)
+#endif
 #endif
 #ifndef M38_D1_PROMOTION_FAIL
 #define M38_D1_PROMOTION_FAIL 0
@@ -134,6 +147,7 @@ typedef struct {
     noun stimuli;
     noun plan_identity;
     uint64_t mode;
+    uint8_t image_digest[32];
     m38_plan_t plan;
 } m38_image_t;
 
@@ -166,11 +180,12 @@ static uint64_t native_stack_hwm_words(void)
     return (uint64_t)(top - (const uint64_t *)cursor);
 }
 
-static int digest_bytes(noun value, uint8_t digest[32])
+static int digest_bytes(noun value, uint8_t digest[32],
+                        jam_admission_budget_t *budget)
 {
     const uint8_t *jammed;
     uint64_t length;
-    if (jam_encode_bytes_identity(value, &jammed, &length) != 0)
+    if (jam_encode_bytes_identity_bounded(value, &jammed, &length, budget) != 0)
         return 0;
     blake3_hash(jammed, (size_t)length, digest);
     return 1;
@@ -186,7 +201,9 @@ static void put_digest_bytes(const uint8_t digest[32])
 static void put_digest(noun value)
 {
     uint8_t digest[32];
-    if (!digest_bytes(value, digest)) {
+    jam_admission_budget_t budget;
+    jam_admission_budget_init(&budget, M38_D1_JAM_WORK_LIMIT);
+    if (!digest_bytes(value, digest, &budget)) {
         uart_puts("digest-error");
         return;
     }
@@ -233,10 +250,11 @@ static int hash_atom_matches(noun value, const uint8_t expected[32])
     return 1;
 }
 
-static int digest_field_matches(noun field, noun value)
+static int digest_field_matches(noun field, noun value,
+                                jam_admission_budget_t *budget)
 {
     uint8_t digest[32];
-    return digest_bytes(value, digest) && hash_atom_matches(field, digest);
+    return digest_bytes(value, digest, budget) && hash_atom_matches(field, digest);
 }
 
 static void limbs_to_bytes(const uint64_t limbs[4], uint8_t bytes[32])
@@ -895,7 +913,8 @@ static int validate_trace(noun value, const m38_plan_t *plan,
 static int validate_product(noun product, const m38_image_t *image,
                             noun prior_state, noun *candidate_state,
                             noun *observations, uint8_t observation_digest[32],
-                            m38_validation_budget_t *budget)
+                            m38_validation_budget_t *budget,
+                            jam_admission_budget_t *jam_budget)
 {
     static const uint8_t product_tag[] = "m38-product-v2";
     static const uint8_t commit_tag[] = "commit";
@@ -928,7 +947,7 @@ static int validate_product(noun product, const m38_image_t *image,
         || !validate_trace(fields[4], &image->plan, image->mode, budget)
         || !direct_u(fields[5], QUEUE_LIMIT, &queue_high)
         || !direct_u(fields[6], WORKLIST_LIMIT, &worklist)
-        || !digest_bytes(fields[3], observation_digest))
+        || !digest_bytes(fields[3], observation_digest, jam_budget))
         return 0;
     (void)queue_high;
     (void)worklist;
@@ -937,7 +956,8 @@ static int validate_product(noun product, const m38_image_t *image,
     return 2;
 }
 
-static int validate_image(noun image, m38_image_t *out)
+static int validate_image(noun image, m38_image_t *out,
+                          jam_admission_budget_t *jam_budget)
 {
     static const uint8_t image_tag[] = "m38-c-image";
     static const uint8_t runtime_tag[] = "m38-c-plan";
@@ -950,7 +970,7 @@ static int validate_image(noun image, m38_image_t *out)
     cell_t *image_root = (cell_t *)(uintptr_t)cell_ptr(image);
     if (!atom_tag(image_root->head, image_tag, sizeof image_tag - 1)
         || !record_exact(image_root->tail, outer_fields, 2)
-        || !digest_field_matches(outer_fields[0], outer_fields[1])
+        || !digest_field_matches(outer_fields[0], outer_fields[1], jam_budget)
         || !record_exact(outer_fields[1], body_fields, 9)
         || !direct_u(body_fields[0], IMAGE_SCHEMA, &schema)
         || schema != IMAGE_SCHEMA || !noun_is_cell(body_fields[1]))
@@ -959,9 +979,9 @@ static int validate_image(noun image, m38_image_t *out)
     cell_t *runtime_root = (cell_t *)(uintptr_t)cell_ptr(body_fields[1]);
     if (!atom_tag(runtime_root->head, runtime_tag, sizeof runtime_tag - 1)
         || !record_exact(runtime_root->tail, runtime_fields, 4)
-        || !digest_field_matches(body_fields[2], body_fields[1])
+        || !digest_field_matches(body_fields[2], body_fields[1], jam_budget)
         || !noun_is_atom(runtime_fields[0])
-        || !digest_field_matches(runtime_fields[3], runtime_fields[2])
+        || !digest_field_matches(runtime_fields[3], runtime_fields[2], jam_budget)
         || !validate_base_plan(runtime_fields[1], runtime_fields[0],
                                &result.plan, &budget))
         return 0;
@@ -970,7 +990,7 @@ static int validate_image(noun image, m38_image_t *out)
     result.runtime_plan = body_fields[1];
     result.base_plan = runtime_fields[1];
     result.formula = body_fields[3];
-    if (!digest_field_matches(body_fields[4], body_fields[3]))
+    if (!digest_field_matches(body_fields[4], body_fields[3], jam_budget))
         return 0;
     noun bounds[3];
     if (!record_exact(body_fields[5], bounds, 3)
@@ -988,7 +1008,8 @@ static int validate_image(noun image, m38_image_t *out)
     result.state = body_fields[8];
     result.stimuli = body_fields[7];
     result.mode = mode;
-    if (budget.work > POLICY_MAX_OPS)
+    if (budget.work > POLICY_MAX_OPS
+        || !digest_bytes(image, result.image_digest, jam_budget))
         return 0;
     *out = result;
     return 1;
@@ -1061,18 +1082,36 @@ static void put_allocator_receipt(uint64_t persist_before,
     put_hex_u64(stack_words); uart_puts("\r\n");
 }
 
+static void put_jam_budget_receipt(const char *phase,
+                                   const jam_admission_budget_t *budget)
+{
+    uart_puts("M38C JAM phase="); uart_puts(phase); uart_puts(" work=");
+    put_hex_u64(budget->work); uart_puts(" limit=");
+    put_hex_u64(budget->max_work); uart_puts(" exhausted=");
+    uart_putc(budget->exhausted ? '1' : '0'); uart_puts("\r\n");
+}
+
+static void terminal(const char *status)
+{
+    uart_puts("M38C TERMINAL status=");
+    uart_puts(status);
+    uart_puts("\r\n");
+}
+
 static void reject(const char *reason)
 {
     uart_puts("M38C REFUSE ");
     uart_puts(reason);
     uart_puts("\r\n");
+    terminal("refuse");
 }
 
-static int promote_image(noun candidate, m38_image_t *image)
+static int promote_image(noun candidate, m38_image_t *image,
+                         jam_admission_budget_t *jam_budget,
+                         uint64_t persist_before,
+                         uint64_t scratch_before,
+                         uint64_t atoms_before)
 {
-    uint64_t persist_before = heap_cells_used(HEAP_MODE_PERSIST);
-    uint64_t scratch_before = heap_cells_used(HEAP_MODE_SCRATCH);
-    uint64_t atoms_before = atom_store_bytes_used();
     noun promoted;
     heap_set_mode(HEAP_MODE_PERSIST);
     heap_persist_begin_tx();
@@ -1080,7 +1119,7 @@ static int promote_image(noun candidate, m38_image_t *image)
     int copied = noun_copy_checked(candidate, &promoted);
     noun_test_copy_fail_after(-1);
     m38_image_t checked = {0};
-    int valid = copied && validate_image(promoted, &checked);
+    int valid = copied && validate_image(promoted, &checked, jam_budget);
     if (M38_D1_PROMOTION_FAIL)
         valid = 0;
     if (!valid) {
@@ -1137,6 +1176,129 @@ static int promote_live_roots(noun runtime_plan, noun formula, noun remaining,
     return 1;
 }
 
+#if M38_D1_STATE_COPY_PROBE
+/* Test-only: force a partial live-root copy, then prove that both transactions
+ * return to their exact pre-copy state.  The valid M38-C control is not used
+ * as an execution workload because it intentionally reaches the frozen cell
+ * cap before ordinary promotion. */
+static int run_state_copy_probe(noun runtime_plan, noun formula,
+                                noun remaining, noun current)
+{
+    uint64_t persist_before = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t selector_before = heap_persist_selector();
+    uint64_t atoms_before = atom_store_bytes_used();
+    uint64_t atom_slots_before = atom_store_index_occupancy();
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    heap_scratch_reset();
+    uint64_t scratch_before = heap_cells_used(HEAP_MODE_SCRATCH);
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
+        return 0;
+    noun scratch_marker;
+    if (!alloc_cell_checked(NOUN_ONE, NOUN_ZERO, &scratch_marker)) {
+        noun_tx_abort();
+        heap_scratch_reset();
+        return 0;
+    }
+    uint64_t scratch_hwm = heap_cells_used(HEAP_MODE_SCRATCH);
+    noun before_runtime = runtime_plan;
+    noun before_formula = formula;
+    noun before_remaining = remaining;
+    noun before_state = current;
+    noun new_runtime = NOUN_ZERO, new_formula = NOUN_ZERO;
+    noun new_remaining = NOUN_ZERO, new_state = NOUN_ZERO;
+    noun_test_copy_mutations_reset();
+    int copied = promote_live_roots(runtime_plan, formula, remaining, current,
+                                    &new_runtime, &new_formula,
+                                    &new_remaining, &new_state);
+    uint64_t mutations = noun_test_copy_mutations();
+    uint64_t persist_after = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t selector_after = heap_persist_selector();
+    uint64_t scratch_after = heap_cells_used(HEAP_MODE_SCRATCH);
+    uint64_t atoms_after = atom_store_bytes_used();
+    uint64_t atom_slots_after = atom_store_index_occupancy();
+    int roots_restored = runtime_plan == before_runtime
+        && formula == before_formula && remaining == before_remaining
+        && current == before_state;
+    int restored = !copied && mutations != 0
+        && selector_before == selector_after
+        && persist_before == persist_after
+        && atoms_before == atoms_after
+        && atom_slots_before == atom_slots_after
+        && scratch_after == scratch_before
+        && roots_restored && !noun_tx_active();
+    uart_puts("M38C STATE_PROBE copied="); uart_putc(copied ? '1' : '0');
+    uart_puts(" mutations="); put_hex_u64(mutations);
+    uart_puts(" selector="); put_hex_u64(selector_before); uart_putc('/');
+    put_hex_u64(selector_after); uart_puts(" persist=");
+    put_hex_u64(persist_before); uart_putc('/'); put_hex_u64(persist_after);
+    uart_puts(" scratch="); put_hex_u64(scratch_before); uart_putc('/');
+    put_hex_u64(scratch_hwm); uart_putc('/'); put_hex_u64(scratch_after);
+    uart_puts(" atoms="); put_hex_u64(atoms_before); uart_putc('/');
+    put_hex_u64(atoms_after); uart_puts(" slots=");
+    put_hex_u64(atom_slots_before); uart_putc('/');
+    put_hex_u64(atom_slots_after); uart_puts(" roots=");
+    uart_putc(roots_restored ? '1' : '0'); uart_puts(" restored=");
+    uart_putc(restored ? '1' : '0'); uart_puts("\r\n");
+    return restored;
+}
+#endif
+
+#if M38_D1_REPEAT_REFUSAL_PROBE
+/* Test-only: repeat the same decoded collision refusal in one guest. */
+static int run_repeated_refusal_probe(void)
+{
+    uint64_t persist_before = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t selector_before = heap_persist_selector();
+    uint64_t atoms_before = atom_store_bytes_used();
+    uint64_t atom_slots_before = atom_store_index_occupancy();
+    uint64_t first_work = 0, last_work = 0;
+    for (unsigned i = 0; i < M38_D1_REPEAT_COUNT; i++) {
+        heap_set_mode(HEAP_MODE_SCRATCH);
+        heap_scratch_reset();
+        noun candidate;
+        if (!m38_decode_image(&candidate))
+            return 0;
+        jam_admission_budget_t jam_budget;
+        jam_admission_budget_init(&jam_budget, M38_D1_JAM_WORK_LIMIT);
+        m38_image_t image = {0};
+        int valid = validate_image(candidate, &image, &jam_budget);
+        if (valid || !jam_budget.exhausted) {
+            if (noun_tx_active())
+                noun_tx_abort();
+            heap_set_mode(HEAP_MODE_PERSIST);
+            heap_scratch_reset();
+            return 0;
+        }
+        if (i == 0)
+            first_work = jam_budget.work;
+        last_work = jam_budget.work;
+        if (noun_tx_active())
+            noun_tx_abort();
+        heap_set_mode(HEAP_MODE_PERSIST);
+        heap_scratch_reset();
+        if (heap_cells_used(HEAP_MODE_PERSIST) != persist_before
+            || heap_persist_selector() != selector_before
+            || atom_store_bytes_used() != atoms_before
+            || atom_store_index_occupancy() != atom_slots_before
+            || heap_cells_used(HEAP_MODE_SCRATCH) != 0)
+            return 0;
+    }
+    jam_admission_budget_t evidence = {last_work, M38_D1_JAM_WORK_LIMIT, 1};
+    put_jam_budget_receipt("repeat", &evidence);
+    uart_puts("M38C REPEAT iterations="); put_hex_u64(M38_D1_REPEAT_COUNT);
+    uart_puts(" persist="); put_hex_u64(persist_before); uart_putc('/');
+    put_hex_u64(heap_cells_used(HEAP_MODE_PERSIST)); uart_puts(" selector=");
+    put_hex_u64(selector_before); uart_putc('/');
+    put_hex_u64(heap_persist_selector()); uart_puts(" scratch=");
+    put_hex_u64(0); uart_putc('/'); put_hex_u64(heap_cells_used(HEAP_MODE_SCRATCH));
+    uart_puts(" atoms="); put_hex_u64(atoms_before); uart_putc('/');
+    put_hex_u64(atom_store_bytes_used()); uart_puts(" jam_work=");
+    put_hex_u64(first_work); uart_putc('/'); put_hex_u64(last_work);
+    uart_puts("\r\n");
+    return first_work == last_work;
+}
+#endif
+
 void m38_c_boot(void)
 {
     int jumped = setjmp(nock_abort);
@@ -1153,8 +1315,20 @@ void m38_c_boot(void)
         return;
     }
 
+    uart_puts("M38C START\r\n");
     heap_scratch_reset();
     heap_set_mode(HEAP_MODE_SCRATCH);
+#if M38_D1_REPEAT_REFUSAL_PROBE
+    if (!run_repeated_refusal_probe()) {
+        reject("repeat-refusal-probe");
+        return;
+    }
+    terminal("test-pass");
+    return;
+#endif
+    uint64_t admission_persist_before = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t admission_scratch_before = heap_cells_used(HEAP_MODE_SCRATCH);
+    uint64_t admission_atoms_before = atom_store_bytes_used();
     noun candidate;
     if (!m38_decode_image(&candidate)) {
         if (noun_tx_active())
@@ -1165,15 +1339,23 @@ void m38_c_boot(void)
         return;
     }
     m38_image_t image = {0};
-    if (!validate_image(candidate, &image)) {
+    jam_admission_budget_t image_jam_budget;
+    jam_admission_budget_init(&image_jam_budget, M38_D1_JAM_WORK_LIMIT);
+    if (!validate_image(candidate, &image, &image_jam_budget)) {
         noun_tx_abort();
         heap_scratch_reset();
         heap_set_mode(HEAP_MODE_PERSIST);
-        reject("image-auth");
+        if (image_jam_budget.exhausted)
+            put_jam_budget_receipt("image", &image_jam_budget);
+        reject(image_jam_budget.exhausted ? "image-jam-budget" : "image-auth");
         return;
     }
-    if (!promote_image(candidate, &image)) {
+    if (!promote_image(candidate, &image, &image_jam_budget,
+                      admission_persist_before, admission_scratch_before,
+                      admission_atoms_before)) {
         heap_set_mode(HEAP_MODE_PERSIST);
+        if (image_jam_budget.exhausted)
+            put_jam_budget_receipt("image", &image_jam_budget);
         reject("image-promotion");
         return;
     }
@@ -1187,12 +1369,21 @@ void m38_c_boot(void)
     uart_puts("M38C READY mode=");
     uart_putc(image.mode ? 'o' : 'd');
     uart_puts(" image=");
-    put_digest(image.image);
+    put_digest_bytes(image.image_digest);
     uart_puts("\r\n");
     /* The fixed core stack also serves boot and admission.  Measure the
      * evaluator's incremental watermark so the image's 1,024-word policy is
      * enforced without confusing it with total native C-stack occupancy. */
     uint64_t evaluator_stack_baseline = native_stack_hwm_words();
+
+#if M38_D1_STATE_COPY_PROBE
+    if (!run_state_copy_probe(runtime_plan, formula, remaining, current)) {
+        reject("state-copy-probe");
+        return;
+    }
+    terminal("test-pass");
+    return;
+#endif
 
     while (remaining != NOUN_ZERO) {
         if (!noun_is_cell(remaining)) {
@@ -1236,6 +1427,7 @@ void m38_c_boot(void)
                 remaining = next_remaining;
                 if (remaining != NOUN_ZERO)
                     continue;
+                terminal("cap-edge");
             } else {
                 reject("slam-crash");
             }
@@ -1279,9 +1471,12 @@ void m38_c_boot(void)
         noun observations = NOUN_ZERO;
         uint8_t observations_digest[32];
         m38_validation_budget_t budget = {0, POLICY_MAX_OPS};
+        jam_admission_budget_t product_jam_budget;
+        jam_admission_budget_init(&product_jam_budget, M38_D1_JAM_WORK_LIMIT);
         int product_status = validate_product(product, &image, current,
                                               &candidate_state, &observations,
-                                              observations_digest, &budget);
+                                              observations_digest, &budget,
+                                              &product_jam_budget);
         if (product_status == 0) {
             noun_tx_abort();
             heap_set_mode(HEAP_MODE_PERSIST);
@@ -1290,7 +1485,10 @@ void m38_c_boot(void)
                 persist_before, persist_hwm, heap_cells_used(HEAP_MODE_PERSIST),
                 scratch_before, scratch_hwm, heap_cells_used(HEAP_MODE_SCRATCH),
                 atoms_before, atoms_hwm, atom_store_bytes_used(), stack_words);
-            reject("atomic-refusal");
+            if (product_jam_budget.exhausted)
+                put_jam_budget_receipt("product", &product_jam_budget);
+            reject(product_jam_budget.exhausted ? "product-jam-budget"
+                                                : "atomic-refusal");
             return;
         }
         if (product_status == 1) {
@@ -1338,4 +1536,5 @@ void m38_c_boot(void)
         put_digest_bytes(observations_digest); uart_puts("\r\n");
     }
     uart_puts("M38C PASS\r\n");
+    terminal("pass");
 }

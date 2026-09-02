@@ -16,14 +16,24 @@ typedef struct {
     uint64_t cur;               /* next bit position to write */
 } jambuf_t;
 
+static int jam_charge(uint64_t amount);
+static jam_admission_budget_t *g_jam_budget;
+
 static void jb_init(jambuf_t *b) {
     for (int i = 0; i < JAM_MAX_LIMBS; i++) b->buf[i] = 0;
     b->cur = 0;
 }
 
 static void jb_write(jambuf_t *b, int bit) {
-    if (b->cur >= (uint64_t)(JAM_MAX_LIMBS * 64))
+    if (!jam_charge(1))
+        return;
+    if (b->cur >= (uint64_t)(JAM_MAX_LIMBS * 64)) {
+        if (g_jam_budget) {
+            g_jam_budget->exhausted = 1;
+            return;
+        }
         nock_crash("jam: output too large");
+    }
     uint64_t w = b->cur >> 6, o = b->cur & 63;
     if (bit) b->buf[w] |= 1ULL << o;
     b->cur++;
@@ -92,8 +102,30 @@ static jcent_t g_jcache[JAM_CACHE_SZ];
  * 1: pointer identity (host Python jam of ResourceProgram). */
 static int g_jam_identity_keys;
 static uint32_t g_jcache_used;
+static uint32_t g_jam_depth;
+
+static int jam_charge(uint64_t amount)
+{
+    if (!g_jam_budget)
+        return 1;
+    if (amount > g_jam_budget->max_work
+        || g_jam_budget->work > g_jam_budget->max_work - amount) {
+        g_jam_budget->exhausted = 1;
+        return 0;
+    }
+    g_jam_budget->work += amount;
+    return 1;
+}
+
+static int jam_charge_atom(noun n)
+{
+    uint64_t bits = bn_met(n);
+    return jam_charge(bits == 0 ? 1 : bits);
+}
 
 static void jcache_init(void) {
+    if (g_jam_budget && !jam_charge(JAM_CACHE_SZ))
+        return;
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) g_jcache[i].used = 0;
     g_jcache_used = 0;
     g_i2_admission_metrics.jam_passes++;
@@ -108,6 +140,8 @@ static uint32_t jcache_hash(noun n) {
 static int jcache_get(noun n, uint64_t *pos) {
     uint32_t h = jcache_hash(n);
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) {
+        if (!jam_charge(1))
+            return 0;
         i2_admission_metrics_max(
             &g_i2_admission_metrics.jam_probe_hwm, (uint64_t)i + 1u);
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
@@ -121,29 +155,32 @@ static int jcache_get(noun n, uint64_t *pos) {
     return 0;
 }
 
-static void jcache_put(noun n, uint64_t pos) {
+static int jcache_put(noun n, uint64_t pos) {
     uint32_t h = jcache_hash(n);
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) {
+        if (!jam_charge(1))
+            return 0;
         i2_admission_metrics_max(
             &g_i2_admission_metrics.jam_probe_hwm, (uint64_t)i + 1u);
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) {
             if (g_jcache_used >= I2_JAM_CACHE_ADMITTED)
-                return;
+                return 1;
             g_jcache[idx].key = n; g_jcache[idx].pos = pos; g_jcache[idx].used = 1;
             g_jcache_used++;
             i2_admission_metrics_max(
                 &g_i2_admission_metrics.jam_cache_entries_hwm,
                 g_jcache_used);
-            return;
+            return 1;
         }
         if (g_jam_identity_keys ? g_jcache[idx].key == n
                                 : noun_eq(g_jcache[idx].key, n)) {
             g_jcache[idx].pos = pos;
-            return;
+            return 1;
         }
     }
     /* cache full — skip (correctness preserved; dedup opportunity lost) */
+    return 1;
 }
 
 /* ── jam recursive core ───────────────────────────────────────────────────── */
@@ -151,8 +188,21 @@ static void jcache_put(noun n, uint64_t pos) {
 static jambuf_t g_jambuf;
 
 static void do_jam(noun n) {
+    if (g_jam_budget && g_jam_budget->exhausted)
+        return;
+    if (!jam_charge(1))
+        return;
+    if (g_jam_budget && ++g_jam_depth > 256u) {
+        g_jam_budget->exhausted = 1;
+        g_jam_depth--;
+        return;
+    }
+    if (!noun_is_cell(n) && !jam_charge_atom(n))
+        goto done;
     uint64_t cached_pos;
     int found = jcache_get(n, &cached_pos);
+    if (g_jam_budget && g_jam_budget->exhausted)
+        goto done;
 
     if (noun_is_cell(n)) {
         if (found) {
@@ -160,7 +210,8 @@ static void do_jam(noun n) {
             jb_write(&g_jambuf, 1); jb_write(&g_jambuf, 1);
             do_mat(&g_jambuf, direct(cached_pos));
         } else {
-            jcache_put(n, g_jambuf.cur);
+            if (!jcache_put(n, g_jambuf.cur))
+                goto done;
             jb_write(&g_jambuf, 1); jb_write(&g_jambuf, 0);  /* tag 01 */
             cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
             do_jam(c->head);
@@ -169,14 +220,16 @@ static void do_jam(noun n) {
     } else {
         /* atom */
         if (!found) {
-            jcache_put(n, g_jambuf.cur);
+            if (!jcache_put(n, g_jambuf.cur))
+                goto done;
             jb_write(&g_jambuf, 0);     /* atom tag */
             do_mat(&g_jambuf, n);
         } else if (g_jam_identity_keys) {
             /* Host jam.py: re-emit the atom when value.bit_length()
              * is strictly less than the cached bit-position. */
             if (bn_met(n) < u64_bits(cached_pos)) {
-                jcache_put(n, g_jambuf.cur);
+                if (!jcache_put(n, g_jambuf.cur))
+                    goto done;
                 jb_write(&g_jambuf, 0);
                 do_mat(&g_jambuf, n);
             } else {
@@ -196,6 +249,9 @@ static void do_jam(noun n) {
             }
         }
     }
+done:
+    if (g_jam_budget)
+        g_jam_depth--;
 }
 
 /* Length-only companion to do_jam().  Keep this deliberately adjacent to the
@@ -204,10 +260,15 @@ static void do_jam(noun n) {
 static uint64_t g_jam_len;
 static uint64_t g_jam_max_bits;
 static int g_jam_len_ok;
+static uint32_t g_jam_len_depth;
 
 static void jam_len_add(uint64_t bits)
 {
     if (!g_jam_len_ok || bits > g_jam_max_bits - g_jam_len) {
+        g_jam_len_ok = 0;
+        return;
+    }
+    if (!jam_charge(bits)) {
         g_jam_len_ok = 0;
         return;
     }
@@ -218,37 +279,81 @@ static void do_jam_len(noun n)
 {
     if (!g_jam_len_ok)
         return;
+    int bounded = g_jam_budget != 0;
+    if (!jam_charge(1)) {
+        g_jam_len_ok = 0;
+        return;
+    }
+    if (bounded && ++g_jam_len_depth > 256u) {
+        g_jam_budget->exhausted = 1;
+        g_jam_len_ok = 0;
+        g_jam_len_depth--;
+        return;
+    }
+    if (!noun_is_cell(n) && !jam_charge_atom(n)) {
+        g_jam_len_ok = 0;
+        if (bounded)
+            g_jam_len_depth--;
+        return;
+    }
     uint64_t cached_pos;
     int found = jcache_get(n, &cached_pos);
+    if (g_jam_budget && g_jam_budget->exhausted) {
+        g_jam_len_ok = 0;
+        if (bounded)
+            g_jam_len_depth--;
+        return;
+    }
     if (noun_is_cell(n)) {
         if (found) {
             jam_len_add(2 + mat_len(direct(cached_pos)));
         } else {
-            jcache_put(n, g_jam_len);
+            if (!jcache_put(n, g_jam_len)) {
+                g_jam_len_ok = 0;
+                return;
+            }
             jam_len_add(2);
             cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
             do_jam_len(c->head);
             do_jam_len(c->tail);
         }
+        if (bounded)
+            g_jam_len_depth--;
         return;
     }
     if (!found) {
-        jcache_put(n, g_jam_len);
+        if (!jcache_put(n, g_jam_len)) {
+            g_jam_len_ok = 0;
+            if (bounded)
+                g_jam_len_depth--;
+            return;
+        }
         jam_len_add(1 + mat_len(n));
+        if (bounded)
+            g_jam_len_depth--;
         return;
     }
     if (g_jam_identity_keys) {
         if (bn_met(n) < u64_bits(cached_pos)) {
-            jcache_put(n, g_jam_len);
+            if (!jcache_put(n, g_jam_len)) {
+                g_jam_len_ok = 0;
+                if (bounded)
+                    g_jam_len_depth--;
+                return;
+            }
             jam_len_add(1 + mat_len(n));
         } else {
             jam_len_add(2 + mat_len(direct(cached_pos)));
         }
+        if (bounded)
+            g_jam_len_depth--;
         return;
     }
     uint64_t atom_bits = 1 + mat_len(n);
     uint64_t ref_bits = 2 + mat_len(direct(cached_pos));
     jam_len_add(atom_bits <= ref_bits ? atom_bits : ref_bits);
+    if (bounded)
+        g_jam_len_depth--;
 }
 
 int jam_size_checked(noun n, uint64_t max_bytes, uint64_t *out_bytes)
@@ -259,9 +364,10 @@ int jam_size_checked(noun n, uint64_t max_bytes, uint64_t *out_bytes)
     g_jam_len = 0;
     g_jam_max_bits = max_bytes * 8;
     g_jam_len_ok = 1;
+    g_jam_len_depth = 0;
     jcache_init();
     do_jam_len(n);
-    if (!g_jam_len_ok)
+    if (!g_jam_len_ok || (g_jam_budget && g_jam_budget->exhausted))
         return -1;
     *out_bytes = (g_jam_len + 7) / 8;
     if (*out_bytes == 0)
@@ -310,6 +416,53 @@ int jam_encode_bytes_identity(noun n, const uint8_t **out, uint64_t *out_bytes)
     int rc = jam_encode_bytes_checked(n, out, out_bytes);
     g_jam_identity_keys = 0;
     return rc;
+}
+
+void jam_admission_budget_init(jam_admission_budget_t *budget,
+                               uint64_t max_work)
+{
+    if (!budget)
+        return;
+    budget->work = 0;
+    budget->max_work = max_work;
+    budget->exhausted = 0;
+}
+
+int jam_encode_bytes_identity_bounded(noun n, const uint8_t **out,
+                                      uint64_t *out_bytes,
+                                      jam_admission_budget_t *budget)
+{
+    if (!out || !out_bytes || !budget)
+        return -1;
+    jam_admission_budget_t *prior_budget = g_jam_budget;
+    int prior_identity = g_jam_identity_keys;
+    uint32_t prior_depth = g_jam_depth;
+    g_jam_budget = budget;
+    g_jam_identity_keys = 1;
+    g_jam_depth = 0;
+    *out = 0;
+    *out_bytes = 0;
+    uint64_t checked_bytes = 0;
+    int rc = jam_size_checked(n, JAM_MAX_BYTES, &checked_bytes);
+    if (rc == 0 && !budget->exhausted) {
+        uint64_t bits = jam_encode(n);
+        uint64_t bytes = (bits + 7) / 8;
+        if (bytes == 0)
+            bytes = 1;
+        if (!budget->exhausted && bytes == checked_bytes
+            && bytes <= JAM_MAX_BYTES) {
+            *out = (const uint8_t *)(const void *)g_jambuf.buf;
+            *out_bytes = bytes;
+        } else {
+            rc = -1;
+        }
+    } else {
+        rc = -1;
+    }
+    g_jam_depth = prior_depth;
+    g_jam_identity_keys = prior_identity;
+    g_jam_budget = prior_budget;
+    return rc == 0 && *out ? 0 : -1;
 }
 
 static int jam_byte_view_matches(noun n)

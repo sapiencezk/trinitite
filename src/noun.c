@@ -89,6 +89,11 @@ void heap_persist_abort_tx(void)
     persist_tx_active = 0;
 }
 
+uint64_t heap_persist_selector(void)
+{
+    return (uint64_t)persist_sel;
+}
+
 static void *heap_alloc(size_t bytes) {
     if (heap_noalloc) {
         heap_noalloc_faults++;
@@ -206,6 +211,7 @@ static uint8_t  g_copy_used[COPY_MAP_MAX];
 static int64_t  g_copy_fail_after = -1;
 static uint64_t g_copy_entries;
 static uint64_t g_copy_entries_hwm;
+static uint64_t g_copy_mutations;
 
 static void copy_entry_inserted(void)
 {
@@ -312,6 +318,7 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
         g_copy_fail_after--;
     if (!alloc_cell_checked(nh, nt, &neu))
         return 0;
+    g_copy_mutations++;
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
         copy_probe(k);
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
@@ -342,6 +349,8 @@ int noun_copy_checked(noun n, noun *out)
 uint64_t noun_copy_map_hwm(void) { return g_copy_entries_hwm; }
 uint64_t noun_copy_map_capacity(void) { return COPY_MAP_MAX; }
 void noun_copy_map_hwm_reset(void) { g_copy_entries_hwm = 0; }
+void noun_test_copy_mutations_reset(void) { g_copy_mutations = 0; }
+uint64_t noun_test_copy_mutations(void) { return g_copy_mutations; }
 
 void noun_test_copy_fail_after(int64_t cells)
 {
@@ -750,6 +759,7 @@ void noun_heap_init(void) {
     heap_noalloc_faults = 0;
     noun_tx_live = 0;
     atom_tx_slot_count = 0;
+    g_copy_mutations = 0;
     scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
     heap_mode   = HEAP_MODE_PERSIST;  /* pill load / cold boot into persist */
     atom_store_init();

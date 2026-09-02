@@ -87,6 +87,7 @@ void  heap_persist_flip(void);     /* switch to other semispace (empty); for com
 void  heap_persist_begin_tx(void);
 void  heap_persist_commit_tx(void);
 void  heap_persist_abort_tx(void);
+uint64_t heap_persist_selector(void);
 /* Activation guard: I2 publish enables this around the final effect pass.
  * Any accidental heap allocation is a deterministic host-integrity failure. */
 void  heap_noalloc_begin(void);
@@ -108,6 +109,9 @@ uint64_t atom_store_probe_hwm(void);
 uint64_t noun_copy_map_hwm(void);
 uint64_t noun_copy_map_capacity(void);
 void noun_copy_map_hwm_reset(void);
+/* Test-only evidence for a forced partial-copy rollback. */
+void noun_test_copy_mutations_reset(void);
+uint64_t noun_test_copy_mutations(void);
 
 noun  alloc_cell(noun head, noun tail);
 int   alloc_cell_checked(noun head, noun tail, noun *out);
