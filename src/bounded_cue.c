@@ -180,6 +180,15 @@ static int decode_mat(cue_reader_t *r, noun *out)
         if (bit)
             g_bounded_atom_limbs[i >> 6] |= 1ULL << (i & 63);
     }
+    /* Jam's mat encoding is canonical: the declared width is the position
+     * of the highest set bit.  Without this check a hostile sender can make
+     * many distinct encodings for the same atom and consume the full decode
+     * envelope before the authenticated image validator runs. */
+    if ((g_bounded_atom_limbs[(atom_bits - 1) >> 6]
+         & (1ULL << ((atom_bits - 1) & 63))) == 0) {
+        r->status = CUE_BOUNDED_ATOM;
+        return 0;
+    }
     if (!make_atom_checked(g_bounded_atom_limbs, limbs, out)) {
         r->status = CUE_BOUNDED_ALLOC;
         return 0;
