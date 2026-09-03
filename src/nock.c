@@ -896,9 +896,17 @@ loop:
         noun b      = hc->head;     /* hint tag */
         noun c      = hc->tail;     /* clue formula */
 
+#if defined(M38_D5_NATIVE)
+        /* M38-B diagnostic scopes use a long, opaque cord tag.  Hints are
+         * semantically inert here; only the legacy direct tags below have
+         * native side effects.  Accepting an indirect tag preserves the
+         * frozen formula while keeping this evaluator total at the boundary. */
+        uint64_t tag = noun_is_direct(b) ? direct_val(b) : UINT64_MAX;
+#else
         if (!noun_is_direct(b))
             nock_crash("op11 hint tag not direct");
         uint64_t tag = direct_val(b);
+#endif
 
         /* Evaluate clue (for side effects and/or %wild registration) */
         noun clue = nock_eval(subject, c, jets, sky);

@@ -6,7 +6,9 @@
 #include "i2_ingress.h"
 #include "i2_admission_metrics.h"
 #include "digital_out.h"
-#if defined(M38_C)
+#if defined(M38_D5_NATIVE)
+#include "m38_resource_abi_target.h"
+#elif defined(M38_C)
 #include "m38_c_target.h"
 #elif defined(I2_OPERATOR)
 #include "i2_operator.h"
@@ -27,7 +29,9 @@ void main(void) {
     i2_rx_init();
     cold_init();
 
-#if defined(M38_C)
+#if defined(M38_D5_NATIVE)
+    m38_resource_abi_boot();
+#elif defined(M38_C)
     m38_c_boot();
 #elif defined(I2_OPERATOR)
     i2_operator_boot();
