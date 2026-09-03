@@ -61,8 +61,9 @@ void     nock_budget_finish(void);
 uint64_t nock_budget_get(void);               /* current max (0 = off) */
 uint64_t nock_ops_used(void);
 uint64_t nock_cells_used(void);
-/* Reason: 1=op budget, 2=wall deadline, 3=cell budget. */
+/* Reason: 1=op budget, 2=wall deadline, 3=cell budget, 4=evaluator stack. */
 uint64_t nock_budget_abort_reason(void);
+uint64_t nock_eval_stack_peak(void);
 void     nock_wall_check_set(int (*fn)(void)); /* 1 → budget abort */
 /* Tick one op; may longjmp. Public so SKA eval paths share the same budget. */
 void     nock_budget_tick(void);

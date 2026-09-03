@@ -55,6 +55,19 @@ void heap_scratch_reset(void)
     scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
 }
 
+uint64_t heap_scratch_mark(void)
+{
+    return (uint64_t)(scratch_ptr - (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE);
+}
+
+int heap_scratch_rewind(uint64_t mark)
+{
+    if (mark > HEAP_SCRATCH_SIZE)
+        return 0;
+    scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE + mark;
+    return 1;
+}
+
 void heap_persist_reset(void)
 {
     persist_ptr = persist_base(persist_sel);

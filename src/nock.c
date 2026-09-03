@@ -27,6 +27,10 @@ static uint64_t g_cell_budget_max;     /* 0 = unlimited */
 static uint64_t g_cells_used;
 static uint64_t g_budget_abort_reason;
 static int (*g_wall_check)(void);
+static uint64_t g_eval_stack_current;
+static uint64_t g_eval_stack_peak;
+
+#define NOCK_EVALUATOR_STACK_LIMIT 1024ULL
 
 void nock_budget_set(uint64_t max_ops)
 {
@@ -40,6 +44,8 @@ void nock_budget_set_limits(uint64_t max_ops, uint64_t max_cells)
     g_ops_used = 0;
     g_cells_used = 0;
     g_budget_abort_reason = 0;
+    g_eval_stack_current = 0;
+    g_eval_stack_peak = 0;
 }
 
 void nock_budget_finish(void)
@@ -66,6 +72,11 @@ uint64_t nock_cells_used(void)
 uint64_t nock_budget_abort_reason(void)
 {
     return g_budget_abort_reason;
+}
+
+uint64_t nock_eval_stack_peak(void)
+{
+    return g_eval_stack_peak;
 }
 
 void nock_wall_check_set(int (*fn)(void))
@@ -680,8 +691,8 @@ static void __attribute__((noinline)) tame_compile(noun clue) {
 }
 
 /*
- * Internal evaluator.  All recursive calls go through here so that
- * `jets` and `sky` are threaded through the entire computation.
+ * Internal evaluator body.  Recursive calls go through the guarded wrapper
+ * below so that `jets` and `sky` are threaded through the entire computation.
  *
  * `wild_buf` holds at most one %wild registration set per stack frame.
  * When op 11 fires a %wild hint, we parse the clue into `wild_buf` and
@@ -689,7 +700,10 @@ static void __attribute__((noinline)) tame_compile(noun clue) {
  * same frame, `wild_buf` stays live until the frame returns.
  */
 static noun nock_eval(noun subject, noun formula,
-                      const wilt_t *jets, sky_fn_t sky) {
+                      const wilt_t *jets, sky_fn_t sky);
+
+static noun nock_eval_inner(noun subject, noun formula,
+                            const wilt_t *jets, sky_fn_t sky) {
     wilt_t wild_buf;    /* local %wild registration buffer */
 loop:
     nock_budget_tick();
@@ -957,6 +971,24 @@ loop:
         nock_crash("unimplemented opcode");
         return NOUN_ZERO; /* unreachable */
     }
+}
+
+/* Measure logical evaluator frames independently of the physical C-stack
+ * watermark.  Tail-recursive `goto loop` iterations remain one evaluator
+ * frame, while every recursive formula call passes through this wrapper. */
+static noun __attribute__((noinline)) nock_eval(noun subject, noun formula,
+                                                const wilt_t *jets, sky_fn_t sky)
+{
+    if (g_eval_stack_current >= NOCK_EVALUATOR_STACK_LIMIT) {
+        g_budget_abort_reason = 4;
+        longjmp(nock_abort, NOCK_ABORT_BUDGET);
+    }
+    g_eval_stack_current++;
+    if (g_eval_stack_current > g_eval_stack_peak)
+        g_eval_stack_peak = g_eval_stack_current;
+    noun result = nock_eval_inner(subject, formula, jets, sky);
+    g_eval_stack_current--;
+    return result;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */

@@ -44,6 +44,8 @@
 #define D5_CATALOG_CAPACITY       8u
 #define D5_SLOT_COUNT              8u
 #define D5_MAX_GENERATION 0xFFFFFFFFULL
+#define D5_RESULT_CELL_CAPACITY    32768u
+#define D5_RESULT_DEPTH_MAX         256u
 
 #define D5_TYPE_BOOL              1u
 #define D5_TYPE_UINT16            2u
@@ -216,10 +218,27 @@ typedef struct {
 
 static d5_catalog_t g_catalog[D5_CATALOG_CAPACITY];
 static d5_slot_t g_slots[D5_SLOT_COUNT];
+static uint64_t g_publications;
 static uint8_t g_in_flight;
 static uint8_t g_preimage[JAM_MAX_BYTES + D5_MAX_IDENTITY_BYTES];
 static volatile uint32_t g_eval_slot;
 static volatile uint32_t g_eval_reason;
+static cell_t g_result_cells[D5_RESULT_CELL_CAPACITY];
+static uint32_t g_result_source[D5_RESULT_CELL_CAPACITY];
+static noun g_result_value[D5_RESULT_CELL_CAPACITY];
+static uint32_t g_result_cell_count;
+static noun g_result_root;
+
+static int d5_result_status_reason(noun result, uint32_t *status,
+                                   uint32_t *reason);
+
+#if defined(M38_D5_NATIVE_WITNESS)
+static volatile uint64_t g_witness_ops_limit;
+static volatile uint64_t g_witness_cells_limit;
+static volatile uint8_t g_witness_reenter_next;
+static volatile uint32_t g_witness_nested_status;
+static volatile uint32_t g_witness_nested_reason;
+#endif
 
 extern uint8_t _pill_embed_start[];
 extern uint8_t _pill_embed_end[];
@@ -1096,19 +1115,58 @@ static noun d5_reason(uint32_t code, uint32_t detail)
     return body == NOUN_ZERO ? NOUN_ZERO : d5_pair_build(d5_atom(TAG_REASON), body);
 }
 
+/* Dispatcher results are owned by a bounded module-local arena.  The arena
+ * is reset only when the next dispatch starts, after the caller has had the
+ * current call's result available for serialization/copy.  Transient nouns
+ * stay in the scratch epoch and are rewound at the dispatch boundary; no
+ * returned noun points into that reclaimable epoch. */
+static noun d5_result_copy_rec(noun source, uint32_t depth, int *ok)
+{
+    if (!noun_is_cell(source))
+        return source;
+    if (depth > D5_RESULT_DEPTH_MAX) {
+        *ok = 0;
+        return NOUN_ZERO;
+    }
+    uint32_t source_ptr = cell_ptr(source);
+    for (uint32_t i = 0; i < g_result_cell_count; i++)
+        if (g_result_source[i] == source_ptr)
+            return g_result_value[i];
+    if (g_result_cell_count >= D5_RESULT_CELL_CAPACITY) {
+        *ok = 0;
+        return NOUN_ZERO;
+    }
+    uint32_t index = g_result_cell_count++;
+    noun result = cell_noun((uint32_t)(uintptr_t)&g_result_cells[index]);
+    g_result_source[index] = source_ptr;
+    g_result_value[index] = result;
+    g_result_cells[index].refcount = 1;
+    g_result_cells[index]._pad = 0;
+    g_result_cells[index].head = NOUN_ZERO;
+    g_result_cells[index].tail = NOUN_ZERO;
+    cell_t *cell = (cell_t *)(uintptr_t)source_ptr;
+    g_result_cells[index].head = d5_result_copy_rec(cell->head, depth + 1, ok);
+    g_result_cells[index].tail = d5_result_copy_rec(cell->tail, depth + 1, ok);
+    return result;
+}
+
+static noun d5_result_stage(noun source)
+{
+    g_result_cell_count = 0;
+    g_result_root = NOUN_ZERO;
+    int ok = 1;
+    noun result = d5_result_copy_rec(source, 1, &ok);
+    if (!ok || !noun_is_cell(result))
+        return NOUN_ZERO;
+    g_result_root = result;
+    return result;
+}
+
 static noun d5_result(uint32_t status, noun body)
 {
     noun fields[3] = {d5_atom(TAG_RESULT_SCHEMA), direct(status), body};
     noun result_body = d5_record_build(fields, 3);
     return result_body == NOUN_ZERO ? NOUN_ZERO : d5_pair_build(d5_atom(TAG_RESULT), result_body);
-}
-
-static int d5_result_is(noun result, uint32_t status)
-{
-    noun tag, body, fields[3];
-    return d5_pair(result, &tag, &body) && d5_atom_is(tag, TAG_RESULT)
-        && d5_record(body, fields, 3) && noun_is_direct(fields[1])
-        && direct_val(fields[1]) == status;
 }
 
 static noun d5_refuse(uint32_t code, uint32_t detail, noun unchanged)
@@ -1423,6 +1481,7 @@ static int d5_admit_catalog(uint32_t index, noun core, noun admission)
         if (i != index && candidate[i].admitted)
             g_catalog[i] = candidate[i];
     heap_set_mode(HEAP_MODE_SCRATCH);
+    g_publications++;
     return 1;
 }
 
@@ -1505,6 +1564,9 @@ static noun d5_dispatch_load(noun core, noun admission)
     noun result = d5_result(D5_STATUS_LOAD, d5_record_build(body_fields, 2));
     if (result == NOUN_ZERO)
         return d5_refuse(7, 0, NOUN_ZERO);
+    noun owned = d5_result_stage(result);
+    if (owned == NOUN_ZERO)
+        return d5_refuse(7, 0, NOUN_ZERO);
     int admission_result = d5_admit_catalog((uint32_t)index, core, admission);
     if (admission_result <= 0)
         return d5_refuse(admission_result < 0 ? 11 : 10, 0, NOUN_ZERO);
@@ -1513,7 +1575,8 @@ static noun d5_dispatch_load(noun core, noun admission)
     g_slots[slot_number - 1].state_kind = D5_STATE_INITIALIZED;
     g_slots[slot_number - 1].latest = 0;
     g_slots[slot_number - 1].used = 1;
-    return result;
+    g_publications++;
+    return owned;
 }
 
 static noun d5_dispatch_peek(noun handle, noun selector)
@@ -1526,7 +1589,8 @@ static noun d5_dispatch_peek(noun handle, noun selector)
         || !d5_atom_is(selector_tag, TAG_SELECTOR)
         || !d5_record(selector_body, sf, 3) || !d5_atom_is(sf[0], TAG_SELECTOR_SCHEMA)
         || !noun_is_direct(sf[1]) || direct_val(sf[1]) != 1
-        || !noun_is_direct(sf[2]) || direct_val(sf[2]) == 0)
+        || !noun_is_direct(sf[2]) || direct_val(sf[2]) > 0xFFFF
+        || direct_val(sf[2]) == 0)
         return d5_refuse(5, 0, NOUN_ZERO);
     uint32_t target = (uint32_t)direct_val(sf[2]);
     d5_catalog_t *catalog = &g_catalog[g_slots[slot_number - 1].catalog];
@@ -1598,7 +1662,17 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
                                               slot->state_kind));
     g_eval_slot = slot_number;
     g_eval_reason = 8;
-    nock_budget_set_limits(D5_POLICY_MAX_OPS, D5_POLICY_MAX_CELLS);
+    uint64_t max_ops = D5_POLICY_MAX_OPS;
+    uint64_t max_cells = D5_POLICY_MAX_CELLS;
+#if defined(M38_D5_NATIVE_WITNESS)
+    if (g_witness_ops_limit != 0)
+        max_ops = g_witness_ops_limit;
+    if (g_witness_cells_limit != 0)
+        max_cells = g_witness_cells_limit;
+    g_witness_ops_limit = 0;
+    g_witness_cells_limit = 0;
+#endif
+    nock_budget_set_limits(max_ops, max_cells);
     int jumped = setjmp(nock_abort);
     if (jumped != 0) {
         uint64_t reason = nock_budget_abort_reason();
@@ -1610,11 +1684,7 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
     uint64_t ops = nock_ops_used();
     uint64_t cells = nock_cells_used();
     nock_budget_finish();
-    /* The frozen D4 peak_stack field is an evaluator metric, not a raw C
-     * stack watermark.  Trinitite's recursive evaluator has no logical-stack
-     * counter yet; keep the field within the frozen domain and rely on the
-     * fixed 256 KiB native stack for the physical safety bound. */
-    uint64_t stack_delta = 0;
+    uint64_t stack_delta = nock_eval_stack_peak();
     noun product_tag, product_body, pf[7];
     if (!d5_pair(product, &product_tag, &product_body)
         || !d5_atom_is(product_tag, "m38-product-v2")
@@ -1656,9 +1726,15 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
         return d5_refuse(7, 0, d5_state_noun(&plan, &slot->state, slot_number,
                                               slot->generation, catalog->core_id,
                                               slot->state_kind));
+    noun owned = d5_result_stage(result);
+    if (owned == NOUN_ZERO)
+        return d5_refuse(7, 0, d5_state_noun(&plan, &slot->state, slot_number,
+                                              slot->generation, catalog->core_id,
+                                              slot->state_kind));
     slot->state = candidate;
     slot->state_kind = D5_STATE_NEXT;
-    return result;
+    g_publications++;
+    return owned;
 }
 
 static noun d5_dispatch_snapshot(noun handle)
@@ -1678,6 +1754,9 @@ static noun d5_dispatch_snapshot(noun handle)
     noun result = d5_result(D5_STATUS_SNAPSHOT, snapshot);
     if (result == NOUN_ZERO)
         return d5_refuse(7, 0, NOUN_ZERO);
+    noun owned = d5_result_stage(result);
+    if (owned == NOUN_ZERO)
+        return d5_refuse(7, 0, NOUN_ZERO);
     for (uint32_t i = 0; i < D5_MAX_INSTANCES; i++) {
         slot->snapshot_state.state_ids[i] = slot->state.state_ids[i];
         for (uint32_t j = 0; j < D5_MAX_VALUES; j++)
@@ -1686,7 +1765,8 @@ static noun d5_dispatch_snapshot(noun handle)
     for (uint32_t i = 0; i < 32; i++)
         slot->snapshot_digest[i] = digest[i];
     slot->latest = 1;
-    return result;
+    g_publications++;
+    return owned;
 }
 
 static noun d5_dispatch_restore(noun handle, noun snapshot)
@@ -1748,9 +1828,15 @@ static noun d5_dispatch_restore(noun handle, noun snapshot)
         return d5_refuse(7, 0, d5_state_noun(&plan, &slot->state, slot_number,
                                               slot->generation, catalog->core_id,
                                               slot->state_kind));
+    noun owned = d5_result_stage(result);
+    if (owned == NOUN_ZERO)
+        return d5_refuse(7, 0, d5_state_noun(&plan, &slot->state, slot_number,
+                                              slot->generation, catalog->core_id,
+                                              slot->state_kind));
     slot->state = restored;
     slot->state_kind = restored_kind;
-    return result;
+    g_publications++;
+    return owned;
 }
 
 /* The one public native ResourceABI entry point.  All refusals are staged
@@ -1758,9 +1844,29 @@ static noun d5_dispatch_restore(noun handle, noun snapshot)
  * target has one scheduler core and no callback path. */
 noun m38_resource_abi_dispatch(noun request)
 {
-    if (g_in_flight)
-        return d5_refuse(16, 0, NOUN_ZERO);
+    if (g_in_flight) {
+        uint64_t nested_mark = heap_scratch_mark();
+        noun refused = d5_refuse(16, 0, NOUN_ZERO);
+        noun owned = d5_result_stage(refused);
+        (void)heap_scratch_rewind(nested_mark);
+        return owned;
+    }
     g_in_flight = 1;
+    uint64_t scratch_mark = heap_scratch_mark();
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    g_result_cell_count = 0;
+    g_result_root = NOUN_ZERO;
+#if defined(M38_D5_NATIVE_WITNESS)
+    if (g_witness_reenter_next) {
+        g_witness_reenter_next = 0;
+        noun nested = m38_resource_abi_dispatch(NOUN_ZERO);
+        uint32_t nested_status = 0, nested_reason = 0;
+        if (d5_result_status_reason(nested, &nested_status, &nested_reason)) {
+            g_witness_nested_status = nested_status;
+            g_witness_nested_reason = nested_reason;
+        }
+    }
+#endif
     d5_request_t decoded;
     noun result;
     if (!d5_decode_request(request, &decoded)) {
@@ -1776,8 +1882,11 @@ noun m38_resource_abi_dispatch(noun request)
         result = d5_dispatch_snapshot(decoded.first);
     else
         result = d5_dispatch_restore(decoded.first, decoded.second);
+    noun owned = result == g_result_root ? result : d5_result_stage(result);
     g_in_flight = 0;
-    return result;
+    if (owned == NOUN_ZERO || !heap_scratch_rewind(scratch_mark))
+        return NOUN_ZERO;
+    return owned;
 }
 
 static int d5_pill_source(const volatile uint8_t **base, uint64_t *available)
@@ -1843,20 +1952,133 @@ static void d5_sha256_text(noun value)
     }
 }
 
-static void d5_identity_text(const uint8_t identity[32])
-{
-    static const char digits[] = "0123456789abcdef";
-    for (uint32_t i = 0; i < 32; i++) {
-        uart_putc(digits[identity[i] >> 4]);
-        uart_putc(digits[identity[i] & 0xf]);
-    }
-}
-
 static void d5_terminal(const char *status)
 {
     uart_puts("M38D5 TERMINAL status=");
     uart_puts(status);
     uart_puts("\r\n");
+}
+
+static void d5_digest_text(const uint8_t digest[32])
+{
+    static const char digits[] = "0123456789abcdef";
+    for (uint32_t i = 0; i < 32; i++) {
+        uart_putc(digits[digest[i] >> 4]);
+        uart_putc(digits[digest[i] & 0xf]);
+    }
+}
+
+/* Authority fingerprint used only by the compiled hostile witness.  It
+ * covers the private catalog and every slot field, including state and the
+ * latest snapshot digest, plus the allocator ownership markers and the
+ * publication count. */
+static void d5_authority_digest(uint8_t digest[32])
+{
+    sha256_ctx_t context;
+    sha256_init(&context);
+    sha256_update(&context, (const uint8_t *)g_catalog, sizeof g_catalog);
+    sha256_update(&context, (const uint8_t *)g_slots, sizeof g_slots);
+    sha256_update(&context, (const uint8_t *)&g_publications, sizeof g_publications);
+    uint64_t persist_selector = heap_persist_selector();
+    uint64_t persist_cells = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t scratch_mark = heap_scratch_mark();
+    sha256_update(&context, (const uint8_t *)&persist_selector, sizeof persist_selector);
+    sha256_update(&context, (const uint8_t *)&persist_cells, sizeof persist_cells);
+    sha256_update(&context, (const uint8_t *)&scratch_mark, sizeof scratch_mark);
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++) {
+        uint8_t item[32] = {0};
+        if (g_catalog[i].admitted) {
+            jam_admission_budget_t budget;
+            jam_admission_budget_init(&budget, D5_JAM_WORK_LIMIT);
+            (void)d5_jam_digest(g_catalog[i].core, item, &budget);
+            sha256_update(&context, item, sizeof item);
+            jam_admission_budget_init(&budget, D5_JAM_WORK_LIMIT);
+            (void)d5_jam_digest(g_catalog[i].admission, item, &budget);
+        }
+        sha256_update(&context, item, sizeof item);
+    }
+    sha256_final(&context, digest);
+}
+
+static int d5_result_status_reason(noun result, uint32_t *status,
+                                   uint32_t *reason)
+{
+    noun tag, body, fields[3];
+    if (!d5_pair(result, &tag, &body))
+        return 0;
+    if (!d5_atom_is(tag, TAG_RESULT))
+        return 0;
+    if (!d5_record(body, fields, 3))
+        return 0;
+    if (!d5_u(fields[1], 0xFF, status))
+        return 0;
+    *reason = 0;
+    if (*status == D5_STATUS_REFUSE) {
+        noun reason_tag, reason_body, reason_fields[3];
+        if (!d5_record(fields[2], reason_fields, 2))
+            return 0;
+        if (!d5_pair(reason_fields[0], &reason_tag, &reason_body)) {
+            return 0;
+        }
+        if (!d5_atom_is(reason_tag, TAG_REASON))
+            return 0;
+        if (!d5_record(reason_body, reason_fields, 3))
+            return 0;
+        if (!d5_u(reason_fields[1], 0xFF, reason))
+            return 0;
+    }
+    return 1;
+}
+
+static const char *d5_operation_name(uint32_t operation)
+{
+    switch (operation) {
+    case D5_OP_LOAD: return "LOAD";
+    case D5_OP_POKE: return "POKE";
+    case D5_OP_PEEK: return "PEEK";
+    case D5_OP_SNAPSHOT: return "SNAPSHOT";
+    case D5_OP_RESTORE: return "RESTORE";
+    default: return "MALFORMED";
+    }
+}
+
+static const char *d5_status_name(uint32_t status)
+{
+    switch (status) {
+    case D5_STATUS_LOAD: return "loaded";
+    case D5_STATUS_POKE: return "poke-commit";
+    case D5_STATUS_PEEK: return "peek";
+    case D5_STATUS_SNAPSHOT: return "snapshot";
+    case D5_STATUS_RESTORE: return "restore";
+    case D5_STATUS_REFUSE: return "refuse";
+    default: return "unknown";
+    }
+}
+
+#if defined(M38_D5_NATIVE_WITNESS)
+static int d5_decode_witness_control(noun item, uint32_t *kind, uint64_t *value)
+{
+    noun tag, body, fields[2];
+    if (!d5_pair(item, &tag, &body) || !d5_record(body, fields, 2)
+        || !d5_atom_is(fields[0], "m38-d5-r-native-test-control-v1")
+        || !noun_is_direct(fields[1]))
+        return 0;
+    if (d5_atom_is(tag, "m38-d5-r-native-cap-ops"))
+        *kind = 1;
+    else if (d5_atom_is(tag, "m38-d5-r-native-cap-cells"))
+        *kind = 2;
+    else if (d5_atom_is(tag, "m38-d5-r-native-reenter"))
+        *kind = 3;
+    else
+        return 0;
+    *value = direct_val(fields[1]);
+    return 1;
+}
+#endif
+
+static int d5_decode_ingress(noun value, noun *items, uint32_t *count)
+{
+    return d5_list(value, items, 64u, count) && *count != 0;
 }
 
 void m38_resource_abi_boot(void)
@@ -1873,179 +2095,154 @@ void m38_resource_abi_boot(void)
         d5_terminal("refuse");
         return;
     }
+
     for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
         g_catalog[i] = (d5_catalog_t){0};
     for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
         g_slots[i] = (d5_slot_t){.generation = 1};
+    g_publications = 0;
     g_in_flight = 0;
+    g_result_cell_count = 0;
+    g_result_root = NOUN_ZERO;
+#if defined(M38_D5_NATIVE_WITNESS)
+    g_witness_ops_limit = 0;
+    g_witness_cells_limit = 0;
+    g_witness_reenter_next = 0;
+    g_witness_nested_status = 0;
+    g_witness_nested_reason = 0;
+#endif
+
     heap_scratch_reset();
     heap_set_mode(HEAP_MODE_SCRATCH);
-    noun request;
-    if (!d5_decode_pill(&request)) {
+    noun ingress_noun;
+    if (!d5_decode_pill(&ingress_noun)) {
         if (noun_tx_active())
             noun_tx_abort();
         uart_puts("M38D5 REFUSE malformed-input\r\n");
         d5_terminal("refuse");
         return;
     }
-    noun load = m38_resource_abi_dispatch(request);
     if (noun_tx_active())
         noun_tx_commit();
-    if (!noun_is_cell(load)) {
-        uart_puts("M38D5 REFUSE load\r\n");
+
+    noun ingress[64];
+    uint32_t ingress_count;
+    if (!d5_decode_ingress(ingress_noun, ingress, &ingress_count)) {
+        uart_puts("M38D5 REFUSE malformed-ingress\r\n");
         d5_terminal("refuse");
         return;
     }
-    noun load_tag, load_body, load_result_fields[3] = {0};
-    if (!d5_pair(load, &load_tag, &load_body)
-        || !d5_atom_is(load_tag, TAG_RESULT)
-        || !d5_record(load_body, load_result_fields, 3)
-        || !noun_is_direct(load_result_fields[1])
-        || direct_val(load_result_fields[1]) != D5_STATUS_LOAD) {
-        uart_puts("M38D5 REFUSE load-shape\r\n");
-        d5_terminal("refuse");
-        return;
+
+    int witness_ok = 1;
+    for (uint32_t i = 0; i < ingress_count; i++) {
+        uint32_t operation = 0;
+        d5_request_t decoded;
+        int request_valid = d5_decode_request(ingress[i], &decoded);
+        if (request_valid)
+            operation = decoded.operation;
+#if defined(M38_D5_NATIVE_WITNESS)
+        uint32_t control_kind = 0;
+        uint64_t control_value = 0;
+        if (!request_valid && d5_decode_witness_control(ingress[i],
+                                                        &control_kind,
+                                                        &control_value)) {
+            if (control_kind == 1)
+                g_witness_ops_limit = control_value;
+            else if (control_kind == 2)
+                g_witness_cells_limit = control_value;
+            else
+                g_witness_reenter_next = 1;
+            uart_puts("M38D5 CONTROL index=");
+            d5_hex64(i + 1);
+            uart_puts(" kind=");
+            uart_puts(control_kind == 1 ? "cap-ops" :
+                      control_kind == 2 ? "cap-cells" : "reenter");
+            uart_puts(" value=");
+            d5_hex64(control_value);
+            uart_puts("\r\n");
+            continue;
+        }
+#endif
+
+        uint8_t before[32], after[32];
+        d5_authority_digest(before);
+        uint64_t scratch_before = heap_scratch_mark();
+#if defined(M38_D5_NATIVE_WITNESS)
+        g_witness_nested_status = 0;
+        g_witness_nested_reason = 0;
+#endif
+        noun result = m38_resource_abi_dispatch(ingress[i]);
+        uint64_t scratch_after = heap_scratch_mark();
+        d5_authority_digest(after);
+
+        uint32_t status = 0, reason = 0;
+        int result_valid = d5_result_status_reason(result, &status, &reason);
+        int invariant = result_valid && scratch_before == scratch_after;
+        if (result_valid && status == D5_STATUS_REFUSE)
+            invariant = invariant && d5_same_bytes(before, after, sizeof before);
+        if (operation == D5_OP_PEEK && result_valid)
+            invariant = invariant && d5_same_bytes(before, after, sizeof before);
+        if (!result_valid)
+            witness_ok = 0;
+        if (!invariant)
+            witness_ok = 0;
+
+        uart_puts("M38D5 INGRESS index=");
+        d5_hex64(i + 1);
+        uart_puts(" operation=");
+        uart_puts(d5_operation_name(operation));
+        uart_puts(" status=");
+        uart_puts(result_valid ? d5_status_name(status) : "invalid");
+        uart_puts(" reason=");
+        d5_hex64(reason);
+        uart_puts(" result_sha256=");
+        if (result_valid)
+            d5_sha256_text(result);
+        else
+            uart_puts("invalid");
+        uart_puts(" authority_before_sha256=");
+        d5_digest_text(before);
+        uart_puts(" authority_after_sha256=");
+        d5_digest_text(after);
+        uart_puts(" scratch_before=");
+        d5_hex64(scratch_before);
+        uart_puts(" scratch_after=");
+        d5_hex64(scratch_after);
+        uart_puts(" result_cells=");
+        d5_hex64(g_result_cell_count);
+        uart_puts(" invariant=");
+        uart_puts(invariant ? "pass" : "fail");
+#if defined(M38_D5_NATIVE_WITNESS)
+        if (g_witness_nested_status != 0) {
+            uart_puts(" nested_status=");
+            d5_hex64(g_witness_nested_status);
+            uart_puts(" nested_reason=");
+            d5_hex64(g_witness_nested_reason);
+        }
+#endif
+        if (result_valid && status == D5_STATUS_POKE) {
+            noun result_tag, result_body, result_fields[3], poke_fields[4];
+            noun metrics_tag, metrics_body;
+            noun metrics_fields[6];
+            if (d5_pair(result, &result_tag, &result_body)
+                && d5_record(result_body, result_fields, 3)
+                && d5_record(result_fields[2], poke_fields, 4)
+                && d5_pair(poke_fields[3], &metrics_tag, &metrics_body)
+                && d5_record(metrics_body, metrics_fields, 6)
+                && noun_is_direct(metrics_fields[1])
+                && noun_is_direct(metrics_fields[2])
+                && noun_is_direct(metrics_fields[3])) {
+                uart_puts(" ops=");
+                d5_hex64(direct_val(metrics_fields[1]));
+                uart_puts(" cells=");
+                d5_hex64(direct_val(metrics_fields[2]));
+                uart_puts(" stack=");
+                d5_hex64(direct_val(metrics_fields[3]));
+            } else {
+                witness_ok = 0;
+            }
+        }
+        uart_puts("\r\n");
     }
-    noun loaded_fields[2];
-    noun handle = d5_handle(1, 1);
-    if (!d5_record(load_result_fields[2], loaded_fields, 2)) {
-        uart_puts("M38D5 REFUSE load-body\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    uart_puts("M38D5 LOAD status=loaded slot=1 generation=1 handle_sha256=");
-    d5_sha256_text(handle);
-    uart_puts(" state_sha256=");
-    d5_sha256_text(loaded_fields[1]);
-    uart_puts(" result_sha256=");
-    d5_sha256_text(load);
-    uart_puts("\r\n");
-    uint8_t core_id[32];
-    d5_catalog_t *catalog = &g_catalog[g_slots[0].catalog];
-    for (uint32_t i = 0; i < 32; i++)
-        core_id[i] = catalog->core_id[i];
-    d5_plan_t plan;
-    if (!d5_parse_plan(catalog->core, &plan)) {
-        uart_puts("M38D5 REFUSE plan\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    noun stimulus_values[D5_MAX_WITH];
-    const d5_type_t *type = d5_find_type(&plan, plan.instance_types[0]);
-    const d5_event_t *input = 0;
-    for (uint32_t i = 0; i < type->event_count; i++)
-        if (type->events[i].direction == 0) { input = &type->events[i]; break; }
-    if (!input) {
-        uart_puts("M38D5 REFUSE stimulus\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    for (uint32_t i = 0; i < input->with_count; i++)
-        stimulus_values[i] = input->with_ids[i] <= type->value_count
-            && type->values[input->with_ids[i] - 1].type == D5_TYPE_BOOL ? direct(0) : direct(12);
-    noun typed[D5_MAX_WITH];
-    for (uint32_t i = 0; i < input->with_count; i++) {
-        noun vf[3] = {direct(input->with_ids[i]),
-                      direct(type->values[input->with_ids[i] - 1].type), stimulus_values[i]};
-        typed[i] = d5_record_build(vf, 3);
-    }
-    noun stimulus_fields[5] = {d5_atom(TAG_STIMULUS_SCHEMA),
-                               d5_core_descriptor(d5_digest_atom(core_id)), direct(1),
-                               direct(input->id), d5_list_build(typed, input->with_count)};
-    noun stimulus_body = d5_record_build(stimulus_fields, 5);
-    noun stimulus = d5_pair_build(d5_atom(TAG_STIMULUS), stimulus_body);
-    noun poke_request_fields[2] = {handle, stimulus};
-    noun poke_args = d5_record_build(poke_request_fields, 2);
-    noun poke_request_body[3] = {d5_atom(TAG_REQUEST_SCHEMA), direct(D5_OP_POKE), poke_args};
-    noun poke_request = d5_pair_build(d5_atom(TAG_REQUEST), d5_record_build(poke_request_body, 3));
-    noun poke = m38_resource_abi_dispatch(poke_request);
-    if (!d5_result_is(poke, D5_STATUS_POKE)) {
-        uart_puts("M38D5 REFUSE poke\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    uart_puts("M38D5 POKE status=poke-commit ops=");
-    d5_hex64(nock_ops_used());
-    uart_puts(" cells=");
-    d5_hex64(nock_cells_used());
-    uart_puts(" result_sha256=");
-    d5_sha256_text(poke);
-    noun poke_tag, poke_body, poke_fields[4];
-    if (d5_pair(poke, &poke_tag, &poke_body) && d5_record(poke_body, poke_fields, 3)
-        && d5_record(poke_fields[2], poke_fields, 4)) {
-        uart_puts(" next_sha256="); d5_sha256_text(poke_fields[0]);
-        uart_puts(" effects_sha256="); d5_sha256_text(poke_fields[1]);
-        uart_puts(" observations_sha256="); d5_sha256_text(poke_fields[2]);
-        uart_puts(" metrics_sha256="); d5_sha256_text(poke_fields[3]);
-    }
-    uart_puts("\r\n");
-    noun peek_selector_fields[3] = {d5_atom(TAG_SELECTOR_SCHEMA), direct(1), direct(1)};
-    noun peek_selector = d5_pair_build(d5_atom(TAG_SELECTOR), d5_record_build(peek_selector_fields, 3));
-    noun peek_fields[2] = {handle, peek_selector};
-    noun peek_args = d5_record_build(peek_fields, 2);
-    noun peek_body[3] = {d5_atom(TAG_REQUEST_SCHEMA), direct(D5_OP_PEEK), peek_args};
-    noun peek_request = d5_pair_build(d5_atom(TAG_REQUEST), d5_record_build(peek_body, 3));
-    noun peek_result = m38_resource_abi_dispatch(peek_request);
-    if (!d5_result_is(peek_result, D5_STATUS_PEEK)) {
-        uart_puts("M38D5 REFUSE peek\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    uart_puts("M38D5 PEEK status=peek result_sha256=");
-    d5_sha256_text(peek_result);
-    uart_puts("\r\n");
-    noun snapshot_body[3] = {d5_atom(TAG_REQUEST_SCHEMA), direct(D5_OP_SNAPSHOT), handle};
-    noun snapshot_request = d5_pair_build(d5_atom(TAG_REQUEST), d5_record_build(snapshot_body, 3));
-    noun snapshot_result = m38_resource_abi_dispatch(snapshot_request);
-    if (!d5_result_is(snapshot_result, D5_STATUS_SNAPSHOT)) {
-        uart_puts("M38D5 REFUSE snapshot\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    uart_puts("M38D5 SNAPSHOT status=snapshot result_sha256=");
-    d5_sha256_text(snapshot_result);
-    uart_puts("\r\n");
-    noun snapshot_result_tag, snapshot_result_body, sr[3];
-    noun snapshot;
-    if (!d5_pair(snapshot_result, &snapshot_result_tag, &snapshot_result_body)
-        || !d5_record(snapshot_result_body, sr, 3)) {
-        uart_puts("M38D5 REFUSE snapshot-shape\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    snapshot = sr[2];
-    noun poke_again = m38_resource_abi_dispatch(poke_request);
-    if (!d5_result_is(poke_again, D5_STATUS_POKE)) {
-        uart_puts("M38D5 REFUSE second-poke\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    uart_puts("M38D5 POKE status=poke-commit result_sha256=");
-    d5_sha256_text(poke_again);
-    uart_puts("\r\n");
-    noun restore_fields[2] = {handle, snapshot};
-    noun restore_args = d5_record_build(restore_fields, 2);
-    noun restore_body[3] = {d5_atom(TAG_REQUEST_SCHEMA), direct(D5_OP_RESTORE), restore_args};
-    noun restore_request = d5_pair_build(d5_atom(TAG_REQUEST), d5_record_build(restore_body, 3));
-    noun restore_result = m38_resource_abi_dispatch(restore_request);
-    if (!d5_result_is(restore_result, D5_STATUS_RESTORE)) {
-        uart_puts("M38D5 REFUSE restore\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    uart_puts("M38D5 RESTORE status=restore result_sha256=");
-    d5_sha256_text(restore_result);
-    uart_puts("\r\n");
-    noun final_poke = m38_resource_abi_dispatch(poke_request);
-    if (!d5_result_is(final_poke, D5_STATUS_POKE)) {
-        uart_puts("M38D5 REFUSE final-poke\r\n");
-        d5_terminal("refuse");
-        return;
-    }
-    uart_puts("M38D5 POKE status=poke-commit result_sha256=");
-    d5_sha256_text(final_poke);
-    uart_puts("\r\nM38D5 CORE identity=");
-    d5_identity_text(core_id);
-    uart_puts("\r\n");
-    d5_terminal("pass");
+    d5_terminal(witness_ok ? "pass" : "refuse");
 }
