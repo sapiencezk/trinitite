@@ -1884,7 +1884,8 @@ noun m38_resource_abi_dispatch(noun request)
         result = d5_dispatch_restore(decoded.first, decoded.second);
     noun owned = result == g_result_root ? result : d5_result_stage(result);
     g_in_flight = 0;
-    if (owned == NOUN_ZERO || !heap_scratch_rewind(scratch_mark))
+    int rewound = heap_scratch_rewind(scratch_mark);
+    if (owned == NOUN_ZERO || !rewound)
         return NOUN_ZERO;
     return owned;
 }
