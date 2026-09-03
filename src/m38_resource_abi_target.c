@@ -1119,7 +1119,17 @@ static noun d5_reason(uint32_t code, uint32_t detail)
  * is reset only when the next dispatch starts, after the caller has had the
  * current call's result available for serialization/copy.  Transient nouns
  * stay in the scratch epoch and are rewound at the dispatch boundary; no
- * returned noun points into that reclaimable epoch. */
+ * returned noun points into that reclaimable epoch.  The source-to-result
+ * map is open-addressed so staging remains linear in the copied graph. */
+static uint32_t d5_result_hash(uint32_t source_ptr)
+{
+    uint32_t value = source_ptr >> 3;
+    value ^= value >> 16;
+    value *= 0x7feb352dU;
+    value ^= value >> 15;
+    return value & (D5_RESULT_CELL_CAPACITY - 1u);
+}
+
 static noun d5_result_copy_rec(noun source, uint32_t depth, int *ok)
 {
     if (!noun_is_cell(source))
@@ -1129,17 +1139,23 @@ static noun d5_result_copy_rec(noun source, uint32_t depth, int *ok)
         return NOUN_ZERO;
     }
     uint32_t source_ptr = cell_ptr(source);
-    for (uint32_t i = 0; i < g_result_cell_count; i++)
-        if (g_result_source[i] == source_ptr)
-            return g_result_value[i];
+    uint32_t map_slot = d5_result_hash(source_ptr);
+    for (uint32_t probe = 0; probe < D5_RESULT_CELL_CAPACITY; probe++) {
+        uint32_t mapped_source = g_result_source[map_slot];
+        if (mapped_source == 0)
+            break;
+        if (mapped_source == source_ptr)
+            return g_result_value[map_slot];
+        map_slot = (map_slot + 1u) & (D5_RESULT_CELL_CAPACITY - 1u);
+    }
     if (g_result_cell_count >= D5_RESULT_CELL_CAPACITY) {
         *ok = 0;
         return NOUN_ZERO;
     }
     uint32_t index = g_result_cell_count++;
     noun result = cell_noun((uint32_t)(uintptr_t)&g_result_cells[index]);
-    g_result_source[index] = source_ptr;
-    g_result_value[index] = result;
+    g_result_source[map_slot] = source_ptr;
+    g_result_value[map_slot] = result;
     g_result_cells[index].refcount = 1;
     g_result_cells[index]._pad = 0;
     g_result_cells[index].head = NOUN_ZERO;
@@ -1152,6 +1168,8 @@ static noun d5_result_copy_rec(noun source, uint32_t depth, int *ok)
 
 static noun d5_result_stage(noun source)
 {
+    for (uint32_t i = 0; i < D5_RESULT_CELL_CAPACITY; i++)
+        g_result_source[i] = 0;
     g_result_cell_count = 0;
     g_result_root = NOUN_ZERO;
     int ok = 1;
@@ -1673,6 +1691,7 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
     g_witness_cells_limit = 0;
 #endif
     nock_budget_set_limits(max_ops, max_cells);
+    nock_eval_stack_set_limit(D5_POLICY_MAX_STACK);
     int jumped = setjmp(nock_abort);
     if (jumped != 0) {
         uint64_t reason = nock_budget_abort_reason();
@@ -1684,7 +1703,7 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
     uint64_t ops = nock_ops_used();
     uint64_t cells = nock_cells_used();
     nock_budget_finish();
-    uint64_t stack_delta = nock_eval_stack_peak();
+    uint64_t evaluator_peak_frames = nock_eval_stack_peak();
     noun product_tag, product_body, pf[7];
     if (!d5_pair(product, &product_tag, &product_body)
         || !d5_atom_is(product_tag, "m38-product-v2")
@@ -1712,7 +1731,7 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
     }
     noun effects = d5_effects(&plan, pf[4]);
     noun observations = d5_observations(pf[3]);
-    noun metrics = d5_metrics(ops, cells, stack_delta, queue, work);
+    noun metrics = d5_metrics(ops, cells, evaluator_peak_frames, queue, work);
     noun next = d5_state_noun(&plan, &candidate, slot_number, slot->generation,
                               catalog->core_id, D5_STATE_NEXT);
     if (effects == NOUN_ZERO || observations == NOUN_ZERO || metrics == NOUN_ZERO
@@ -1973,6 +1992,7 @@ static void d5_digest_text(const uint8_t digest[32])
  * covers the private catalog and every slot field, including state and the
  * latest snapshot digest, plus the allocator ownership markers and the
  * publication count. */
+#if defined(M38_D5_NATIVE_WITNESS)
 static void d5_authority_digest(uint8_t digest[32])
 {
     sha256_ctx_t context;
@@ -2000,6 +2020,7 @@ static void d5_authority_digest(uint8_t digest[32])
     }
     sha256_final(&context, digest);
 }
+#endif
 
 static int d5_result_status_reason(noun result, uint32_t *status,
                                    uint32_t *reason)
@@ -2165,8 +2186,10 @@ void m38_resource_abi_boot(void)
         }
 #endif
 
-        uint8_t before[32], after[32];
+        uint8_t before[32] = {0}, after[32] = {0};
+#if defined(M38_D5_NATIVE_WITNESS)
         d5_authority_digest(before);
+#endif
         uint64_t scratch_before = heap_scratch_mark();
 #if defined(M38_D5_NATIVE_WITNESS)
         g_witness_nested_status = 0;
@@ -2174,13 +2197,17 @@ void m38_resource_abi_boot(void)
 #endif
         noun result = m38_resource_abi_dispatch(ingress[i]);
         uint64_t scratch_after = heap_scratch_mark();
+#if defined(M38_D5_NATIVE_WITNESS)
         d5_authority_digest(after);
+#endif
 
         uint32_t status = 0, reason = 0;
         int result_valid = d5_result_status_reason(result, &status, &reason);
         int invariant = result_valid && scratch_before == scratch_after;
+#if defined(M38_D5_NATIVE_WITNESS)
         if (result_valid && status == D5_STATUS_REFUSE)
             invariant = invariant && d5_same_bytes(before, after, sizeof before);
+#endif
         if (operation == D5_OP_PEEK && result_valid)
             invariant = invariant && d5_same_bytes(before, after, sizeof before);
         if (!result_valid)

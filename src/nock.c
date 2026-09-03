@@ -29,8 +29,7 @@ static uint64_t g_budget_abort_reason;
 static int (*g_wall_check)(void);
 static uint64_t g_eval_stack_current;
 static uint64_t g_eval_stack_peak;
-
-#define NOCK_EVALUATOR_STACK_LIMIT 1024ULL
+static uint64_t g_eval_stack_limit;
 
 void nock_budget_set(uint64_t max_ops)
 {
@@ -46,12 +45,15 @@ void nock_budget_set_limits(uint64_t max_ops, uint64_t max_cells)
     g_budget_abort_reason = 0;
     g_eval_stack_current = 0;
     g_eval_stack_peak = 0;
+    g_eval_stack_limit = 0;
 }
 
 void nock_budget_finish(void)
 {
     g_budget_max = 0;
     g_cell_budget_max = 0;
+    g_eval_stack_current = 0;
+    g_eval_stack_limit = 0;
 }
 
 uint64_t nock_budget_get(void)
@@ -77,6 +79,13 @@ uint64_t nock_budget_abort_reason(void)
 uint64_t nock_eval_stack_peak(void)
 {
     return g_eval_stack_peak;
+}
+
+void nock_eval_stack_set_limit(uint64_t limit)
+{
+    g_eval_stack_current = 0;
+    g_eval_stack_peak = 0;
+    g_eval_stack_limit = limit;
 }
 
 void nock_wall_check_set(int (*fn)(void))
@@ -979,7 +988,9 @@ loop:
 static noun __attribute__((noinline)) nock_eval(noun subject, noun formula,
                                                 const wilt_t *jets, sky_fn_t sky)
 {
-    if (g_eval_stack_current >= NOCK_EVALUATOR_STACK_LIMIT) {
+    if (g_eval_stack_limit == 0)
+        return nock_eval_inner(subject, formula, jets, sky);
+    if (g_eval_stack_current >= g_eval_stack_limit) {
         g_budget_abort_reason = 4;
         longjmp(nock_abort, NOCK_ABORT_BUDGET);
     }
