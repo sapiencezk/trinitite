@@ -1692,14 +1692,21 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
 #endif
     nock_budget_set_limits(max_ops, max_cells);
     nock_eval_stack_set_limit(D5_POLICY_MAX_STACK);
+    jmp_buf saved_abort;
+    __builtin_memcpy(saved_abort, nock_abort, sizeof saved_abort);
     int jumped = setjmp(nock_abort);
     if (jumped != 0) {
         uint64_t reason = nock_budget_abort_reason();
         nock_budget_finish();
+        __builtin_memcpy(nock_abort, saved_abort, sizeof saved_abort);
         g_eval_reason = reason == 1 || reason == 3 ? 7 : 8;
         return d5_eval_abort_refusal((uint32_t)g_eval_reason);
     }
     noun product = nock(subject, plan.formula);
+    /* D5 temporarily owns the evaluator recovery point.  Restore the caller's
+     * context before later boundary work, so a future unrelated crash cannot
+     * jump into this returned frame. */
+    __builtin_memcpy(nock_abort, saved_abort, sizeof saved_abort);
     uint64_t ops = nock_ops_used();
     uint64_t cells = nock_cells_used();
     nock_budget_finish();

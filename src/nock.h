@@ -27,7 +27,7 @@ typedef noun (*sky_fn_t)(noun path);
 typedef struct { noun cape; noun data; } sock_t;
 
 /* ── Wilt: scoped %wild registration list ────────────────────────────────── */
-/* Lives on the C stack, scoped to the hinted computation.                  */
+/* The evaluator owns one bounded slot per logical frame.                  */
 #define WILT_MAX 16
 typedef struct { noun label; sock_t sock; } wilt_entry_t;
 typedef struct { int len; wilt_entry_t e[WILT_MAX]; } wilt_t;

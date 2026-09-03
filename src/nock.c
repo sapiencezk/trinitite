@@ -29,7 +29,9 @@ static uint64_t g_budget_abort_reason;
 static int (*g_wall_check)(void);
 static uint64_t g_eval_stack_current;
 static uint64_t g_eval_stack_peak;
-static uint64_t g_eval_stack_limit;
+#define NOCK_EVALUATOR_STACK_LIMIT 1024ULL
+static uint64_t g_eval_stack_limit = NOCK_EVALUATOR_STACK_LIMIT;
+static wilt_t g_eval_wild[NOCK_EVALUATOR_STACK_LIMIT];
 
 void nock_budget_set(uint64_t max_ops)
 {
@@ -45,7 +47,7 @@ void nock_budget_set_limits(uint64_t max_ops, uint64_t max_cells)
     g_budget_abort_reason = 0;
     g_eval_stack_current = 0;
     g_eval_stack_peak = 0;
-    g_eval_stack_limit = 0;
+    g_eval_stack_limit = NOCK_EVALUATOR_STACK_LIMIT;
 }
 
 void nock_budget_finish(void)
@@ -53,7 +55,7 @@ void nock_budget_finish(void)
     g_budget_max = 0;
     g_cell_budget_max = 0;
     g_eval_stack_current = 0;
-    g_eval_stack_limit = 0;
+    g_eval_stack_limit = NOCK_EVALUATOR_STACK_LIMIT;
 }
 
 uint64_t nock_budget_get(void)
@@ -85,7 +87,7 @@ void nock_eval_stack_set_limit(uint64_t limit)
 {
     g_eval_stack_current = 0;
     g_eval_stack_peak = 0;
-    g_eval_stack_limit = limit;
+    g_eval_stack_limit = limit == 0 ? NOCK_EVALUATOR_STACK_LIMIT : limit;
 }
 
 void nock_wall_check_set(int (*fn)(void))
@@ -703,7 +705,8 @@ static void __attribute__((noinline)) tame_compile(noun clue) {
  * Internal evaluator body.  Recursive calls go through the guarded wrapper
  * below so that `jets` and `sky` are threaded through the entire computation.
  *
- * `wild_buf` holds at most one %wild registration set per stack frame.
+ * `wild_buf` holds at most one %wild registration set per logical frame in
+ * the bounded evaluator table.
  * When op 11 fires a %wild hint, we parse the clue into `wild_buf` and
  * update `jets` to point to it.  Because `goto loop` keeps us in the
  * same frame, `wild_buf` stays live until the frame returns.
@@ -713,7 +716,7 @@ static noun nock_eval(noun subject, noun formula,
 
 static noun nock_eval_inner(noun subject, noun formula,
                             const wilt_t *jets, sky_fn_t sky) {
-    wilt_t wild_buf;    /* local %wild registration buffer */
+    wilt_t *wild_buf = &g_eval_wild[g_eval_stack_current - 1];
 loop:
     nock_budget_tick();
     if (!noun_is_cell(formula))
@@ -947,8 +950,8 @@ loop:
 
         case HINT_WILD:
             /* Parse $wilt clue into wild_buf; scope registrations into d */
-            parse_wilt(clue, &wild_buf);
-            jets = &wild_buf;
+            parse_wilt(clue, wild_buf);
+            jets = wild_buf;
             break;
 
         case HINT_SLOG:
@@ -988,8 +991,6 @@ loop:
 static noun __attribute__((noinline)) nock_eval(noun subject, noun formula,
                                                 const wilt_t *jets, sky_fn_t sky)
 {
-    if (g_eval_stack_limit == 0)
-        return nock_eval_inner(subject, formula, jets, sky);
     if (g_eval_stack_current >= g_eval_stack_limit) {
         g_budget_abort_reason = 4;
         longjmp(nock_abort, NOCK_ABORT_BUDGET);
