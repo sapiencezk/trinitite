@@ -2070,12 +2070,11 @@ static void d5_digest_text(const uint8_t digest[32])
     }
 }
 
-/* Authority fingerprint used only by the compiled hostile witness.  It
- * covers the private catalog and every slot field, including state and the
- * latest snapshot digest, plus the allocator ownership markers and the
- * publication count. */
+/* In-process mutation fingerprint used only by the compiled hostile witness.
+ * This is a raw-struct diagnostic fingerprint, not a canonical cross-run
+ * authority identity. */
 #if defined(M38_D5_NATIVE_WITNESS)
-static void d5_authority_digest(uint8_t digest[32])
+static void d5_mutation_fingerprint(uint8_t digest[32])
 {
     sha256_ctx_t context;
     sha256_init(&context);
@@ -2103,6 +2102,64 @@ static void d5_authority_digest(uint8_t digest[32])
             (void)d5_jam_digest(g_catalog[i].admission, item, &budget);
         }
         sha256_update(&context, item, sizeof item);
+    }
+    sha256_final(&context, digest);
+}
+
+/* Canonical semantic authority excludes pointers, padding, allocator
+ * addresses, and other in-process representation details.  It is a stable
+ * encoding of the catalog/slot semantics only; publications, allocator
+ * counters, and diagnostic telemetry are witnessed separately. */
+static void d5_semantic_u32(sha256_ctx_t *context, uint32_t value)
+{
+    uint8_t bytes[4] = {
+        (uint8_t)value, (uint8_t)(value >> 8),
+        (uint8_t)(value >> 16), (uint8_t)(value >> 24),
+    };
+    sha256_update(context, bytes, sizeof bytes);
+}
+
+static void d5_semantic_u64(sha256_ctx_t *context, uint64_t value)
+{
+    uint8_t bytes[8];
+    for (uint32_t i = 0; i < sizeof bytes; i++)
+        bytes[i] = (uint8_t)(value >> (i * 8));
+    sha256_update(context, bytes, sizeof bytes);
+}
+
+static void d5_semantic_authority_digest(uint8_t digest[32])
+{
+    static const char domain[] =
+        "1499kernel:i2:m38-d5:semantic-authority:v1";
+    sha256_ctx_t context;
+    sha256_init(&context);
+    sha256_update(&context, (const uint8_t *)domain, sizeof domain - 1);
+    uint8_t zero = 0;
+    sha256_update(&context, &zero, 1);
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++) {
+        d5_semantic_u32(&context, g_catalog[i].admitted);
+        sha256_update(&context, g_catalog[i].core_id,
+                      sizeof g_catalog[i].core_id);
+        sha256_update(&context, g_catalog[i].admission_id,
+                      sizeof g_catalog[i].admission_id);
+    }
+    for (uint32_t i = 0; i < D5_SLOT_COUNT; i++) {
+        const d5_slot_t *slot = &g_slots[i];
+        d5_semantic_u32(&context, slot->used);
+        d5_semantic_u32(&context, slot->latest);
+        d5_semantic_u32(&context, slot->catalog);
+        d5_semantic_u64(&context, slot->generation);
+        d5_semantic_u32(&context, slot->state_kind);
+        for (uint32_t j = 0; j < D5_MAX_INSTANCES; j++) {
+            d5_semantic_u32(&context, slot->state.state_ids[j]);
+            for (uint32_t k = 0; k < D5_MAX_VALUES; k++)
+                d5_semantic_u32(&context, slot->state.values[j][k]);
+            d5_semantic_u32(&context, slot->snapshot_state.state_ids[j]);
+            for (uint32_t k = 0; k < D5_MAX_VALUES; k++)
+                d5_semantic_u32(&context, slot->snapshot_state.values[j][k]);
+        }
+        sha256_update(&context, slot->snapshot_digest,
+                      sizeof slot->snapshot_digest);
     }
     sha256_final(&context, digest);
 }
@@ -2228,34 +2285,55 @@ static int d5_decode_ingress(noun value, noun *items, uint32_t *count)
 
 #if defined(M38_D5_NATIVE_WITNESS)
 static void d5_ingest_abort(const char *kind, uint32_t code,
-                            const uint8_t before[32], uint64_t scratch_before,
+                            const uint8_t mutation_before[32],
+                            const uint8_t semantic_before[32],
+                            uint64_t scratch_mark_before,
+                            uint64_t scratch_cells_before,
+                            uint64_t persist_cells_before,
                             uint64_t atom_bytes_before,
                             uint64_t atom_occupancy_before,
                             uint64_t publications_before)
 {
-    uint8_t after[32];
-    uint64_t scratch_after = heap_scratch_mark();
+    uint8_t mutation_after[32], semantic_after[32];
+    uint64_t scratch_mark_after = heap_scratch_mark();
+    uint64_t scratch_cells_after = heap_cells_used(HEAP_MODE_SCRATCH);
+    uint64_t persist_cells_after = heap_cells_used(HEAP_MODE_PERSIST);
     uint64_t atom_bytes_after = atom_store_bytes_used();
     uint64_t atom_occupancy_after = atom_store_index_occupancy();
     uint64_t publications_after = g_publications;
-    d5_authority_digest(after);
-    int invariant = scratch_before == scratch_after
+    d5_mutation_fingerprint(mutation_after);
+    d5_semantic_authority_digest(semantic_after);
+    int invariant = scratch_cells_before == scratch_cells_after
+        && persist_cells_before == persist_cells_after
         && atom_bytes_before == atom_bytes_after
         && atom_occupancy_before == atom_occupancy_after
         && publications_before == publications_after
-        && d5_same_bytes(before, after, 32);
+        && d5_same_bytes(mutation_before, mutation_after, 32)
+        && d5_same_bytes(semantic_before, semantic_after, 32);
     uart_puts("M38D5 INGEST_ABORT kind=");
     uart_puts(kind);
     uart_puts(" code=");
     d5_hex64(code);
-    uart_puts(" authority_before_sha256=");
-    d5_digest_text(before);
-    uart_puts(" authority_after_sha256=");
-    d5_digest_text(after);
-    uart_puts(" scratch_before=");
-    d5_hex64(scratch_before);
-    uart_puts(" scratch_after=");
-    d5_hex64(scratch_after);
+    uart_puts(" mutation_fingerprint_before_sha256=");
+    d5_digest_text(mutation_before);
+    uart_puts(" mutation_fingerprint_after_sha256=");
+    d5_digest_text(mutation_after);
+    uart_puts(" semantic_authority_before_sha256=");
+    d5_digest_text(semantic_before);
+    uart_puts(" semantic_authority_after_sha256=");
+    d5_digest_text(semantic_after);
+    uart_puts(" scratch_mark_before=");
+    d5_hex64(scratch_mark_before);
+    uart_puts(" scratch_mark_after=");
+    d5_hex64(scratch_mark_after);
+    uart_puts(" scratch_cells_before=");
+    d5_hex64(scratch_cells_before);
+    uart_puts(" scratch_cells_after=");
+    d5_hex64(scratch_cells_after);
+    uart_puts(" persist_cells_before=");
+    d5_hex64(persist_cells_before);
+    uart_puts(" persist_cells_after=");
+    d5_hex64(persist_cells_after);
     uart_puts(" atom_bytes_before=");
     d5_hex64(atom_bytes_before);
     uart_puts(" atom_bytes_after=");
@@ -2313,13 +2391,17 @@ void m38_resource_abi_boot(void)
 
     heap_scratch_reset();
     heap_set_mode(HEAP_MODE_SCRATCH);
-    uint64_t ingest_scratch_before = heap_scratch_mark();
+    uint64_t ingest_scratch_mark_before = heap_scratch_mark();
+    uint64_t ingest_scratch_cells_before = heap_cells_used(HEAP_MODE_SCRATCH);
+    uint64_t ingest_persist_cells_before = heap_cells_used(HEAP_MODE_PERSIST);
     uint64_t ingest_atom_bytes_before = atom_store_bytes_used();
     uint64_t ingest_atom_occupancy_before = atom_store_index_occupancy();
     uint64_t ingest_publications_before = g_publications;
-    uint8_t ingest_authority_before[32] = {0};
+    uint8_t ingest_mutation_before[32] = {0};
+    uint8_t ingest_semantic_before[32] = {0};
 #if defined(M38_D5_NATIVE_WITNESS)
-    d5_authority_digest(ingest_authority_before);
+    d5_mutation_fingerprint(ingest_mutation_before);
+    d5_semantic_authority_digest(ingest_semantic_before);
 #endif
     noun ingress_noun;
     cue_bounded_status_t cue_status;
@@ -2327,9 +2409,11 @@ void m38_resource_abi_boot(void)
         if (noun_tx_active())
             noun_tx_abort();
 #if defined(M38_D5_NATIVE_WITNESS)
-        (void)heap_scratch_rewind(ingest_scratch_before);
-        d5_ingest_abort("cue", (uint32_t)cue_status, ingest_authority_before,
-                        ingest_scratch_before, ingest_atom_bytes_before,
+        (void)heap_scratch_rewind(ingest_scratch_mark_before);
+        d5_ingest_abort("cue", (uint32_t)cue_status, ingest_mutation_before,
+                        ingest_semantic_before, ingest_scratch_mark_before,
+                        ingest_scratch_cells_before, ingest_persist_cells_before,
+                        ingest_atom_bytes_before,
                         ingest_atom_occupancy_before, ingest_publications_before);
 #endif
         uart_puts("M38D5 REFUSE malformed-input\r\n");
@@ -2343,15 +2427,48 @@ void m38_resource_abi_boot(void)
 #if defined(M38_D5_NATIVE_WITNESS)
         if (noun_tx_active())
             noun_tx_abort();
-        (void)heap_scratch_rewind(ingest_scratch_before);
-        d5_ingest_abort("ingress", 0, ingest_authority_before,
-                        ingest_scratch_before, ingest_atom_bytes_before,
+        (void)heap_scratch_rewind(ingest_scratch_mark_before);
+        d5_ingest_abort("ingress", 0, ingest_mutation_before,
+                        ingest_semantic_before, ingest_scratch_mark_before,
+                        ingest_scratch_cells_before, ingest_persist_cells_before,
+                        ingest_atom_bytes_before,
                         ingest_atom_occupancy_before, ingest_publications_before);
 #else
         if (noun_tx_active())
             noun_tx_abort();
 #endif
         uart_puts("M38D5 REFUSE malformed-ingress\r\n");
+        d5_terminal("refuse");
+        return;
+    }
+
+#if defined(M38_D5_NATIVE_WITNESS)
+    uint8_t preflight_controls[64] = {0};
+#endif
+    for (uint32_t i = 0; i < ingress_count; i++) {
+        d5_request_t preflight_request;
+        if (d5_decode_request(ingress[i], &preflight_request))
+            continue;
+#if defined(M38_D5_NATIVE_WITNESS)
+        uint32_t control_kind = 0;
+        uint64_t control_value = 0;
+        if (d5_decode_witness_control(ingress[i], &control_kind,
+                                      &control_value)) {
+            preflight_controls[i] = 1;
+            continue;
+        }
+#endif
+        if (noun_tx_active())
+            noun_tx_abort();
+#if defined(M38_D5_NATIVE_WITNESS)
+        (void)heap_scratch_rewind(ingest_scratch_mark_before);
+        d5_ingest_abort("ingress-request", 16, ingest_mutation_before,
+                        ingest_semantic_before, ingest_scratch_mark_before,
+                        ingest_scratch_cells_before, ingest_persist_cells_before,
+                        ingest_atom_bytes_before, ingest_atom_occupancy_before,
+                        ingest_publications_before);
+#endif
+        uart_puts("M38D5 REFUSE malformed-ingress-request\r\n");
         d5_terminal("refuse");
         return;
     }
@@ -2369,9 +2486,9 @@ void m38_resource_abi_boot(void)
 #if defined(M38_D5_NATIVE_WITNESS)
         uint32_t control_kind = 0;
         uint64_t control_value = 0;
-        if (!request_valid && d5_decode_witness_control(ingress[i],
-                                                        &control_kind,
-                                                        &control_value)) {
+        if (!request_valid && preflight_controls[i]
+            && d5_decode_witness_control(ingress[i], &control_kind,
+                                         &control_value)) {
             if (control_kind == 1)
                 g_witness_ops_limit = control_value;
             else if (control_kind == 2)
@@ -2398,7 +2515,7 @@ void m38_resource_abi_boot(void)
 
         uint8_t before[32] = {0}, after[32] = {0};
 #if defined(M38_D5_NATIVE_WITNESS)
-        d5_authority_digest(before);
+        d5_mutation_fingerprint(before);
 #endif
         uint64_t scratch_before = heap_scratch_mark();
 #if defined(M38_D5_NATIVE_WITNESS)
@@ -2408,7 +2525,7 @@ void m38_resource_abi_boot(void)
         noun result = m38_resource_abi_dispatch(ingress[i]);
         uint64_t scratch_after = heap_scratch_mark();
 #if defined(M38_D5_NATIVE_WITNESS)
-        d5_authority_digest(after);
+        d5_mutation_fingerprint(after);
 #endif
 
         uint32_t status = 0, reason = 0;
@@ -2438,9 +2555,9 @@ void m38_resource_abi_boot(void)
             d5_sha256_text(result);
         else
             uart_puts("invalid");
-        uart_puts(" authority_before_sha256=");
+        uart_puts(" mutation_fingerprint_before_sha256=");
         d5_digest_text(before);
-        uart_puts(" authority_after_sha256=");
+        uart_puts(" mutation_fingerprint_after_sha256=");
         d5_digest_text(after);
         uart_puts(" scratch_before=");
         d5_hex64(scratch_before);
