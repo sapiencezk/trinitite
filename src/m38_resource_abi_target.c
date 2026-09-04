@@ -45,6 +45,7 @@
 #define D5_SLOT_COUNT              8u
 #define D5_MAX_GENERATION 0xFFFFFFFFULL
 #define D5_RESULT_CELL_CAPACITY    32768u
+#define D5_NESTED_RESULT_CELL_CAPACITY 64u
 #define D5_RESULT_DEPTH_MAX         256u
 
 #define D5_TYPE_BOOL              1u
@@ -216,6 +217,15 @@ typedef struct {
     noun second;
 } d5_request_t;
 
+typedef struct {
+    cell_t *cells;
+    uint32_t *source;
+    noun *value;
+    uint32_t capacity;
+    uint32_t cell_count;
+    noun root;
+} d5_result_arena_t;
+
 static d5_catalog_t g_catalog[D5_CATALOG_CAPACITY];
 static d5_slot_t g_slots[D5_SLOT_COUNT];
 static uint64_t g_publications;
@@ -226,8 +236,20 @@ static volatile uint32_t g_eval_reason;
 static cell_t g_result_cells[D5_RESULT_CELL_CAPACITY];
 static uint32_t g_result_source[D5_RESULT_CELL_CAPACITY];
 static noun g_result_value[D5_RESULT_CELL_CAPACITY];
-static uint32_t g_result_cell_count;
-static noun g_result_root;
+static cell_t g_nested_result_cells[D5_NESTED_RESULT_CELL_CAPACITY];
+static uint32_t g_nested_result_source[D5_NESTED_RESULT_CELL_CAPACITY];
+static noun g_nested_result_value[D5_NESTED_RESULT_CELL_CAPACITY];
+static d5_result_arena_t g_result_arena = {
+    g_result_cells, g_result_source, g_result_value,
+    D5_RESULT_CELL_CAPACITY, 0, 0
+};
+static d5_result_arena_t g_nested_result_arena = {
+    g_nested_result_cells, g_nested_result_source, g_nested_result_value,
+    D5_NESTED_RESULT_CELL_CAPACITY, 0, 0
+};
+/* A witness may lower the next top-level result copy only.  The failed copy
+ * consumes the control, so its refusal can still be returned and retried. */
+static uint32_t g_result_stage_limit = D5_RESULT_CELL_CAPACITY;
 
 static int d5_result_status_reason(noun result, uint32_t *status,
                                    uint32_t *reason);
@@ -235,9 +257,12 @@ static int d5_result_status_reason(noun result, uint32_t *status,
 #if defined(M38_D5_NATIVE_WITNESS)
 static volatile uint64_t g_witness_ops_limit;
 static volatile uint64_t g_witness_cells_limit;
+static volatile uint64_t g_witness_stack_limit;
+static volatile uint32_t g_witness_result_cells_limit;
 static volatile uint8_t g_witness_reenter_next;
 static volatile uint32_t g_witness_nested_status;
 static volatile uint32_t g_witness_nested_reason;
+static volatile uint8_t g_witness_late_reentry_ok;
 #endif
 
 extern uint8_t _pill_embed_start[];
@@ -422,6 +447,18 @@ static int d5_domain_digest(noun value, const char *domain, uint8_t digest[32],
     blake3_hash(g_preimage, domain_len + 1u + (size_t)bytes, raw);
     for (uint32_t i = 0; i < 32; i++)
         digest[i] = raw[31u - i];
+    return 1;
+}
+
+static int d5_sha256_digest(noun value, uint8_t digest[32])
+{
+    const uint8_t *jammed;
+    uint64_t bytes;
+    jam_admission_budget_t budget;
+    jam_admission_budget_init(&budget, D5_JAM_WORK_LIMIT);
+    if (jam_encode_bytes_identity_bounded(value, &jammed, &bytes, &budget) != 0)
+        return 0;
+    sha256_hash(jammed, bytes, digest);
     return 1;
 }
 
@@ -1121,16 +1158,17 @@ static noun d5_reason(uint32_t code, uint32_t detail)
  * stay in the scratch epoch and are rewound at the dispatch boundary; no
  * returned noun points into that reclaimable epoch.  The source-to-result
  * map is open-addressed so staging remains linear in the copied graph. */
-static uint32_t d5_result_hash(uint32_t source_ptr)
+static uint32_t d5_result_hash(uint32_t source_ptr, uint32_t capacity)
 {
     uint32_t value = source_ptr >> 3;
     value ^= value >> 16;
     value *= 0x7feb352dU;
     value ^= value >> 15;
-    return value & (D5_RESULT_CELL_CAPACITY - 1u);
+    return value & (capacity - 1u);
 }
 
-static noun d5_result_copy_rec(noun source, uint32_t depth, int *ok)
+static noun d5_result_copy_rec(d5_result_arena_t *arena, noun source,
+                               uint32_t depth, uint32_t limit, int *ok)
 {
     if (!noun_is_cell(source))
         return source;
@@ -1139,45 +1177,63 @@ static noun d5_result_copy_rec(noun source, uint32_t depth, int *ok)
         return NOUN_ZERO;
     }
     uint32_t source_ptr = cell_ptr(source);
-    uint32_t map_slot = d5_result_hash(source_ptr);
-    for (uint32_t probe = 0; probe < D5_RESULT_CELL_CAPACITY; probe++) {
-        uint32_t mapped_source = g_result_source[map_slot];
+    uint32_t map_slot = d5_result_hash(source_ptr, arena->capacity);
+    for (uint32_t probe = 0; probe < arena->capacity; probe++) {
+        uint32_t mapped_source = arena->source[map_slot];
         if (mapped_source == 0)
             break;
         if (mapped_source == source_ptr)
-            return g_result_value[map_slot];
-        map_slot = (map_slot + 1u) & (D5_RESULT_CELL_CAPACITY - 1u);
+            return arena->value[map_slot];
+        map_slot = (map_slot + 1u) & (arena->capacity - 1u);
     }
-    if (g_result_cell_count >= D5_RESULT_CELL_CAPACITY) {
+    if (arena->cell_count >= limit) {
         *ok = 0;
         return NOUN_ZERO;
     }
-    uint32_t index = g_result_cell_count++;
-    noun result = cell_noun((uint32_t)(uintptr_t)&g_result_cells[index]);
-    g_result_source[map_slot] = source_ptr;
-    g_result_value[map_slot] = result;
-    g_result_cells[index].refcount = 1;
-    g_result_cells[index]._pad = 0;
-    g_result_cells[index].head = NOUN_ZERO;
-    g_result_cells[index].tail = NOUN_ZERO;
+    uint32_t index = arena->cell_count++;
+    noun result = cell_noun((uint32_t)(uintptr_t)&arena->cells[index]);
+    arena->source[map_slot] = source_ptr;
+    arena->value[map_slot] = result;
+    arena->cells[index].refcount = 1;
+    arena->cells[index]._pad = 0;
+    arena->cells[index].head = NOUN_ZERO;
+    arena->cells[index].tail = NOUN_ZERO;
     cell_t *cell = (cell_t *)(uintptr_t)source_ptr;
-    g_result_cells[index].head = d5_result_copy_rec(cell->head, depth + 1, ok);
-    g_result_cells[index].tail = d5_result_copy_rec(cell->tail, depth + 1, ok);
+    arena->cells[index].head = d5_result_copy_rec(arena, cell->head, depth + 1,
+                                                  limit, ok);
+    arena->cells[index].tail = d5_result_copy_rec(arena, cell->tail, depth + 1,
+                                                  limit, ok);
+    return result;
+}
+
+static noun d5_result_stage_into(d5_result_arena_t *arena, noun source,
+                                 uint32_t limit)
+{
+    for (uint32_t i = 0; i < arena->capacity; i++)
+        arena->source[i] = 0;
+    arena->cell_count = 0;
+    arena->root = NOUN_ZERO;
+    if (limit == 0 || limit > arena->capacity)
+        limit = arena->capacity;
+    int ok = 1;
+    noun result = d5_result_copy_rec(arena, source, 1, limit, &ok);
+    if (!ok || !noun_is_cell(result))
+        return NOUN_ZERO;
+    arena->root = result;
     return result;
 }
 
 static noun d5_result_stage(noun source)
 {
-    for (uint32_t i = 0; i < D5_RESULT_CELL_CAPACITY; i++)
-        g_result_source[i] = 0;
-    g_result_cell_count = 0;
-    g_result_root = NOUN_ZERO;
-    int ok = 1;
-    noun result = d5_result_copy_rec(source, 1, &ok);
-    if (!ok || !noun_is_cell(result))
-        return NOUN_ZERO;
-    g_result_root = result;
-    return result;
+    uint32_t limit = g_result_stage_limit;
+    g_result_stage_limit = D5_RESULT_CELL_CAPACITY;
+    return d5_result_stage_into(&g_result_arena, source, limit);
+}
+
+static noun d5_nested_result_stage(noun source)
+{
+    return d5_result_stage_into(&g_nested_result_arena, source,
+                                D5_NESTED_RESULT_CELL_CAPACITY);
 }
 
 static noun d5_result(uint32_t status, noun body)
@@ -1682,16 +1738,20 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
     g_eval_reason = 8;
     uint64_t max_ops = D5_POLICY_MAX_OPS;
     uint64_t max_cells = D5_POLICY_MAX_CELLS;
+    uint64_t max_stack = D5_POLICY_MAX_STACK;
 #if defined(M38_D5_NATIVE_WITNESS)
     if (g_witness_ops_limit != 0)
         max_ops = g_witness_ops_limit;
     if (g_witness_cells_limit != 0)
         max_cells = g_witness_cells_limit;
+    if (g_witness_stack_limit != 0)
+        max_stack = g_witness_stack_limit;
     g_witness_ops_limit = 0;
     g_witness_cells_limit = 0;
+    g_witness_stack_limit = 0;
 #endif
     nock_budget_set_limits(max_ops, max_cells);
-    nock_eval_stack_set_limit(D5_POLICY_MAX_STACK);
+    nock_eval_stack_set_limit(max_stack);
     jmp_buf saved_abort;
     __builtin_memcpy(saved_abort, nock_abort, sizeof saved_abort);
     int jumped = setjmp(nock_abort);
@@ -1873,25 +1933,21 @@ noun m38_resource_abi_dispatch(noun request)
     if (g_in_flight) {
         uint64_t nested_mark = heap_scratch_mark();
         noun refused = d5_refuse(16, 0, NOUN_ZERO);
-        noun owned = d5_result_stage(refused);
+        noun owned = d5_nested_result_stage(refused);
         (void)heap_scratch_rewind(nested_mark);
         return owned;
     }
     g_in_flight = 1;
     uint64_t scratch_mark = heap_scratch_mark();
     heap_set_mode(HEAP_MODE_SCRATCH);
-    g_result_cell_count = 0;
-    g_result_root = NOUN_ZERO;
+    g_result_arena.cell_count = 0;
+    g_result_arena.root = NOUN_ZERO;
 #if defined(M38_D5_NATIVE_WITNESS)
-    if (g_witness_reenter_next) {
-        g_witness_reenter_next = 0;
-        noun nested = m38_resource_abi_dispatch(NOUN_ZERO);
-        uint32_t nested_status = 0, nested_reason = 0;
-        if (d5_result_status_reason(nested, &nested_status, &nested_reason)) {
-            g_witness_nested_status = nested_status;
-            g_witness_nested_reason = nested_reason;
-        }
-    }
+    g_result_stage_limit = g_witness_result_cells_limit != 0
+        ? g_witness_result_cells_limit : D5_RESULT_CELL_CAPACITY;
+    g_witness_result_cells_limit = 0;
+#else
+    g_result_stage_limit = D5_RESULT_CELL_CAPACITY;
 #endif
     d5_request_t decoded;
     noun result;
@@ -1908,7 +1964,25 @@ noun m38_resource_abi_dispatch(noun request)
         result = d5_dispatch_snapshot(decoded.first);
     else
         result = d5_dispatch_restore(decoded.first, decoded.second);
-    noun owned = result == g_result_root ? result : d5_result_stage(result);
+    noun owned = result == g_result_arena.root ? result : d5_result_stage(result);
+#if defined(M38_D5_NATIVE_WITNESS)
+    if (g_witness_reenter_next) {
+        uint8_t outer_before[32], outer_after[32];
+        uint32_t nested_status = 0, nested_reason = 0;
+        g_witness_reenter_next = 0;
+        int outer_before_ok = d5_sha256_digest(owned, outer_before);
+        noun nested = m38_resource_abi_dispatch(NOUN_ZERO);
+        int nested_ok = d5_result_status_reason(nested, &nested_status,
+                                                 &nested_reason);
+        int outer_after_ok = d5_sha256_digest(owned, outer_after);
+        g_witness_nested_status = nested_status;
+        g_witness_nested_reason = nested_reason;
+        g_witness_late_reentry_ok = outer_before_ok && nested_ok
+            && nested_status == D5_STATUS_REFUSE && nested_reason == 16
+            && outer_after_ok
+            && d5_same_bytes(outer_before, outer_after, sizeof outer_before);
+    }
+#endif
     g_in_flight = 0;
     int rewound = heap_scratch_rewind(scratch_mark);
     if (owned == NOUN_ZERO || !rewound)
@@ -1934,10 +2008,11 @@ static int d5_pill_source(const volatile uint8_t **base, uint64_t *available)
     return *available != 0;
 }
 
-static int d5_decode_pill(noun *out)
+static int d5_decode_pill(noun *out, cue_bounded_status_t *status)
 {
     const volatile uint8_t *base;
     uint64_t available, length = 0;
+    *status = CUE_BOUNDED_INPUT;
     if (!d5_pill_source(&base, &available) || available < 16)
         return 0;
     for (unsigned i = 0; i < 8; i++)
@@ -1948,9 +2023,9 @@ static int d5_decode_pill(noun *out)
     if (base[8] > 1 || base[9] != 1 || base[10] != 0 || base[11] != 0
         || base[12] != 0 || base[13] != 0 || base[14] != 0 || base[15] != 0)
         return 0;
-    return cue_bounded_bytes((const uint8_t *)(uintptr_t)(base + 16), length,
-                             &cue_i2_limits, HEAP_MODE_SCRATCH, out)
-        == CUE_BOUNDED_OK;
+    *status = cue_bounded_bytes((const uint8_t *)(uintptr_t)(base + 16), length,
+                                &cue_i2_limits, HEAP_MODE_SCRATCH, out);
+    return *status == CUE_BOUNDED_OK;
 }
 
 static void d5_hex64(uint64_t value)
@@ -2013,6 +2088,10 @@ static void d5_authority_digest(uint8_t digest[32])
     sha256_update(&context, (const uint8_t *)&persist_selector, sizeof persist_selector);
     sha256_update(&context, (const uint8_t *)&persist_cells, sizeof persist_cells);
     sha256_update(&context, (const uint8_t *)&scratch_mark, sizeof scratch_mark);
+    uint64_t atom_bytes = atom_store_bytes_used();
+    uint64_t atom_occupancy = atom_store_index_occupancy();
+    sha256_update(&context, (const uint8_t *)&atom_bytes, sizeof atom_bytes);
+    sha256_update(&context, (const uint8_t *)&atom_occupancy, sizeof atom_occupancy);
     for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++) {
         uint8_t item[32] = {0};
         if (g_catalog[i].admitted) {
@@ -2028,6 +2107,39 @@ static void d5_authority_digest(uint8_t digest[32])
     sha256_final(&context, digest);
 }
 #endif
+
+/* Refusal paths use these fixed atoms to build ABI-RESULT/REASON nouns.  Warm
+ * all boundary literals before the first measured dispatch so a refusal does
+ * not silently change the atom store while its resource fingerprint is held. */
+static void d5_warm_fixed_atoms(void)
+{
+    static const char *const atoms[] = {
+        TAG_IDENTITY, TAG_IDENTITY_SCHEMA, TAG_PAYLOAD, TAG_PAYLOAD_SCHEMA,
+        TAG_ADMISSION, TAG_ADMISSION_SCHEMA, TAG_BINDING, TAG_BINDING_SCHEMA,
+        TAG_REQUEST, TAG_REQUEST_SCHEMA, TAG_RESULT, TAG_RESULT_SCHEMA,
+        TAG_HANDLE, TAG_HANDLE_SCHEMA, TAG_STATE, TAG_STATE_SCHEMA,
+        TAG_STIMULUS, TAG_STIMULUS_SCHEMA, TAG_EFFECTS, TAG_EFFECTS_SCHEMA,
+        TAG_EFFECT_EMISSION, TAG_EFFECT_EMISSION_SCHEMA, TAG_OBSERVATIONS,
+        TAG_OBSERVATIONS_SCHEMA, TAG_OBSERVATION, TAG_OBSERVATION_SCHEMA,
+        TAG_METRICS, TAG_METRICS_SCHEMA, TAG_REASON, TAG_REASON_SCHEMA,
+        TAG_SELECTOR, TAG_SELECTOR_SCHEMA, TAG_SNAPSHOT, TAG_SNAPSHOT_SCHEMA,
+        TAG_RECEIPT, TAG_RECEIPT_SCHEMA, D5_CORE_DOMAIN, D5_SNAPSHOT_DOMAIN,
+        D5_BYTE_ORDER, "blake3-256-jam", "sha256", "m38-product-v2",
+        "m38-d5-r-native-test-control-v1", "m38-d5-r-native-cap-ops",
+        "m38-d5-r-native-cap-cells", "m38-d5-r-native-cap-stack",
+        "m38-d5-r-native-cap-result", "m38-d5-r-native-reenter",
+        "1499kernel:m38-a:source:v2",
+        "1499kernel-i2-m38-a-application-model-v2",
+        "1499kernel-i2-m38-a-executable-application-plan-v2",
+        "1499kernel-i2-m38-a-executable-application-package-v2",
+        "1499kernel:i2:m38-d0-r2:deployment-binding:v1",
+        "1499kernel:i2:m38-d0-r2:resource-path:v2",
+        RUNTIME_STIMULUS_TAG_PREFIX,
+    };
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    for (uint32_t i = 0; i < sizeof atoms / sizeof atoms[0]; i++)
+        (void)d5_atom(atoms[i]);
+}
 
 static int d5_result_status_reason(noun result, uint32_t *status,
                                    uint32_t *reason)
@@ -2096,8 +2208,12 @@ static int d5_decode_witness_control(noun item, uint32_t *kind, uint64_t *value)
         *kind = 1;
     else if (d5_atom_is(tag, "m38-d5-r-native-cap-cells"))
         *kind = 2;
-    else if (d5_atom_is(tag, "m38-d5-r-native-reenter"))
+    else if (d5_atom_is(tag, "m38-d5-r-native-cap-stack"))
         *kind = 3;
+    else if (d5_atom_is(tag, "m38-d5-r-native-cap-result"))
+        *kind = 4;
+    else if (d5_atom_is(tag, "m38-d5-r-native-reenter"))
+        *kind = 5;
     else
         return 0;
     *value = direct_val(fields[1]);
@@ -2109,6 +2225,54 @@ static int d5_decode_ingress(noun value, noun *items, uint32_t *count)
 {
     return d5_list(value, items, 64u, count) && *count != 0;
 }
+
+#if defined(M38_D5_NATIVE_WITNESS)
+static void d5_ingest_abort(const char *kind, uint32_t code,
+                            const uint8_t before[32], uint64_t scratch_before,
+                            uint64_t atom_bytes_before,
+                            uint64_t atom_occupancy_before,
+                            uint64_t publications_before)
+{
+    uint8_t after[32];
+    uint64_t scratch_after = heap_scratch_mark();
+    uint64_t atom_bytes_after = atom_store_bytes_used();
+    uint64_t atom_occupancy_after = atom_store_index_occupancy();
+    uint64_t publications_after = g_publications;
+    d5_authority_digest(after);
+    int invariant = scratch_before == scratch_after
+        && atom_bytes_before == atom_bytes_after
+        && atom_occupancy_before == atom_occupancy_after
+        && publications_before == publications_after
+        && d5_same_bytes(before, after, 32);
+    uart_puts("M38D5 INGEST_ABORT kind=");
+    uart_puts(kind);
+    uart_puts(" code=");
+    d5_hex64(code);
+    uart_puts(" authority_before_sha256=");
+    d5_digest_text(before);
+    uart_puts(" authority_after_sha256=");
+    d5_digest_text(after);
+    uart_puts(" scratch_before=");
+    d5_hex64(scratch_before);
+    uart_puts(" scratch_after=");
+    d5_hex64(scratch_after);
+    uart_puts(" atom_bytes_before=");
+    d5_hex64(atom_bytes_before);
+    uart_puts(" atom_bytes_after=");
+    d5_hex64(atom_bytes_after);
+    uart_puts(" atom_occupancy_before=");
+    d5_hex64(atom_occupancy_before);
+    uart_puts(" atom_occupancy_after=");
+    d5_hex64(atom_occupancy_after);
+    uart_puts(" publications_before=");
+    d5_hex64(publications_before);
+    uart_puts(" publications_after=");
+    d5_hex64(publications_after);
+    uart_puts(" invariant=");
+    uart_puts(invariant ? "pass" : "fail");
+    uart_puts("\r\n");
+}
+#endif
 
 void m38_resource_abi_boot(void)
 {
@@ -2131,36 +2295,69 @@ void m38_resource_abi_boot(void)
         g_slots[i] = (d5_slot_t){.generation = 1};
     g_publications = 0;
     g_in_flight = 0;
-    g_result_cell_count = 0;
-    g_result_root = NOUN_ZERO;
+    g_result_arena.cell_count = 0;
+    g_result_arena.root = NOUN_ZERO;
+    g_nested_result_arena.cell_count = 0;
+    g_nested_result_arena.root = NOUN_ZERO;
+    g_result_stage_limit = D5_RESULT_CELL_CAPACITY;
 #if defined(M38_D5_NATIVE_WITNESS)
     g_witness_ops_limit = 0;
     g_witness_cells_limit = 0;
+    g_witness_stack_limit = 0;
+    g_witness_result_cells_limit = 0;
     g_witness_reenter_next = 0;
     g_witness_nested_status = 0;
     g_witness_nested_reason = 0;
+    g_witness_late_reentry_ok = 0;
 #endif
 
     heap_scratch_reset();
     heap_set_mode(HEAP_MODE_SCRATCH);
+    uint64_t ingest_scratch_before = heap_scratch_mark();
+    uint64_t ingest_atom_bytes_before = atom_store_bytes_used();
+    uint64_t ingest_atom_occupancy_before = atom_store_index_occupancy();
+    uint64_t ingest_publications_before = g_publications;
+    uint8_t ingest_authority_before[32] = {0};
+#if defined(M38_D5_NATIVE_WITNESS)
+    d5_authority_digest(ingest_authority_before);
+#endif
     noun ingress_noun;
-    if (!d5_decode_pill(&ingress_noun)) {
+    cue_bounded_status_t cue_status;
+    if (!d5_decode_pill(&ingress_noun, &cue_status)) {
         if (noun_tx_active())
             noun_tx_abort();
+#if defined(M38_D5_NATIVE_WITNESS)
+        (void)heap_scratch_rewind(ingest_scratch_before);
+        d5_ingest_abort("cue", (uint32_t)cue_status, ingest_authority_before,
+                        ingest_scratch_before, ingest_atom_bytes_before,
+                        ingest_atom_occupancy_before, ingest_publications_before);
+#endif
         uart_puts("M38D5 REFUSE malformed-input\r\n");
+        d5_terminal("refuse");
+        return;
+    }
+
+    noun ingress[64];
+    uint32_t ingress_count;
+    if (!d5_decode_ingress(ingress_noun, ingress, &ingress_count)) {
+#if defined(M38_D5_NATIVE_WITNESS)
+        if (noun_tx_active())
+            noun_tx_abort();
+        (void)heap_scratch_rewind(ingest_scratch_before);
+        d5_ingest_abort("ingress", 0, ingest_authority_before,
+                        ingest_scratch_before, ingest_atom_bytes_before,
+                        ingest_atom_occupancy_before, ingest_publications_before);
+#else
+        if (noun_tx_active())
+            noun_tx_abort();
+#endif
+        uart_puts("M38D5 REFUSE malformed-ingress\r\n");
         d5_terminal("refuse");
         return;
     }
     if (noun_tx_active())
         noun_tx_commit();
-
-    noun ingress[64];
-    uint32_t ingress_count;
-    if (!d5_decode_ingress(ingress_noun, ingress, &ingress_count)) {
-        uart_puts("M38D5 REFUSE malformed-ingress\r\n");
-        d5_terminal("refuse");
-        return;
-    }
+    d5_warm_fixed_atoms();
 
     int witness_ok = 1;
     for (uint32_t i = 0; i < ingress_count; i++) {
@@ -2179,13 +2376,19 @@ void m38_resource_abi_boot(void)
                 g_witness_ops_limit = control_value;
             else if (control_kind == 2)
                 g_witness_cells_limit = control_value;
+            else if (control_kind == 3)
+                g_witness_stack_limit = control_value;
+            else if (control_kind == 4)
+                g_witness_result_cells_limit = (uint32_t)control_value;
             else
                 g_witness_reenter_next = 1;
             uart_puts("M38D5 CONTROL index=");
             d5_hex64(i + 1);
             uart_puts(" kind=");
             uart_puts(control_kind == 1 ? "cap-ops" :
-                      control_kind == 2 ? "cap-cells" : "reenter");
+                      control_kind == 2 ? "cap-cells" :
+                      control_kind == 3 ? "cap-stack" :
+                      control_kind == 4 ? "cap-result" : "reenter");
             uart_puts(" value=");
             d5_hex64(control_value);
             uart_puts("\r\n");
@@ -2244,7 +2447,7 @@ void m38_resource_abi_boot(void)
         uart_puts(" scratch_after=");
         d5_hex64(scratch_after);
         uart_puts(" result_cells=");
-        d5_hex64(g_result_cell_count);
+        d5_hex64(g_result_arena.cell_count);
         uart_puts(" invariant=");
         uart_puts(invariant ? "pass" : "fail");
 #if defined(M38_D5_NATIVE_WITNESS)
@@ -2253,6 +2456,8 @@ void m38_resource_abi_boot(void)
             d5_hex64(g_witness_nested_status);
             uart_puts(" nested_reason=");
             d5_hex64(g_witness_nested_reason);
+            uart_puts(" outer_stable=");
+            uart_puts(g_witness_late_reentry_ok ? "pass" : "fail");
         }
 #endif
         if (result_valid && status == D5_STATUS_POKE) {
@@ -2273,6 +2478,14 @@ void m38_resource_abi_boot(void)
                 d5_hex64(direct_val(metrics_fields[2]));
                 uart_puts(" stack=");
                 d5_hex64(direct_val(metrics_fields[3]));
+                uart_puts(" next_sha256=");
+                d5_sha256_text(poke_fields[0]);
+                uart_puts(" effects_sha256=");
+                d5_sha256_text(poke_fields[1]);
+                uart_puts(" observations_sha256=");
+                d5_sha256_text(poke_fields[2]);
+                uart_puts(" metrics_sha256=");
+                d5_sha256_text(poke_fields[3]);
             } else {
                 witness_ok = 0;
             }
