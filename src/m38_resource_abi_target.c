@@ -42,6 +42,7 @@
 #define D5_MAX_IDENTITY_BYTES   256u
 #define D5_JAM_WORK_LIMIT   2000000ULL
 #define D5_CATALOG_CAPACITY       8u
+#define D5_CATALOG_KNOWN_COUNT    2u
 #define D5_SLOT_COUNT              8u
 #define D5_MAX_GENERATION 0xFFFFFFFFULL
 #define D5_RESULT_CELL_CAPACITY    32768u
@@ -224,6 +225,18 @@ typedef struct {
     int catalog_index;
 } d5_load_validation_t;
 
+/* Ingress preflight is a bounded, read-only semantic pass.  It shadows only
+ * the slot facts needed to resolve deterministic handles and the two
+ * catalog entries admitted by D5.  It never runs the evaluator or publishes
+ * a catalog/slot; the real dispatch remains the sole state mutator. */
+typedef struct {
+    d5_slot_t slots[D5_SLOT_COUNT];
+    d5_plan_t plans[D5_CATALOG_KNOWN_COUNT];
+    uint8_t core_ids[D5_CATALOG_KNOWN_COUNT][32];
+    uint8_t plan_ready[D5_CATALOG_KNOWN_COUNT];
+    uint8_t pending_snapshot[D5_SLOT_COUNT];
+} d5_ingress_shadow_t;
+
 typedef struct {
     cell_t *cells;
     uint32_t *source;
@@ -254,6 +267,7 @@ static d5_result_arena_t g_nested_result_arena = {
     g_nested_result_cells, g_nested_result_source, g_nested_result_value,
     D5_NESTED_RESULT_CELL_CAPACITY, 0, 0
 };
+static d5_ingress_shadow_t g_ingress_shadow;
 /* A witness may lower the next top-level result copy only.  The failed copy
  * consumes the control, so its refusal can still be returned and retried. */
 static uint32_t g_result_stage_limit = D5_RESULT_CELL_CAPACITY;
@@ -1159,13 +1173,18 @@ static int d5_decode_request(noun request, d5_request_t *out)
     return 1;
 }
 
-static int d5_slot_resolve(noun handle, uint32_t *slot)
+static int d5_slot_resolve_in(const d5_slot_t *slots, noun handle, uint32_t *slot)
 {
     uint64_t generation;
-    if (!d5_decode_handle(handle, slot, &generation) || !g_slots[*slot - 1].used
-        || g_slots[*slot - 1].generation != generation)
+    if (!d5_decode_handle(handle, slot, &generation) || !slots[*slot - 1].used
+        || slots[*slot - 1].generation != generation)
         return 0;
     return 1;
+}
+
+static int d5_slot_resolve(noun handle, uint32_t *slot)
+{
+    return d5_slot_resolve_in(g_slots, handle, slot);
 }
 
 static noun d5_reason(uint32_t code, uint32_t detail)
@@ -1331,7 +1350,7 @@ static int d5_decode_state(const d5_plan_t *plan, noun state_noun,
         || !d5_record(body, fields, 5)
         || !d5_atom_is(fields[0], TAG_STATE_SCHEMA)
         || !noun_eq(fields[1], expected_handle)
-        || !noun_eq(fields[2], d5_core_descriptor(d5_digest_atom(core_id)))
+        || !d5_core_descriptor_matches(fields[2], core_id)
         || !noun_is_direct(fields[3])
         || (direct_val(fields[3]) != D5_STATE_INITIALIZED
             && direct_val(fields[3]) != D5_STATE_NEXT))
@@ -1535,6 +1554,37 @@ static noun d5_snapshot(const d5_plan_t *plan, const d5_slot_t *slot,
     return d5_pair_build(d5_atom(TAG_SNAPSHOT), body);
 }
 
+static int d5_validate_restore_snapshot_shape(const d5_plan_t *plan,
+                                              noun handle, noun snapshot,
+                                              const uint8_t core_id[32],
+                                              d5_state_t *restored,
+                                              uint32_t *restored_kind)
+{
+    noun snapshot_tag, snapshot_body, fields[3];
+    if (!d5_pair(snapshot, &snapshot_tag, &snapshot_body)
+        || !d5_atom_is(snapshot_tag, TAG_SNAPSHOT)
+        || !d5_record(snapshot_body, fields, 3)
+        || !d5_atom_is(fields[0], TAG_SNAPSHOT_SCHEMA)
+        || !d5_core_descriptor_matches(fields[1], core_id))
+        return 0;
+    return d5_decode_state(plan, fields[2], handle, core_id,
+                           restored, restored_kind);
+}
+
+static int d5_validate_restore_snapshot(const d5_plan_t *plan,
+                                        const d5_slot_t *slot, noun handle,
+                                        noun snapshot, const uint8_t core_id[32],
+                                        d5_state_t *restored,
+                                        uint32_t *restored_kind)
+{
+    uint8_t digest[32];
+    if (!slot->latest || !d5_snapshot_digest(snapshot, digest)
+        || !d5_same_bytes(digest, slot->snapshot_digest, 32))
+        return 0;
+    return d5_validate_restore_snapshot_shape(plan, handle, snapshot, core_id,
+                                              restored, restored_kind);
+}
+
 /* Private semispace catalog admission.  Existing catalog roots are copied to
  * the candidate semispace before the new root is published, so a failed copy
  * cannot retire or orphan an already admitted core. */
@@ -1590,8 +1640,7 @@ static int d5_decode_poke_stimulus(const d5_plan_t *plan, noun stimulus,
     if (!d5_pair(stimulus, &tag, &body) || !d5_atom_is(tag, TAG_STIMULUS)
         || !d5_record(body, fields, 5) || !d5_atom_is(fields[0], TAG_STIMULUS_SCHEMA))
         return 0;
-    noun expected = d5_core_descriptor(d5_digest_atom(core_id));
-    if (!noun_eq(fields[1], expected))
+    if (!d5_core_descriptor_matches(fields[1], core_id))
         return 0;
     uint32_t iid, eid;
     if (!d5_u(fields[2], D5_MAX_INSTANCES, &iid) || iid == 0
@@ -1606,7 +1655,6 @@ static int d5_decode_poke_stimulus(const d5_plan_t *plan, noun stimulus,
     if (!d5_list(fields[4], values, D5_MAX_WITH, &value_count)
         || value_count != event_def->with_count)
         return 0;
-    noun runtime_values[D5_MAX_WITH];
     for (uint32_t i = 0; i < value_count; i++) {
         noun vf[3];
         uint32_t id, code;
@@ -1616,6 +1664,16 @@ static int d5_decode_poke_stimulus(const d5_plan_t *plan, noun stimulus,
             || code != type->values[event_def->with_ids[i] - 1].type
             || !d5_typed(vf[1], vf[2]))
             return 0;
+    }
+    *instance = iid - 1;
+    *event = eid;
+    if (!runtime)
+        return 1;
+    noun runtime_values[D5_MAX_WITH];
+    for (uint32_t i = 0; i < value_count; i++) {
+        noun vf[3];
+        if (!d5_record(values[i], vf, 3))
+            return 0;
         noun runtime_value[3] = {direct(event_def->with_ids[i]), vf[1], vf[2]};
         runtime_values[i] = d5_record_build(runtime_value, 3);
     }
@@ -1624,9 +1682,31 @@ static int d5_decode_poke_stimulus(const d5_plan_t *plan, noun stimulus,
                                d5_list_build(runtime_values, value_count)};
     noun runtime_body = d5_record_build(runtime_fields, 4);
     *runtime = d5_pair_build(d5_runtime_stimulus_tag(), runtime_body);
-    *instance = iid - 1;
-    *event = eid;
     return *runtime != NOUN_ZERO;
+}
+
+static int d5_validate_peek_selector(const d5_plan_t *plan, noun selector,
+                                     uint32_t *target_out)
+{
+    noun selector_tag, selector_body, sf[3];
+    if (!d5_pair(selector, &selector_tag, &selector_body)
+        || !d5_atom_is(selector_tag, TAG_SELECTOR)
+        || !d5_record(selector_body, sf, 3)
+        || !d5_atom_is(sf[0], TAG_SELECTOR_SCHEMA)
+        || !noun_is_direct(sf[1]) || direct_val(sf[1]) != 1
+        || !noun_is_direct(sf[2]) || direct_val(sf[2]) > 0xFFFF
+        || direct_val(sf[2]) == 0)
+        return 0;
+    uint32_t target = (uint32_t)direct_val(sf[2]);
+    for (uint32_t i = 0; i < plan->instance_count; i++) {
+        const d5_type_t *type = d5_find_type(plan, plan->instance_types[i]);
+        for (uint32_t v = 0; v < type->value_count; v++)
+            if (v + 1 == target) {
+                *target_out = target;
+                return 1;
+            }
+    }
+    return 0;
 }
 
 static noun d5_dispatch_load(noun core, noun admission)
@@ -1679,19 +1759,14 @@ static noun d5_dispatch_peek(noun handle, noun selector)
     uint32_t slot_number;
     if (!d5_slot_resolve(handle, &slot_number))
         return d5_refuse(1, 0, NOUN_ZERO);
-    noun selector_tag, selector_body, sf[3];
-    if (!d5_pair(selector, &selector_tag, &selector_body)
-        || !d5_atom_is(selector_tag, TAG_SELECTOR)
-        || !d5_record(selector_body, sf, 3) || !d5_atom_is(sf[0], TAG_SELECTOR_SCHEMA)
-        || !noun_is_direct(sf[1]) || direct_val(sf[1]) != 1
-        || !noun_is_direct(sf[2]) || direct_val(sf[2]) > 0xFFFF
-        || direct_val(sf[2]) == 0)
-        return d5_refuse(5, 0, NOUN_ZERO);
-    uint32_t target = (uint32_t)direct_val(sf[2]);
-    d5_catalog_t *catalog = &g_catalog[g_slots[slot_number - 1].catalog];
+    d5_slot_t *slot = &g_slots[slot_number - 1];
+    d5_catalog_t *catalog = &g_catalog[slot->catalog];
     d5_plan_t plan;
     if (!d5_parse_plan(catalog->core, &plan))
         return d5_refuse(8, 0, NOUN_ZERO);
+    uint32_t target;
+    if (!d5_validate_peek_selector(&plan, selector, &target))
+        return d5_refuse(5, 0, NOUN_ZERO);
     for (uint32_t i = 0; i < plan.instance_count; i++) {
         const d5_type_t *type = d5_find_type(&plan, plan.instance_types[i]);
         for (uint32_t v = 0; v < type->value_count; v++)
@@ -1886,35 +1961,11 @@ static noun d5_dispatch_restore(noun handle, noun snapshot)
     d5_plan_t plan;
     if (!d5_parse_plan(catalog->core, &plan))
         return d5_refuse(8, 0, NOUN_ZERO);
-    uint8_t digest[32];
-    if (!slot->latest || !d5_snapshot_digest(snapshot, digest)
-        || !d5_same_bytes(digest, slot->snapshot_digest, 32))
-        return d5_refuse(6, 0, d5_state_noun(&plan, &slot->state, slot_number,
-                                              slot->generation, catalog->core_id,
-                                              slot->state_kind));
-    noun snapshot_tag, snapshot_body, fields[3];
-    if (!d5_pair(snapshot, &snapshot_tag, &snapshot_body)
-        || !d5_atom_is(snapshot_tag, TAG_SNAPSHOT)
-        || !d5_record(snapshot_body, fields, 3)
-        || !noun_eq(fields[0], d5_atom(TAG_SNAPSHOT_SCHEMA))
-        || !noun_eq(fields[1], d5_core_descriptor(d5_digest_atom(catalog->core_id))))
-        return d5_refuse(6, 0, d5_state_noun(&plan, &slot->state, slot_number,
-                                              slot->generation, catalog->core_id,
-                                              slot->state_kind));
-    noun state_tag, state_body, state_fields[5];
-    if (!d5_pair(fields[2], &state_tag, &state_body)
-        || !d5_atom_is(state_tag, TAG_STATE)
-        || !d5_record(state_body, state_fields, 5)
-        || !noun_eq(state_fields[0], d5_atom(TAG_STATE_SCHEMA))
-        || !noun_eq(state_fields[1], handle)
-        || !noun_eq(state_fields[2], d5_core_descriptor(d5_digest_atom(catalog->core_id))))
-        return d5_refuse(6, 0, d5_state_noun(&plan, &slot->state, slot_number,
-                                              slot->generation, catalog->core_id,
-                                              slot->state_kind));
     d5_state_t restored;
     uint32_t restored_kind;
-    if (!d5_decode_state(&plan, fields[2], handle, catalog->core_id,
-                         &restored, &restored_kind))
+    if (!d5_validate_restore_snapshot(&plan, slot, handle, snapshot,
+                                      catalog->core_id, &restored,
+                                      &restored_kind))
         return d5_refuse(6, 0, d5_state_noun(&plan, &slot->state, slot_number,
                                               slot->generation, catalog->core_id,
                                               slot->state_kind));
@@ -2337,14 +2388,132 @@ static int d5_decode_ingress(noun value, noun *items, uint32_t *count)
     return d5_list(value, items, 64u, count) && *count != 0;
 }
 
-static uint32_t d5_request_preflight_reason(const d5_request_t *request)
+static void d5_ingress_shadow_init(d5_ingress_shadow_t *shadow)
 {
-    if (request->operation != D5_OP_LOAD)
+    *shadow = (d5_ingress_shadow_t){0};
+    for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
+        shadow->slots[i] = g_slots[i];
+    for (uint32_t i = 0; i < D5_CATALOG_KNOWN_COUNT; i++) {
+        if (!g_catalog[i].admitted)
+            continue;
+        for (uint32_t j = 0; j < 32; j++)
+            shadow->core_ids[i][j] = g_catalog[i].core_id[j];
+        shadow->plan_ready[i] = d5_parse_plan(g_catalog[i].core,
+                                               &shadow->plans[i]);
+    }
+}
+
+static int d5_ingress_shadow_resource(const d5_ingress_shadow_t *shadow,
+                                      noun handle, uint32_t *slot_number,
+                                      const d5_plan_t **plan,
+                                      const uint8_t **core_id)
+{
+    if (!d5_slot_resolve_in(shadow->slots, handle, slot_number))
         return 0;
-    d5_load_validation_t validation;
-    return (uint32_t)d5_validate_load_request(request->first,
-                                               request->second,
-                                               &validation);
+    uint32_t catalog = shadow->slots[*slot_number - 1].catalog;
+    if (catalog >= D5_CATALOG_KNOWN_COUNT || !shadow->plan_ready[catalog])
+        return 0;
+    *plan = &shadow->plans[catalog];
+    *core_id = shadow->core_ids[catalog];
+    return 1;
+}
+
+static void d5_ingress_shadow_load(d5_ingress_shadow_t *shadow,
+                                   const d5_load_validation_t *validation)
+{
+    uint32_t slot_number = 0;
+    for (uint32_t i = 0; i < D5_SLOT_COUNT; i++) {
+        if (!shadow->slots[i].used) {
+            slot_number = i + 1;
+            break;
+        }
+    }
+    /* Slot exhaustion remains a bounded runtime-capacity refusal.  It does
+     * not make the input noun unsafe to commit, and dispatch retains the
+     * existing refusal code and sequential witness coverage. */
+    if (slot_number == 0)
+        return;
+    uint32_t catalog = (uint32_t)validation->catalog_index;
+    shadow->plans[catalog] = validation->plan;
+    for (uint32_t i = 0; i < 32; i++)
+        shadow->core_ids[catalog][i] = validation->core_id[i];
+    shadow->plan_ready[catalog] = 1;
+    d5_slot_t *slot = &shadow->slots[slot_number - 1];
+    d5_state_t initial;
+    if (!d5_initial_state(&validation->plan, &initial))
+        return;
+    slot->used = 1;
+    slot->latest = 0;
+    slot->catalog = catalog;
+    slot->state_kind = D5_STATE_INITIALIZED;
+    slot->state = initial;
+}
+
+/* This is the single ingress atomicity rule for all five public operations:
+ * every request is checked against bounded, read-only semantic state before
+ * Cue commits.  The evaluator and publication paths remain dispatch-only. */
+static uint32_t d5_request_preflight_reason(const d5_request_t *request,
+                                             d5_ingress_shadow_t *shadow)
+{
+    uint32_t slot_number;
+    const d5_plan_t *plan;
+    const uint8_t *core_id;
+    switch (request->operation) {
+    case D5_OP_LOAD: {
+        d5_load_validation_t validation;
+        uint32_t reason = (uint32_t)d5_validate_load_request(
+            request->first, request->second, &validation);
+        if (reason == 0)
+            d5_ingress_shadow_load(shadow, &validation);
+        return reason;
+    }
+    case D5_OP_POKE: {
+        uint32_t instance, event;
+        if (!d5_ingress_shadow_resource(shadow, request->first,
+                                        &slot_number, &plan, &core_id)
+            || !d5_decode_poke_stimulus(plan, request->second, core_id, 0,
+                                        &instance, &event))
+            return 4;
+        return 0;
+    }
+    case D5_OP_PEEK: {
+        uint32_t target;
+        if (!d5_ingress_shadow_resource(shadow, request->first,
+                                        &slot_number, &plan, &core_id)
+            || !d5_validate_peek_selector(plan, request->second, &target))
+            return 5;
+        return 0;
+    }
+    case D5_OP_SNAPSHOT:
+        if (!d5_ingress_shadow_resource(shadow, request->first,
+                                        &slot_number, &plan, &core_id))
+            return 1;
+        /* The snapshot noun is produced by dispatch, so its exact digest is
+         * not available to this read-only pass.  A later RESTORE still gets
+         * full structural validation here and the live latest-digest check
+         * remains mandatory in dispatch. */
+        shadow->pending_snapshot[slot_number - 1] = 1;
+        return 0;
+    case D5_OP_RESTORE: {
+        d5_state_t restored;
+        uint32_t restored_kind;
+        if (!d5_ingress_shadow_resource(shadow, request->first,
+                                        &slot_number, &plan, &core_id)
+            || (shadow->pending_snapshot[slot_number - 1]
+                ? !d5_validate_restore_snapshot_shape(
+                    plan, request->first, request->second, core_id,
+                    &restored, &restored_kind)
+                : !d5_validate_restore_snapshot(
+                    plan, &shadow->slots[slot_number - 1], request->first,
+                    request->second, core_id, &restored, &restored_kind)))
+            return 6;
+        shadow->slots[slot_number - 1].state = restored;
+        shadow->slots[slot_number - 1].state_kind = restored_kind;
+        return 0;
+    }
+    default:
+        return 16;
+    }
 }
 
 #if defined(M38_D5_NATIVE_WITNESS)
@@ -2506,6 +2675,7 @@ void m38_resource_abi_boot(void)
         return;
     }
 
+    d5_ingress_shadow_init(&g_ingress_shadow);
 #if defined(M38_D5_NATIVE_WITNESS)
     uint8_t preflight_controls[64] = {0};
 #endif
@@ -2513,7 +2683,8 @@ void m38_resource_abi_boot(void)
         d5_request_t preflight_request;
         if (d5_decode_request(ingress[i], &preflight_request)) {
             uint32_t preflight_reason =
-                d5_request_preflight_reason(&preflight_request);
+                d5_request_preflight_reason(&preflight_request,
+                                            &g_ingress_shadow);
             if (preflight_reason == 0)
                 continue;
             if (noun_tx_active())
