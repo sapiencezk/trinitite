@@ -47,6 +47,7 @@
 #define D5_RESULT_CELL_CAPACITY    32768u
 #define D5_NESTED_RESULT_CELL_CAPACITY 64u
 #define D5_RESULT_DEPTH_MAX         256u
+#define D5_WITNESS_RETRY_PILL_OFFSET 0x01000000ULL
 
 #define D5_TYPE_BOOL              1u
 #define D5_TYPE_UINT16            2u
@@ -218,6 +219,12 @@ typedef struct {
 } d5_request_t;
 
 typedef struct {
+    uint8_t core_id[32];
+    d5_plan_t plan;
+    int catalog_index;
+} d5_load_validation_t;
+
+typedef struct {
     cell_t *cells;
     uint32_t *source;
     noun *value;
@@ -263,6 +270,8 @@ static volatile uint8_t g_witness_reenter_next;
 static volatile uint32_t g_witness_nested_status;
 static volatile uint32_t g_witness_nested_reason;
 static volatile uint8_t g_witness_late_reentry_ok;
+static uint8_t g_witness_retry_source;
+static uint8_t g_witness_retry_used;
 #endif
 
 extern uint8_t _pill_embed_start[];
@@ -835,6 +844,20 @@ static int d5_validate_core(noun core, uint8_t core_id[32], d5_plan_t *plan,
             index = i;
     *catalog_index = index;
     return index >= 0;
+}
+
+/* LOAD authority is a read-only admission decision.  Keep this shared by
+ * ingress preflight and dispatch so the transaction boundary cannot drift
+ * from the operation's actual catalog/core checks. */
+static int d5_validate_load_request(noun core, noun admission,
+                                    d5_load_validation_t *out)
+{
+    if (!d5_validate_core(core, out->core_id, &out->plan,
+                          &out->catalog_index))
+        return 2; /* unknown-core */
+    if (!d5_validate_admission(admission, out->core_id, out->catalog_index))
+        return 3; /* unauthorized-admission */
+    return 0;
 }
 
 static noun d5_handle(uint32_t slot, uint64_t generation)
@@ -1608,15 +1631,13 @@ static int d5_decode_poke_stimulus(const d5_plan_t *plan, noun stimulus,
 
 static noun d5_dispatch_load(noun core, noun admission)
 {
-    uint8_t core_id[32];
-    d5_plan_t plan;
-    int index;
-    if (!d5_validate_core(core, core_id, &plan, &index)) {
-        return d5_refuse(2, 0, NOUN_ZERO);
-    }
-    if (index < 0 || !d5_validate_admission(admission, core_id, index)) {
-        return d5_refuse(3, 0, NOUN_ZERO);
-    }
+    d5_load_validation_t validation;
+    int validation_reason = d5_validate_load_request(core, admission, &validation);
+    if (validation_reason != 0)
+        return d5_refuse((uint32_t)validation_reason, 0, NOUN_ZERO);
+    uint8_t *core_id = validation.core_id;
+    d5_plan_t *plan = &validation.plan;
+    int index = validation.catalog_index;
     uint32_t slot_number = 0;
     for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
         if (!g_slots[i].used) {
@@ -1626,9 +1647,9 @@ static noun d5_dispatch_load(noun core, noun admission)
     if (slot_number == 0)
         return d5_refuse(9, 0, NOUN_ZERO);
     d5_state_t initial;
-    if (!d5_initial_state(&plan, &initial))
+    if (!d5_initial_state(plan, &initial))
         return d5_refuse(2, 0, NOUN_ZERO);
-    noun state = d5_state_noun(&plan, &initial, slot_number,
+    noun state = d5_state_noun(plan, &initial, slot_number,
                                g_slots[slot_number - 1].generation, core_id,
                                D5_STATE_INITIALIZED);
     noun handle = d5_handle(slot_number, g_slots[slot_number - 1].generation);
@@ -1992,7 +2013,13 @@ noun m38_resource_abi_dispatch(noun request)
 
 static int d5_pill_source(const volatile uint8_t **base, uint64_t *available)
 {
-    const volatile uint8_t *q = (const volatile uint8_t *)(uintptr_t)PILL_BASE;
+#if defined(M38_D5_NATIVE_WITNESS)
+    uint64_t pill_base = g_witness_retry_source
+        ? PILL_BASE + D5_WITNESS_RETRY_PILL_OFFSET : PILL_BASE;
+#else
+    uint64_t pill_base = PILL_BASE;
+#endif
+    const volatile uint8_t *q = (const volatile uint8_t *)(uintptr_t)pill_base;
     int any = 0;
     for (unsigned i = 0; i < 8; i++)
         any |= q[i] != 0;
@@ -2007,6 +2034,33 @@ static int d5_pill_source(const volatile uint8_t **base, uint64_t *available)
     *available = (uint64_t)(_pill_embed_end - _pill_embed_start);
     return *available != 0;
 }
+
+#if defined(M38_D5_NATIVE_WITNESS)
+void m38_resource_abi_boot(void);
+
+static int d5_witness_retry_pill_present(void)
+{
+    const volatile uint8_t *q = (const volatile uint8_t *)(uintptr_t)
+        (PILL_BASE + D5_WITNESS_RETRY_PILL_OFFSET);
+    int any = 0;
+    for (unsigned i = 0; i < 8; i++)
+        any |= q[i] != 0;
+    return !g_witness_retry_used && any;
+}
+
+/* The witness may supply a second, independently loaded valid PILL.  Invoke
+ * it only after an authority preflight abort, proving retryability in the
+ * same QEMU guest without committing the rejected candidate. */
+static void d5_witness_retry_after_authority_refusal(void)
+{
+    if (!d5_witness_retry_pill_present())
+        return;
+    g_witness_retry_used = 1;
+    g_witness_retry_source = 1;
+    m38_resource_abi_boot();
+    g_witness_retry_source = 0;
+}
+#endif
 
 static int d5_decode_pill(noun *out, cue_bounded_status_t *status)
 {
@@ -2283,6 +2337,16 @@ static int d5_decode_ingress(noun value, noun *items, uint32_t *count)
     return d5_list(value, items, 64u, count) && *count != 0;
 }
 
+static uint32_t d5_request_preflight_reason(const d5_request_t *request)
+{
+    if (request->operation != D5_OP_LOAD)
+        return 0;
+    d5_load_validation_t validation;
+    return (uint32_t)d5_validate_load_request(request->first,
+                                               request->second,
+                                               &validation);
+}
+
 #if defined(M38_D5_NATIVE_WITNESS)
 static void d5_ingest_abort(const char *kind, uint32_t code,
                             const uint8_t mutation_before[32],
@@ -2447,8 +2511,31 @@ void m38_resource_abi_boot(void)
 #endif
     for (uint32_t i = 0; i < ingress_count; i++) {
         d5_request_t preflight_request;
-        if (d5_decode_request(ingress[i], &preflight_request))
-            continue;
+        if (d5_decode_request(ingress[i], &preflight_request)) {
+            uint32_t preflight_reason =
+                d5_request_preflight_reason(&preflight_request);
+            if (preflight_reason == 0)
+                continue;
+            if (noun_tx_active())
+                noun_tx_abort();
+#if defined(M38_D5_NATIVE_WITNESS)
+            (void)heap_scratch_rewind(ingest_scratch_mark_before);
+            d5_ingest_abort("ingress-authority", preflight_reason,
+                            ingest_mutation_before, ingest_semantic_before,
+                            ingest_scratch_mark_before,
+                            ingest_scratch_cells_before,
+                            ingest_persist_cells_before,
+                            ingest_atom_bytes_before,
+                            ingest_atom_occupancy_before,
+                            ingest_publications_before);
+#endif
+            uart_puts("M38D5 REFUSE unauthorized-ingress-request\r\n");
+            d5_terminal("refuse");
+#if defined(M38_D5_NATIVE_WITNESS)
+            d5_witness_retry_after_authority_refusal();
+#endif
+            return;
+        }
 #if defined(M38_D5_NATIVE_WITNESS)
         uint32_t control_kind = 0;
         uint64_t control_value = 0;
