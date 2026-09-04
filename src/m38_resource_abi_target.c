@@ -122,9 +122,9 @@ static const char TAG_SNAPSHOT_SCHEMA[] = "m38-d0-r2-snapshot-schema-v2";
 static const char TAG_RECEIPT[] = "m38-d0-r2-restore-receipt";
 static const char TAG_RECEIPT_SCHEMA[] = "m38-d0-r2-restore-receipt-schema-v2";
 
-/* Neutral D7/R5 boundary nouns.  These atoms are transport labels only;
- * they do not contain an application name, source path, compiler plan, or
- * deployment selector. */
+/* Neutral D7/R5 compatibility-witness nouns.  These atoms are transport
+ * labels only; they do not contain an application name, source path, compiler
+ * plan, or deployment selector. */
 static const char D7_INPUT_TAG[] = "m38-d7-native-input-v1";
 static const char D7_INPUT_SCHEMA[] = "1499kernel-i2-m38-d7-native-input-v1";
 static const char D7_REQUEST_TAG[] = "m38-d7-native-request-v1";
@@ -135,6 +135,9 @@ static const char D7_SELECTOR_TAG[] = "m38-d7-resource-selector-v1";
 static const char D7_SELECTOR_SCHEMA[] = "1499kernel-i2-m38-d7-resource-selector-v1";
 static const char D7_SNAPSHOT_TAG[] = "m38-d7-resource-snapshot-v1";
 static const char D7_SNAPSHOT_SCHEMA[] = "1499kernel-i2-m38-d7-resource-snapshot-v1";
+static const char D7_CONTROL_TAG[] = "m38-d7-compatibility-witness-control-v1";
+static const char D7_CONTROL_SCHEMA[] =
+    "1499kernel-i2-m38-d7-compatibility-witness-control-v1";
 static const char D7_PAYLOAD_DOMAIN[] =
     "1499kernel:i2:m38-d0-r3:resource-payload:v3";
 static const char D7_EXECUTION_ABI[] =
@@ -142,9 +145,9 @@ static const char D7_EXECUTION_ABI[] =
 static const char D7_DESCRIPTOR_TAG[] = "m38-d6-r5-descriptor";
 static const char D7_DESCRIPTOR_SCHEMA[] =
     "1499kernel-i2-m38-d6-r5-core-execution-descriptor-v1";
-static const char D7_POLICY_TAG[] = "m38-d6-r5-policy";
+static const char D7_POLICY_TAG[] = "m38-d6-r5-policy-witness";
 static const char D7_POLICY_SCHEMA[] =
-    "1499kernel-i2-m38-d6-r5-runtime-policy-decision-v1";
+    "1499kernel-i2-m38-d6-r5-runtime-policy-witness-v1";
 static const char D7_STATE_TAG[] = "m38-d6-r5-state";
 static const char D7_STATE_SCHEMA[] =
     "1499kernel-i2-m38-d6-r5-runtime-state-v1";
@@ -164,19 +167,8 @@ static int d7_layout_digest(noun core, uint8_t digest[32]);
 #define RUNTIME_STIMULUS_TAG_PREFIX "38-stimul"
 
 #if defined(M38_D7_NATIVE)
-/* D6-R5 carries one reviewed direct ResourceCore formula per finite core.
- * These are unbound BLAKE3/Jam identities; the old D5 path retains its
- * single frozen M38-B formula below. */
-static const uint8_t FORMULA_IDS[2][32] = {
-    {0xe0,0x43,0x2f,0xf2,0x9a,0x2d,0x93,0x19,
-     0xc4,0xe9,0x79,0xac,0xb9,0x2a,0x54,0xb3,
-     0x75,0x81,0x2d,0x4f,0x5d,0x52,0x0b,0xfb,
-     0xad,0x6c,0x1e,0xbf,0xaa,0xd2,0xba,0xc4},
-    {0x27,0x5c,0x54,0xc1,0xce,0x5a,0x5f,0x04,
-     0xd8,0x62,0xe3,0xbf,0xb5,0x53,0x4b,0xa2,
-     0xfa,0x03,0x07,0x67,0x0f,0x80,0x79,0xbd,
-     0x8b,0x96,0xd0,0x20,0x66,0x0c,0xb0,0x6f}
-};
+/* The D7 finite authority record is declared below, alongside the core
+ * identity table used by the common parser. */
 #else
 static const uint8_t FORMULA_ID[32] = {
     0xb6,0x7a,0x4a,0x69,0xf3,0xff,0x12,0x25,
@@ -186,17 +178,30 @@ static const uint8_t FORMULA_ID[32] = {
 };
 #endif
 #if defined(M38_D7_NATIVE)
-/* D6-R5/R3 core identities.  These are the reviewed finite authority keys;
- * payload structure is still decoded from ResourcePayload below. */
-static const uint8_t CORE_IDS[2][32] = {
-    {0x4e,0x2d,0x08,0x3b,0x69,0x3a,0xa2,0x16,
-     0x4b,0xf0,0x45,0xcb,0xc0,0x71,0xf1,0x1f,
-     0x24,0xb2,0xd1,0x95,0x1e,0x0c,0x78,0x1f,
-     0x6b,0xc7,0x40,0x01,0x0c,0x65,0xa7,0xa5},
-    {0x94,0xd0,0x6e,0x4c,0x39,0xbb,0x4d,0x6c,
-     0x0a,0x85,0x42,0xfb,0x03,0x12,0x1f,0x49,
-     0x64,0x43,0xc2,0x72,0xca,0xe6,0x44,0x5f,
-     0x09,0xa7,0x37,0x8e,0xeb,0x5f,0x66,0xd6}
+/* One finite authority record binds each reviewed core to its formula.  The
+ * native witness deliberately has no independent positional core/formula
+ * tables that could drift apart. */
+typedef struct {
+    uint8_t core_id[32];
+    uint8_t formula_id[32];
+} d7_authority_t;
+static const d7_authority_t D7_AUTHORITIES[2] = {
+    {{0x4e,0x2d,0x08,0x3b,0x69,0x3a,0xa2,0x16,
+      0x4b,0xf0,0x45,0xcb,0xc0,0x71,0xf1,0x1f,
+      0x24,0xb2,0xd1,0x95,0x1e,0x0c,0x78,0x1f,
+      0x6b,0xc7,0x40,0x01,0x0c,0x65,0xa7,0xa5},
+     {0xe0,0x43,0x2f,0xf2,0x9a,0x2d,0x93,0x19,
+      0xc4,0xe9,0x79,0xac,0xb9,0x2a,0x54,0xb3,
+      0x75,0x81,0x2d,0x4f,0x5d,0x52,0x0b,0xfb,
+      0xad,0x6c,0x1e,0xbf,0xaa,0xd2,0xba,0xc4}},
+    {{0x94,0xd0,0x6e,0x4c,0x39,0xbb,0x4d,0x6c,
+      0x0a,0x85,0x42,0xfb,0x03,0x12,0x1f,0x49,
+      0x64,0x43,0xc2,0x72,0xca,0xe6,0x44,0x5f,
+      0x09,0xa7,0x37,0x8e,0xeb,0x5f,0x66,0xd6},
+     {0x27,0x5c,0x54,0xc1,0xce,0x5a,0x5f,0x04,
+      0xd8,0x62,0xe3,0xbf,0xb5,0x53,0x4b,0xa2,
+      0xfa,0x03,0x07,0x67,0x0f,0x80,0x79,0xbd,
+      0x8b,0x96,0xd0,0x20,0x66,0x0c,0xb0,0x6f}}
 };
 #else
 static const uint8_t CORE_IDS[2][32] = {
@@ -322,6 +327,13 @@ typedef struct {
 static d5_catalog_t g_catalog[D5_CATALOG_CAPACITY];
 static d5_slot_t g_slots[D5_SLOT_COUNT];
 static uint64_t g_publications;
+#if defined(M38_D7_NATIVE)
+/* D7 stages all observable publications until the complete request batch has
+ * succeeded.  The counter is a witness of staged events, never a commit
+ * authority. */
+static uint8_t g_d7_batch_active;
+static uint64_t g_d7_batch_publications;
+#endif
 static uint8_t g_in_flight;
 static uint8_t g_preimage[JAM_MAX_BYTES + D5_MAX_IDENTITY_BYTES];
 static volatile uint32_t g_eval_slot;
@@ -347,6 +359,8 @@ static uint32_t g_result_stage_limit = D5_RESULT_CELL_CAPACITY;
 #if defined(M38_D7_NATIVE)
 static uint8_t g_d7_retry_source;
 static uint8_t g_d7_retry_used;
+static uint64_t g_d7_evaluator_ops_limit;
+static uint32_t g_d7_result_stage_limit;
 #endif
 
 static int d5_result_status_reason(noun result, uint32_t *status,
@@ -369,6 +383,17 @@ extern uint8_t _pill_embed_start[];
 extern uint8_t _pill_embed_end[];
 
 static void d5_hex64(uint64_t value);
+
+static void d5_publish(void)
+{
+#if defined(M38_D7_NATIVE)
+    if (g_d7_batch_active) {
+        g_d7_batch_publications++;
+        return;
+    }
+#endif
+    g_publications++;
+}
 
 static size_t d5_strlen(const char *s)
 {
@@ -930,10 +955,15 @@ static int d5_validate_core(noun core, uint8_t core_id[32], d5_plan_t *plan,
         return 0;
     int index = -1;
     for (int i = 0; i < 2; i++)
+#if defined(M38_D7_NATIVE)
+        if (d5_same_bytes(core_id, D7_AUTHORITIES[i].core_id, 32))
+#else
         if (d5_same_bytes(core_id, CORE_IDS[i], 32))
+#endif
             index = i;
 #if defined(M38_D7_NATIVE)
-    if (index < 0 || !d5_same_bytes(formula_digest, FORMULA_IDS[index], 32))
+    if (index < 0 || !d5_same_bytes(formula_digest,
+                                    D7_AUTHORITIES[index].formula_id, 32))
         return 0;
     *catalog_index = index;
     return 1;
@@ -1727,7 +1757,11 @@ static int d5_admit_catalog(uint32_t index, noun core, noun admission)
     }
     candidate[index].admitted = 1;
     for (uint32_t i = 0; i < 32; i++) {
+#if defined(M38_D7_NATIVE)
+        candidate[index].core_id[i] = D7_AUTHORITIES[index].core_id[i];
+#else
         candidate[index].core_id[i] = CORE_IDS[index][i];
+#endif
         candidate[index].admission_id[i] = ADMISSION_IDS[index][i];
     }
     heap_persist_commit_tx();
@@ -1736,7 +1770,7 @@ static int d5_admit_catalog(uint32_t index, noun core, noun admission)
         if (i != index && candidate[i].admitted)
             g_catalog[i] = candidate[i];
     heap_set_mode(HEAP_MODE_SCRATCH);
-    g_publications++;
+    d5_publish();
     return 1;
 }
 
@@ -1858,7 +1892,7 @@ static noun d5_dispatch_load(noun core, noun admission)
     g_slots[slot_number - 1].state_kind = D5_STATE_INITIALIZED;
     g_slots[slot_number - 1].latest = 0;
     g_slots[slot_number - 1].used = 1;
-    g_publications++;
+    d5_publish();
     return owned;
 }
 
@@ -1973,6 +2007,11 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
     g_witness_cells_limit = 0;
     g_witness_stack_limit = 0;
 #endif
+#if defined(M38_D7_NATIVE)
+    if (g_d7_evaluator_ops_limit != 0)
+        max_ops = g_d7_evaluator_ops_limit;
+    g_d7_evaluator_ops_limit = 0;
+#endif
     nock_budget_set_limits(max_ops, max_cells);
     nock_eval_stack_set_limit(max_stack);
     jmp_buf saved_abort;
@@ -2042,7 +2081,7 @@ static noun d5_dispatch_poke(noun handle, noun stimulus)
                                               slot->state_kind));
     slot->state = candidate;
     slot->state_kind = D5_STATE_NEXT;
-    g_publications++;
+    d5_publish();
     return owned;
 }
 
@@ -2074,7 +2113,7 @@ static noun d5_dispatch_snapshot(noun handle)
     for (uint32_t i = 0; i < 32; i++)
         slot->snapshot_digest[i] = digest[i];
     slot->latest = 1;
-    g_publications++;
+    d5_publish();
     return owned;
 }
 
@@ -2120,7 +2159,7 @@ static noun d5_dispatch_restore(noun handle, noun snapshot)
                                               slot->state_kind));
     slot->state = restored;
     slot->state_kind = restored_kind;
-    g_publications++;
+    d5_publish();
     return owned;
 }
 
@@ -2145,6 +2184,10 @@ noun m38_resource_abi_dispatch(noun request)
     g_result_stage_limit = g_witness_result_cells_limit != 0
         ? g_witness_result_cells_limit : D5_RESULT_CELL_CAPACITY;
     g_witness_result_cells_limit = 0;
+#elif defined(M38_D7_NATIVE)
+    g_result_stage_limit = g_d7_result_stage_limit != 0
+        ? g_d7_result_stage_limit : D5_RESULT_CELL_CAPACITY;
+    g_d7_result_stage_limit = 0;
 #else
     g_result_stage_limit = D5_RESULT_CELL_CAPACITY;
 #endif
@@ -2184,6 +2227,15 @@ noun m38_resource_abi_dispatch(noun request)
 #endif
     g_in_flight = 0;
     int rewound = heap_scratch_rewind(scratch_mark);
+    if (owned == NOUN_ZERO) {
+        /* A bounded result-arena refusal is itself an ABI refusal.  Return it
+         * through the normal staged path so a D7 batch can roll back after
+         * result construction without treating NOUN_ZERO as success or
+         * executing the evaluator a second time. */
+        g_result_stage_limit = D5_RESULT_CELL_CAPACITY;
+        noun refused = d5_refuse(7, 0, NOUN_ZERO);
+        owned = d5_result_stage(refused);
+    }
     if (owned == NOUN_ZERO || !rewound)
         return NOUN_ZERO;
     return owned;
@@ -2308,7 +2360,7 @@ static void d5_digest_text(const uint8_t digest[32])
 /* In-process mutation fingerprint used only by the compiled hostile witness.
  * This is a raw-struct diagnostic fingerprint, not a canonical cross-run
  * authority identity. */
-#if defined(M38_D5_NATIVE_WITNESS)
+#if defined(M38_D5_NATIVE_WITNESS) || defined(M38_D7_NATIVE)
 static void d5_mutation_fingerprint(uint8_t digest[32])
 {
     sha256_ctx_t context;
@@ -3002,13 +3054,14 @@ void m38_resource_abi_boot(void)
 
 #if defined(M38_D7_NATIVE)
 /*
- * M38-D7 native ResourceCore reconciliation.
+ * M38-D7 bounded native compatibility witness.
  *
  * D5 supplied the bounded, data-driven payload decoder and the existing Nock
  * evaluator.  D7 gives that engine a separate boundary: the candidate input
- * is [ResourceCore, CoreExecutionDescriptor, RuntimePolicyDecision], with the
- * peer policy noun retained as compare-only evidence.  The legacy D0 admission noun is not
- * constructed or accepted on this path.  The small conversion helpers below
+ * is [ResourceCore, CoreExecutionDescriptor, PolicyWitness, operations,
+ * witness controls].  The peer policy noun is retained as compare-only
+ * evidence.  The legacy D0 admission noun is not constructed or accepted on
+ * this path.  The small conversion helpers below
  * translate the neutral R5 state/ingress nouns into the evaluator's internal
  * numeric subject; they do not select a graph or carry application metadata.
  */
@@ -3017,6 +3070,35 @@ typedef struct {
     uint32_t operation;
     noun args;
 } d7_request_t;
+
+typedef struct {
+    uint32_t request_index;
+    uint32_t kind;
+    uint64_t value;
+} d7_control_t;
+
+typedef struct {
+    uint32_t operation;
+    uint32_t status;
+    uint64_t reason;
+    uint64_t ops;
+    uint64_t cells;
+    uint64_t stack;
+    uint8_t result[32];
+    uint8_t handle[32];
+    uint8_t state[32];
+    uint8_t next[32];
+    uint8_t effects[32];
+    uint8_t observations[32];
+    uint8_t metrics[32];
+    uint8_t has_load_shape;
+    uint8_t has_poke_shape;
+} d7_result_record_t;
+
+enum {
+    D7_CONTROL_EVALUATOR_REFUSAL = 1,
+    D7_CONTROL_RESULT_STAGE_REFUSAL = 2,
+};
 
 static const char *d7_status_name(uint32_t status)
 {
@@ -3115,26 +3197,54 @@ static int d7_decode_request(noun value, d7_request_t *out)
     return 1;
 }
 
-static int d7_decode_input(noun value, noun *core, noun *descriptor,
-                           noun *policy, noun *operations,
-                           d7_request_t *requests, uint32_t *count)
+static int d7_decode_control(noun value, d7_control_t *out)
 {
-    noun tag, body, fields[5], items[64];
-    uint32_t used;
+    noun tag, body, fields[4];
+    uint32_t request_index, kind;
+    if (!d5_pair(value, &tag, &body)
+        || !d5_atom_is(tag, D7_CONTROL_TAG)
+        || !d5_record(body, fields, 4)
+        || !d5_atom_is(fields[0], D7_CONTROL_SCHEMA)
+        || !d5_u(fields[1], 63, &request_index)
+        || !d5_u(fields[2], D7_CONTROL_RESULT_STAGE_REFUSAL, &kind)
+        || !noun_is_direct(fields[3]))
+        return 0;
+    if (request_index >= 64 || kind == 0)
+        return 0;
+    out->request_index = request_index;
+    out->kind = kind;
+    out->value = direct_val(fields[3]);
+    return out->value != 0;
+}
+
+static int d7_decode_input(noun value, noun *core, noun *descriptor,
+                           noun *policy, noun *operations, noun *controls,
+                           d7_request_t *requests, uint32_t *count,
+                           d7_control_t *decoded_controls,
+                           uint32_t *control_count)
+{
+    noun tag, body, fields[6], items[64], control_items[16];
+    uint32_t used, controls_used;
     if (!d5_pair(value, &tag, &body)
         || !d5_atom_is(tag, D7_INPUT_TAG)
-        || !d5_record(body, fields, 5)
+        || !d5_record(body, fields, 6)
         || !d5_atom_is(fields[0], D7_INPUT_SCHEMA)
-        || !d5_list(fields[4], items, 64, &used) || used == 0)
+        || !d5_list(fields[4], items, 64, &used) || used == 0
+        || !d5_list(fields[5], control_items, 16, &controls_used))
         return 0;
     for (uint32_t i = 0; i < used; i++)
         if (!d7_decode_request(items[i], &requests[i]))
+            return 0;
+    for (uint32_t i = 0; i < controls_used; i++)
+        if (!d7_decode_control(control_items[i], &decoded_controls[i]))
             return 0;
     *core = fields[1];
     *descriptor = fields[2];
     *policy = fields[3];
     *operations = fields[4];
+    *controls = fields[5];
     *count = used;
+    *control_count = controls_used;
     return 1;
 }
 
@@ -3276,6 +3386,22 @@ static int d7_admit_core(uint32_t index, noun core, const uint8_t core_id[32])
     if (g_catalog[index].admitted)
         return noun_eq(g_catalog[index].core, core)
             && d5_same_bytes(g_catalog[index].core_id, core_id, 32);
+#if defined(M38_D7_NATIVE)
+    if (g_d7_batch_active) {
+        /* The batch transaction owns this scratch root.  It is deliberately
+         * not promoted here; d7_commit_catalog() is the only persistence
+         * boundary after every request and result has succeeded. */
+        g_catalog[index].admitted = 1;
+        g_catalog[index].core = core;
+        g_catalog[index].admission = NOUN_ZERO;
+        for (uint32_t i = 0; i < 32; i++) {
+            g_catalog[index].core_id[i] = core_id[i];
+            g_catalog[index].admission_id[i] = 0;
+        }
+        d5_publish();
+        return 1;
+    }
+#endif
     d5_catalog_t candidate[D5_CATALOG_CAPACITY];
     for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
         candidate[i] = g_catalog[i];
@@ -3306,7 +3432,31 @@ static int d7_admit_core(uint32_t index, noun core, const uint8_t core_id[32])
         if (candidate[i].admitted)
             g_catalog[i] = candidate[i];
     heap_set_mode(HEAP_MODE_SCRATCH);
-    g_publications++;
+    d5_publish();
+    return 1;
+}
+
+static int d7_commit_catalog(void)
+{
+    d5_catalog_t candidate[D5_CATALOG_CAPACITY];
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
+        candidate[i] = g_catalog[i];
+    heap_set_mode(HEAP_MODE_PERSIST);
+    heap_persist_begin_tx();
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++) {
+        if (!candidate[i].admitted)
+            continue;
+        if (!noun_copy_checked(g_catalog[i].core, &candidate[i].core)) {
+            heap_persist_abort_tx();
+            heap_set_mode(HEAP_MODE_SCRATCH);
+            return 0;
+        }
+    }
+    heap_persist_commit_tx();
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
+        if (candidate[i].admitted)
+            g_catalog[i] = candidate[i];
+    heap_set_mode(HEAP_MODE_SCRATCH);
     return 1;
 }
 
@@ -3346,7 +3496,7 @@ static noun d7_dispatch_load(noun core, const uint8_t core_id[32],
     slot->state_kind = D5_STATE_INITIALIZED;
     slot->latest = 0;
     slot->used = 1;
-    g_publications++;
+    d5_publish();
     return owned;
 }
 
@@ -3356,13 +3506,22 @@ static int d7_preflight(const d7_request_t *requests, uint32_t count,
                         int *catalog_index)
 {
     uint8_t layout[32];
-    if (!d5_validate_core(core, core_id, plan, catalog_index)
-        || !d7_validate_descriptor(descriptor, core_id)
-        || !d7_validate_policy(policy, core_id)
-        || !d7_layout_digest(core, layout)
-        || count == 0 || requests[0].operation != D5_OP_LOAD
-        || requests[0].args != NOUN_ZERO)
+    if (!d5_validate_core(core, core_id, plan, catalog_index)) {
         return 0;
+    }
+    if (!d7_validate_descriptor(descriptor, core_id)) {
+        return 0;
+    }
+    if (!d7_validate_policy(policy, core_id)) {
+        return 0;
+    }
+    if (!d7_layout_digest(core, layout)) {
+        return 0;
+    }
+    if (count == 0 || requests[0].operation != D5_OP_LOAD
+        || requests[0].args != NOUN_ZERO) {
+        return 0;
+    }
     for (uint32_t i = 1; i < count; i++) {
         noun handle, translated, op_args[2];
         uint32_t slot_number;
@@ -3434,6 +3593,9 @@ static noun d7_run_one(const d7_request_t *request, noun core,
         if (!d7_decode_r5_ingress(&plan, raw_second, core_id,
                                   layout, &translated))
             return d5_refuse(4, 0, NOUN_ZERO);
+        g_result_stage_limit = g_d7_result_stage_limit != 0
+            ? g_d7_result_stage_limit : D5_RESULT_CELL_CAPACITY;
+        g_d7_result_stage_limit = 0;
         return d5_dispatch_poke(handle, translated);
     }
     if (request->operation == D5_OP_PEEK) {
@@ -3455,45 +3617,117 @@ static noun d7_run_one(const d7_request_t *request, noun core,
     return d5_dispatch_restore(handle, translated);
 }
 
-static void d7_print_result(uint32_t operation, noun result)
+static void d7_apply_control(const d7_control_t *controls, uint32_t count,
+                             uint32_t request_index)
 {
-    uint32_t status = 0, reason = 0;
-    if (!d5_result_status_reason(result, &status, &reason)) {
-        uart_puts("M38D7 op=invalid status=invalid\r\n");
-        return;
+    for (uint32_t i = 0; i < count; i++) {
+        if (controls[i].request_index != request_index)
+            continue;
+        if (controls[i].kind == D7_CONTROL_EVALUATOR_REFUSAL)
+            g_d7_evaluator_ops_limit = controls[i].value;
+        else if (controls[i].kind == D7_CONTROL_RESULT_STAGE_REFUSAL)
+            g_d7_result_stage_limit = (uint32_t)controls[i].value;
     }
-    uart_puts("M38D7 op=");
-    uart_puts(d5_operation_name(operation));
-    uart_puts(" status=");
-    uart_puts(d7_status_name(status));
-    uart_puts(" reason=");
-    d5_hex64(reason);
-    uart_puts(" result_sha256=");
-    d5_sha256_text(result);
+}
+
+static int d7_capture_result(uint32_t operation, noun result,
+                             d7_result_record_t *out)
+{
+    uint32_t status = 0;
+    uint32_t reason = 0;
+    *out = (d7_result_record_t){.operation = operation};
+    if (!d5_result_status_reason(result, &status, &reason)
+        || !d5_sha256_digest(result, out->result))
+        return 0;
+    out->status = status;
+    out->reason = reason;
     if (operation == D5_OP_LOAD && status == D5_STATUS_LOAD) {
         noun tag, body, fields[3], load_fields[2];
-        if (d5_pair(result, &tag, &body) && d5_record(body, fields, 3)
-            && d5_record(fields[2], load_fields, 2)) {
-            uart_puts(" handle_sha256="); d5_sha256_text(load_fields[0]);
-            uart_puts(" state_sha256="); d5_sha256_text(load_fields[1]);
-        }
+        if (!d5_pair(result, &tag, &body) || !d5_record(body, fields, 3)
+            || !d5_record(fields[2], load_fields, 2)
+            || !d5_sha256_digest(load_fields[0], out->handle)
+            || !d5_sha256_digest(load_fields[1], out->state))
+            return 0;
+        out->has_load_shape = 1;
     } else if (operation == D5_OP_POKE && status == D5_STATUS_POKE) {
         noun tag, body, fields[3], poke_fields[4], mt, mb, mf[6];
-        if (d5_pair(result, &tag, &body) && d5_record(body, fields, 3)
-            && d5_record(fields[2], poke_fields, 4)
-            && d5_pair(poke_fields[3], &mt, &mb)
-            && d5_record(mb, mf, 6)
-            && noun_is_direct(mf[1]) && noun_is_direct(mf[2])
-            && noun_is_direct(mf[3])) {
-            uart_puts(" ops="); d5_hex64(direct_val(mf[1]));
-            uart_puts(" cells="); d5_hex64(direct_val(mf[2]));
-            uart_puts(" stack="); d5_hex64(direct_val(mf[3]));
-            uart_puts(" next_sha256="); d5_sha256_text(poke_fields[0]);
-            uart_puts(" effects_sha256="); d5_sha256_text(poke_fields[1]);
-            uart_puts(" observations_sha256="); d5_sha256_text(poke_fields[2]);
-            uart_puts(" metrics_sha256="); d5_sha256_text(poke_fields[3]);
-        }
+        if (!d5_pair(result, &tag, &body) || !d5_record(body, fields, 3)
+            || !d5_record(fields[2], poke_fields, 4)
+            || !d5_pair(poke_fields[3], &mt, &mb)
+            || !d5_record(mb, mf, 6)
+            || !noun_is_direct(mf[1]) || !noun_is_direct(mf[2])
+            || !noun_is_direct(mf[3])
+            || !d5_sha256_digest(poke_fields[0], out->next)
+            || !d5_sha256_digest(poke_fields[1], out->effects)
+            || !d5_sha256_digest(poke_fields[2], out->observations)
+            || !d5_sha256_digest(poke_fields[3], out->metrics))
+            return 0;
+        out->ops = direct_val(mf[1]);
+        out->cells = direct_val(mf[2]);
+        out->stack = direct_val(mf[3]);
+        out->has_poke_shape = 1;
     }
+    return 1;
+}
+
+static void d7_print_record(const d7_result_record_t *record)
+{
+    uart_puts("M38D7 op=");
+    uart_puts(d5_operation_name(record->operation));
+    uart_puts(" status=");
+    uart_puts(d7_status_name(record->status));
+    uart_puts(" reason=");
+    d5_hex64(record->reason);
+    uart_puts(" result_sha256=");
+    d5_digest_text(record->result);
+    if (record->has_load_shape) {
+        uart_puts(" handle_sha256="); d5_digest_text(record->handle);
+        uart_puts(" state_sha256="); d5_digest_text(record->state);
+    } else if (record->has_poke_shape) {
+        uart_puts(" ops="); d5_hex64(record->ops);
+        uart_puts(" cells="); d5_hex64(record->cells);
+        uart_puts(" stack="); d5_hex64(record->stack);
+        uart_puts(" next_sha256="); d5_digest_text(record->next);
+        uart_puts(" effects_sha256="); d5_digest_text(record->effects);
+        uart_puts(" observations_sha256="); d5_digest_text(record->observations);
+        uart_puts(" metrics_sha256="); d5_digest_text(record->metrics);
+    }
+    uart_puts("\r\n");
+}
+
+static void d7_print_rollback_witness(uint64_t scratch_before,
+                                      uint64_t persist_before,
+                                      uint64_t atom_bytes_before,
+                                      uint64_t atom_occupancy_before,
+                                      uint64_t publications_before,
+                                      const uint8_t semantic_before[32])
+{
+    uint8_t semantic_after[32];
+    uint64_t scratch_after = heap_cells_used(HEAP_MODE_SCRATCH);
+    uint64_t persist_after = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t atom_bytes_after = atom_store_bytes_used();
+    uint64_t atom_occupancy_after = atom_store_index_occupancy();
+    uint64_t publications_after = g_publications;
+    d5_semantic_authority_digest(semantic_after);
+    int invariant = scratch_before == scratch_after
+        && persist_before == persist_after
+        && atom_bytes_before == atom_bytes_after
+        && atom_occupancy_before == atom_occupancy_after
+        && publications_before == publications_after
+        && d5_same_bytes(semantic_before, semantic_after, 32);
+    uart_puts("M38D7 ROLLBACK status="); uart_puts(invariant ? "pass" : "fail");
+    uart_puts(" scratch_cells_before="); d5_hex64(scratch_before);
+    uart_puts(" scratch_cells_after="); d5_hex64(scratch_after);
+    uart_puts(" persist_cells_before="); d5_hex64(persist_before);
+    uart_puts(" persist_cells_after="); d5_hex64(persist_after);
+    uart_puts(" atom_bytes_before="); d5_hex64(atom_bytes_before);
+    uart_puts(" atom_bytes_after="); d5_hex64(atom_bytes_after);
+    uart_puts(" atom_occupancy_before="); d5_hex64(atom_occupancy_before);
+    uart_puts(" atom_occupancy_after="); d5_hex64(atom_occupancy_after);
+    uart_puts(" publications_before="); d5_hex64(publications_before);
+    uart_puts(" publications_after="); d5_hex64(publications_after);
+    uart_puts(" semantic_authority_before_sha256="); d5_digest_text(semantic_before);
+    uart_puts(" semantic_authority_after_sha256="); d5_digest_text(semantic_after);
     uart_puts("\r\n");
 }
 
@@ -3507,7 +3741,7 @@ static int d7_retry_present(void)
     return !g_d7_retry_used && any;
 }
 
-void m38_resource_core_boot(void);
+void m38_resource_compatibility_witness_boot(void);
 
 static void d7_retry_after_refusal(void)
 {
@@ -3515,11 +3749,11 @@ static void d7_retry_after_refusal(void)
         return;
     g_d7_retry_used = 1;
     g_d7_retry_source = 1;
-    m38_resource_core_boot();
+    m38_resource_compatibility_witness_boot();
     g_d7_retry_source = 0;
 }
 
-void m38_resource_core_boot(void)
+void m38_resource_compatibility_witness_boot(void)
 {
     int jumped = setjmp(nock_abort);
     if (jumped != 0) {
@@ -3537,6 +3771,10 @@ void m38_resource_core_boot(void)
     for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
         g_slots[i] = (d5_slot_t){.generation = 1};
     g_publications = 0;
+    g_d7_batch_active = 0;
+    g_d7_batch_publications = 0;
+    g_d7_evaluator_ops_limit = 0;
+    g_d7_result_stage_limit = 0;
     g_in_flight = 0;
     g_result_arena.cell_count = 0;
     g_result_arena.root = NOUN_ZERO;
@@ -3545,13 +3783,30 @@ void m38_resource_core_boot(void)
     heap_scratch_reset();
     heap_set_mode(HEAP_MODE_SCRATCH);
 
-    noun input, core, descriptor, policy, operations;
+    d5_catalog_t catalog_before[D5_CATALOG_CAPACITY];
+    d5_slot_t slots_before[D5_SLOT_COUNT];
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
+        catalog_before[i] = g_catalog[i];
+    for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
+        slots_before[i] = g_slots[i];
+    uint64_t scratch_cells_before = heap_cells_used(HEAP_MODE_SCRATCH);
+    uint64_t persist_cells_before = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t atom_bytes_before = atom_store_bytes_used();
+    uint64_t atom_occupancy_before = atom_store_index_occupancy();
+    uint64_t publications_before = g_publications;
+    uint8_t semantic_before[32];
+    d5_semantic_authority_digest(semantic_before);
+
+    noun input, core, descriptor, policy, operations, controls;
     d7_request_t requests[64];
+    d7_control_t decoded_controls[16];
     uint32_t request_count = 0;
+    uint32_t control_count = 0;
     cue_bounded_status_t cue_status;
     if (!d5_decode_pill(&input, &cue_status)
         || !d7_decode_input(input, &core, &descriptor, &policy, &operations,
-                            requests, &request_count)) {
+                            &controls, requests, &request_count,
+                            decoded_controls, &control_count)) {
         if (noun_tx_active()) noun_tx_abort();
         heap_scratch_reset();
         uart_puts("M38D7 REFUSE malformed-or-noncanonical-input\r\n");
@@ -3575,26 +3830,76 @@ void m38_resource_core_boot(void)
         d7_retry_after_refusal();
         return;
     }
-    if (noun_tx_active())
-        noun_tx_commit();
     d5_warm_fixed_atoms();
-    uart_puts("M38D7 CORE identity=");
-    d5_digest_text(core_id);
-    uart_puts("\r\n");
-    int witness_ok = 1;
+    d7_result_record_t records[64];
+    uint32_t record_count = 0;
+    uint32_t failed_index = 0;
+    int batch_ok = 1;
+    g_d7_batch_active = 1;
+    g_d7_batch_publications = 0;
     for (uint32_t i = 0; i < request_count; i++) {
+        d7_apply_control(decoded_controls, control_count, i);
         noun result = d7_run_one(&requests[i], core, core_id, &plan, catalog_index);
-        if (result != g_result_arena.root)
+        if (result != g_result_arena.root && result != NOUN_ZERO)
             result = d5_result_stage(result);
-        uint32_t status = 0, reason = 0;
-        if (!d5_result_status_reason(result, &status, &reason))
-            witness_ok = 0;
-        d7_print_result(requests[i].operation, result);
-        if (status == D5_STATUS_REFUSE)
-            witness_ok = 0;
+        if (record_count >= 64
+            || !d7_capture_result(requests[i].operation, result,
+                                  &records[record_count])) {
+            batch_ok = 0;
+            failed_index = i;
+            break;
+        }
+        uint32_t status = records[record_count].status;
+        record_count++;
+        if (status == D5_STATUS_REFUSE) {
+            batch_ok = 0;
+            failed_index = i;
+            break;
+        }
     }
-    uart_puts("M38D7 TERMINAL status=");
-    uart_puts(witness_ok ? "pass" : "refuse");
+    if (batch_ok && !d7_commit_catalog()) {
+        batch_ok = 0;
+        failed_index = request_count;
+    }
+    if (batch_ok) {
+        g_d7_batch_active = 0;
+        g_publications = publications_before + g_d7_batch_publications;
+        if (noun_tx_active())
+            noun_tx_commit();
+        heap_set_mode(HEAP_MODE_SCRATCH);
+        (void)heap_scratch_rewind(0);
+        uart_puts("M38D7 CORE identity=");
+        d5_digest_text(core_id);
+        uart_puts("\r\n");
+        for (uint32_t i = 0; i < record_count; i++)
+            d7_print_record(&records[i]);
+        uart_puts("M38D7 TERMINAL status=pass\r\n");
+        return;
+    }
+    g_d7_batch_active = 0;
+    heap_persist_abort_tx();
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
+        g_catalog[i] = catalog_before[i];
+    for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
+        g_slots[i] = slots_before[i];
+    g_publications = publications_before;
+    if (noun_tx_active())
+        noun_tx_abort();
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    (void)heap_scratch_rewind(0);
+    g_result_arena.cell_count = 0;
+    g_result_arena.root = NOUN_ZERO;
+    if (record_count > 0)
+        d7_print_record(&records[record_count - 1]);
+    uart_puts("M38D7 REFUSE batch-rollback failed_index=");
+    d5_hex64(failed_index);
     uart_puts("\r\n");
+    d7_print_rollback_witness(scratch_cells_before, persist_cells_before,
+                              atom_bytes_before, atom_occupancy_before,
+                              publications_before, semantic_before);
+    uart_puts("M38D7 REFUSE publications="); d5_hex64(g_publications);
+    uart_puts("\r\n");
+    uart_puts("M38D7 TERMINAL status=refuse\r\n");
+    d7_retry_after_refusal();
 }
 #endif

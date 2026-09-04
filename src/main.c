@@ -32,7 +32,7 @@ void main(void) {
     cold_init();
 
 #if defined(M38_D7_NATIVE)
-    m38_resource_core_boot();
+    m38_resource_compatibility_witness_boot();
 #elif defined(M38_D5_NATIVE)
     m38_resource_abi_boot();
 #elif defined(M38_C)
