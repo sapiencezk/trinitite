@@ -51,6 +51,21 @@
 #define D5_WITNESS_RETRY_PILL_OFFSET 0x01000000ULL
 #define D7_RETRY_PILL_OFFSET         0x02000000ULL
 
+#if defined(M38_D8_NATIVE)
+#define D8_RAW_CATALOG_RESERVATION   (4u * 1024u * 1024u)
+#define D8_RECORD_COUNT              2u
+#define D8_FAULT_NONE                0u
+#define D8_FAULT_DECODE_VALIDATION   1u
+#define D8_FAULT_RAW_CATALOG_COPY   2u
+#define D8_FAULT_PERSISTENT_COPY    3u
+#define D8_FAULT_SCRATCH_ALLOCATION 4u
+#define D8_FAULT_ATOM_DATA_INDEX    5u
+#define D8_FAULT_RESULT_STAGING     6u
+#define D8_FAULT_PUBLICATION        7u
+#define D8_MAX_PLACEMENT_FAULT      D8_FAULT_PUBLICATION
+#endif
+
+
 #define D5_TYPE_BOOL              1u
 #define D5_TYPE_UINT16            2u
 
@@ -78,6 +93,13 @@ static const char D5_CORE_DOMAIN[] =
 #else
 static const char D5_CORE_DOMAIN[] =
     "1499kernel:i2:m38-d0-r2:resource-core:v2";
+#endif
+#if defined(M38_D8_NATIVE)
+static const char D8_FORMULA_DOMAIN[] =
+    "1499kernel:i2:m38-d0-r3:formula:v3";
+static const char D8_INPUT_TAG[] = "m38-d8-placement-input-v1";
+static const char D8_INPUT_SCHEMA[] =
+    "1499kernel-i2-m38-d8-placement-input-v1";
 #endif
 static const char D5_SNAPSHOT_DOMAIN[] =
     "1499kernel:i2:m38-d4:latest-snapshot:v1";
@@ -356,6 +378,14 @@ static d5_ingress_shadow_t g_ingress_shadow;
 /* A witness may lower the next top-level result copy only.  The failed copy
  * consumes the control, so its refusal can still be returned and retried. */
 static uint32_t g_result_stage_limit = D5_RESULT_CELL_CAPACITY;
+#if defined(M38_D8_NATIVE)
+/* Experiment-local raw Jam/catalog reservation.  It is deliberately separate
+ * from the noun heap and atom store so the placement ledger cannot charge
+ * canonical ResourceCore bytes to another domain. */
+static uint8_t g_d8_raw_catalog[D8_RAW_CATALOG_RESERVATION];
+static uint32_t g_d8_raw_catalog_used;
+static uint32_t g_d8_raw_catalog_lengths[D8_RECORD_COUNT];
+#endif
 #if defined(M38_D7_NATIVE)
 static uint8_t g_d7_retry_source;
 static uint8_t g_d7_retry_used;
@@ -3902,4 +3932,530 @@ void m38_resource_compatibility_witness_boot(void)
     uart_puts("M38D7 TERMINAL status=refuse\r\n");
     d7_retry_after_refusal();
 }
+#endif
+
+#if defined(M38_D8_NATIVE)
+
+typedef struct {
+    noun core;
+    noun core_ref;
+    noun battery;
+    noun jam;
+    uint32_t jam_bytes;
+    uint32_t raw_offset;
+    noun descriptor;
+    noun policy;
+    d7_request_t requests[64];
+    d7_control_t controls[16];
+    uint32_t request_count;
+    uint32_t control_count;
+    uint8_t core_id[32];
+    d5_plan_t plan;
+    int catalog_index;
+} d8_record_t;
+
+extern uint8_t __text_start[];
+extern uint8_t __text_end[];
+extern uint8_t __rodata_start[];
+extern uint8_t __rodata_end[];
+extern uint8_t __bss_start[];
+extern uint8_t __bss_end[];
+
+static const uint8_t D8_BATTERY_IDENTITIES[D8_RECORD_COUNT][32] = {
+    {0x08,0x46,0xf5,0xa4,0x97,0x30,0x90,0x05,
+     0x98,0xd1,0x6e,0x07,0x85,0x0f,0xce,0xa4,
+     0xa8,0x19,0x56,0xa4,0x76,0x10,0x8d,0x72,
+     0x47,0x19,0x91,0xb7,0xf4,0x21,0xae,0x91},
+    {0xc5,0x0b,0xde,0x89,0x10,0x13,0x2d,0x6f,
+     0x0e,0xd8,0x0f,0x0a,0x76,0xf8,0x83,0x66,
+     0x7c,0xd7,0x7d,0xe0,0x07,0xa4,0xb7,0xa6,
+     0x51,0x5d,0x57,0x39,0x76,0xe5,0x40,0x1d}
+};
+
+static void d8_zero_bytes(uint8_t *out, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++)
+        out[i] = 0;
+}
+
+static void d8_clear_raw_catalog(void)
+{
+    d8_zero_bytes(g_d8_raw_catalog, D8_RAW_CATALOG_RESERVATION);
+    for (uint32_t i = 0; i < D8_RECORD_COUNT; i++)
+        g_d8_raw_catalog_lengths[i] = 0;
+    g_d8_raw_catalog_used = 0;
+}
+
+static uint32_t d8_catalog_entries(void)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
+        count += g_catalog[i].admitted != 0;
+    return count;
+}
+
+static uint32_t d8_used_slots(void)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
+        count += g_slots[i].used != 0;
+    return count;
+}
+
+static int d8_decode_input(noun value, d8_record_t records[D8_RECORD_COUNT],
+                           uint32_t *active, uint32_t *fault)
+{
+    noun tag, body, fields[4], rows[D8_RECORD_COUNT];
+    uint32_t row_count;
+    if (!d5_pair(value, &tag, &body)
+        || !d5_atom_is(tag, D8_INPUT_TAG)
+        || !d5_record(body, fields, 4)
+        || !d5_atom_is(fields[0], D8_INPUT_SCHEMA)
+        || !d5_list(fields[1], rows, D8_RECORD_COUNT, &row_count)
+        || row_count != D8_RECORD_COUNT
+        || !d5_u(fields[2], D8_RECORD_COUNT - 1u, active)
+        || !d5_u(fields[3], D8_MAX_PLACEMENT_FAULT, fault))
+        return 0;
+    for (uint32_t i = 0; i < D8_RECORD_COUNT; i++) {
+        noun rf[9], operations[64], controls[16];
+        uint32_t operation_count, control_count;
+        if (!d5_record(rows[i], rf, 9)
+            || !d5_u(rf[4], D8_RAW_CATALOG_RESERVATION, &records[i].jam_bytes)
+            || !d5_list(rf[7], operations, 64, &operation_count)
+            || operation_count == 0
+            || !d5_list(rf[8], controls, 16, &control_count))
+            return 0;
+        records[i].core = rf[0];
+        records[i].core_ref = rf[1];
+        records[i].battery = rf[2];
+        records[i].jam = rf[3];
+        records[i].descriptor = rf[5];
+        records[i].policy = rf[6];
+        records[i].request_count = operation_count;
+        records[i].control_count = control_count;
+        for (uint32_t j = 0; j < operation_count; j++)
+            if (!d7_decode_request(operations[j], &records[i].requests[j]))
+                return 0;
+        for (uint32_t j = 0; j < control_count; j++)
+            if (!d7_decode_control(controls[j], &records[i].controls[j]))
+                return 0;
+    }
+    return 1;
+}
+
+static int d8_validate_and_copy(d8_record_t *record)
+{
+    uint8_t supplied_core_id[32], supplied_battery_id[32];
+    uint8_t computed_battery_id[32];
+    noun formula, payload;
+    jam_admission_budget_t battery_budget;
+    if (!d5_atom_bytes(record->core_ref, supplied_core_id, sizeof supplied_core_id))
+        return 0;
+    if (!d5_atom_bytes(record->battery, supplied_battery_id,
+                       sizeof supplied_battery_id))
+        return 0;
+    if (!d5_pair(record->core, &formula, &payload))
+        return 0;
+    jam_admission_budget_init(&battery_budget, D5_JAM_WORK_LIMIT);
+    if (!d5_validate_core(record->core, record->core_id, &record->plan,
+                          &record->catalog_index))
+        return 0;
+    if (!d5_same_bytes(record->core_id, supplied_core_id, 32))
+        return 0;
+    if (!d5_domain_digest(formula, D8_FORMULA_DOMAIN, computed_battery_id,
+                          &battery_budget))
+        return 0;
+    if (!d5_same_bytes(computed_battery_id, supplied_battery_id, 32))
+        return 0;
+    if (!d5_same_bytes(computed_battery_id,
+                       D8_BATTERY_IDENTITIES[record->catalog_index], 32))
+        return 0;
+    jam_admission_budget_t budget;
+    jam_admission_budget_init(&budget, D5_JAM_WORK_LIMIT);
+    const uint8_t *canonical;
+    uint64_t canonical_bytes;
+    if (jam_encode_bytes_identity_bounded(record->core, &canonical,
+                                           &canonical_bytes, &budget) != 0
+        || canonical_bytes != record->jam_bytes
+        || record->jam_bytes == 0
+        || g_d8_raw_catalog_used > D8_RAW_CATALOG_RESERVATION - record->jam_bytes)
+        return 0;
+    record->raw_offset = g_d8_raw_catalog_used;
+    if (!noun_atom_read_fixed(record->jam,
+                              g_d8_raw_catalog + record->raw_offset,
+                              record->jam_bytes)
+        || !d5_same_bytes(canonical,
+                          g_d8_raw_catalog + record->raw_offset,
+                          record->jam_bytes))
+        return 0;
+    g_d8_raw_catalog_used += record->jam_bytes;
+    g_d8_raw_catalog_lengths[record->catalog_index] = record->jam_bytes;
+    return 1;
+}
+
+static int d8_raw_catalog_is_zero(void)
+{
+    for (uint32_t i = 0; i < D8_RAW_CATALOG_RESERVATION; i++)
+        if (g_d8_raw_catalog[i] != 0)
+            return 0;
+    return g_d8_raw_catalog_used == 0;
+}
+
+static void d8_print_placement(const char *phase, uint64_t copy_mutations)
+{
+    uint8_t core_hash[32] = {0};
+    sha256_hash(g_d8_raw_catalog, g_d8_raw_catalog_used, core_hash);
+    uart_puts("M38D8 PLACEMENT phase="); uart_puts(phase);
+    uart_puts(" raw_catalog_reservation_bytes="); d5_hex64(D8_RAW_CATALOG_RESERVATION);
+    uart_puts(" raw_catalog_used_bytes="); d5_hex64(g_d8_raw_catalog_used);
+    uart_puts(" raw_catalog_core0_bytes="); d5_hex64(g_d8_raw_catalog_lengths[0]);
+    uart_puts(" raw_catalog_core1_bytes="); d5_hex64(g_d8_raw_catalog_lengths[1]);
+    uart_puts(" raw_catalog_sha256="); d5_digest_text(core_hash);
+    uart_puts(" persistent_semispace_capacity_bytes="); d5_hex64(HEAP_PERSIST_HALF);
+    uart_puts(" persistent_used_bytes="); d5_hex64(heap_cells_used(HEAP_MODE_PERSIST) * sizeof(cell_t));
+    uart_puts(" persistent_copy_pair_bytes="); d5_hex64(HEAP_PERSIST_SIZE);
+    uart_puts(" scratch_capacity_bytes="); d5_hex64(HEAP_SCRATCH_SIZE);
+    uart_puts(" scratch_used_bytes="); d5_hex64(heap_cells_used(HEAP_MODE_SCRATCH) * sizeof(cell_t));
+    uart_puts(" atom_data_capacity_bytes="); d5_hex64(ATOM_DATA_SIZE);
+    uart_puts(" atom_data_used_bytes="); d5_hex64(atom_store_bytes_used());
+    uart_puts(" atom_index_capacity_slots="); d5_hex64(atom_store_index_capacity());
+    uart_puts(" atom_index_used_slots="); d5_hex64(atom_store_index_occupancy());
+    uart_puts(" catalog_metadata_bytes="); d5_hex64(sizeof(d5_catalog_t) * D5_CATALOG_KNOWN_COUNT);
+    uart_puts(" slot_metadata_bytes="); d5_hex64(sizeof(d5_slot_t) * D5_SLOT_COUNT);
+    uart_puts(" validation_staging_bytes="); d5_hex64(sizeof(d8_record_t));
+    uart_puts(" result_staging_bytes="); d5_hex64(sizeof(g_result_cells) + sizeof(g_result_source) + sizeof(g_result_value));
+    uart_puts(" refusal_staging_bytes=");
+    d5_hex64(sizeof(g_nested_result_cells) + sizeof(g_nested_result_source)
+             + sizeof(g_nested_result_value));
+    uart_puts(" copy_mutations="); d5_hex64(copy_mutations);
+    uart_puts(" copy_map_hwm="); d5_hex64(noun_copy_map_hwm());
+    uart_puts(" text_bytes="); d5_hex64((uint64_t)(__text_end - __text_start));
+    uart_puts(" rodata_bytes="); d5_hex64((uint64_t)(__rodata_end - __rodata_start));
+    uart_puts(" bss_bytes="); d5_hex64((uint64_t)(__bss_end - __bss_start));
+    uart_puts(" native_static_bytes="); d5_hex64(sizeof(g_d8_raw_catalog));
+    uart_puts(" placement_claim=qemu-image-only\r\n");
+}
+
+static void d8_print_triple(const d8_record_t *record)
+{
+    uint8_t jam_hash[32];
+    sha256_hash(g_d8_raw_catalog + record->raw_offset,
+                record->jam_bytes, jam_hash);
+    uart_puts("M38D8 TRIPLE catalog_index="); d5_hex64(record->catalog_index);
+    uart_puts(" core_ref_sha256="); d5_digest_text(record->core_id);
+    uart_puts(" nock_battery_sha256=");
+    d5_digest_text(D8_BATTERY_IDENTITIES[record->catalog_index]);
+    uart_puts(" resource_core_jam_bytes="); d5_hex64(record->jam_bytes);
+    uart_puts(" resource_core_jam_sha256="); d5_digest_text(jam_hash);
+    uart_puts("\r\n");
+}
+
+static void d8_print_rollback(const char *stage,
+                              uint64_t scratch_before,
+                              uint64_t persist_before,
+                              uint64_t atom_bytes_before,
+                              uint64_t atom_occupancy_before,
+                              uint64_t publications_before,
+                              const uint8_t semantic_before[32])
+{
+    uint8_t semantic_after[32];
+    uint64_t scratch_after = heap_cells_used(HEAP_MODE_SCRATCH);
+    uint64_t persist_after = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t atom_bytes_after = atom_store_bytes_used();
+    uint64_t atom_occupancy_after = atom_store_index_occupancy();
+    uint64_t publications_after = g_publications;
+    d5_semantic_authority_digest(semantic_after);
+    int clean = scratch_before == scratch_after
+        && persist_before == persist_after
+        && atom_bytes_before == atom_bytes_after
+        && atom_occupancy_before == atom_occupancy_after
+        && publications_before == publications_after
+        && d5_same_bytes(semantic_before, semantic_after, 32)
+        && d8_catalog_entries() == 0
+        && d8_used_slots() == 0
+        && d8_raw_catalog_is_zero();
+    uart_puts("M38D8 ROLLBACK stage="); uart_puts(stage);
+    uart_puts(" status="); uart_puts(clean ? "pass" : "fail");
+    uart_puts(" scratch_before="); d5_hex64(scratch_before);
+    uart_puts(" scratch_after="); d5_hex64(scratch_after);
+    uart_puts(" persist_before="); d5_hex64(persist_before);
+    uart_puts(" persist_after="); d5_hex64(persist_after);
+    uart_puts(" atom_bytes_before="); d5_hex64(atom_bytes_before);
+    uart_puts(" atom_bytes_after="); d5_hex64(atom_bytes_after);
+    uart_puts(" atom_index_before="); d5_hex64(atom_occupancy_before);
+    uart_puts(" atom_index_after="); d5_hex64(atom_occupancy_after);
+    uart_puts(" publications_before="); d5_hex64(publications_before);
+    uart_puts(" publications_after="); d5_hex64(publications_after);
+    uart_puts(" catalog_entries_after="); d5_hex64(d8_catalog_entries());
+    uart_puts(" handles_after="); d5_hex64(d8_used_slots());
+    uart_puts(" raw_catalog_used_after="); d5_hex64(g_d8_raw_catalog_used);
+    uart_puts(" transient_decoder_residue=");
+    d5_hex64(heap_cells_used(HEAP_MODE_SCRATCH));
+    uart_puts(" semantic_before_sha256="); d5_digest_text(semantic_before);
+    uart_puts(" semantic_after_sha256="); d5_digest_text(semantic_after);
+    uart_puts("\r\n");
+}
+
+static void d8_restore_and_refuse(const char *stage,
+                                  d5_catalog_t catalog_before[D5_CATALOG_CAPACITY],
+                                  d5_slot_t slots_before[D5_SLOT_COUNT],
+                                  uint64_t scratch_before,
+                                  uint64_t persist_before,
+                                  uint64_t atom_bytes_before,
+                                  uint64_t atom_occupancy_before,
+                                  uint64_t publications_before,
+                                  const uint8_t semantic_before[32])
+{
+    g_d7_batch_active = 0;
+    heap_persist_abort_tx();
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
+        g_catalog[i] = catalog_before[i];
+    for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
+        g_slots[i] = slots_before[i];
+    g_publications = publications_before;
+    if (noun_tx_active())
+        noun_tx_abort();
+    noun_test_copy_fail_after(-1);
+    noun_test_atom_fail_after(-1);
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    heap_scratch_reset();
+    g_result_arena.cell_count = 0;
+    g_result_arena.root = NOUN_ZERO;
+    g_nested_result_arena.cell_count = 0;
+    g_nested_result_arena.root = NOUN_ZERO;
+    d8_clear_raw_catalog();
+    d8_print_rollback(stage, scratch_before, persist_before,
+                      atom_bytes_before, atom_occupancy_before,
+                      publications_before, semantic_before);
+    uart_puts("M38D8 REFUSE stage="); uart_puts(stage);
+    uart_puts(" publications="); d5_hex64(g_publications);
+    uart_puts("\r\nM38D8 TERMINAL status=refuse\r\n");
+}
+
+static int d8_force_atom_store_failure(void)
+{
+    uint64_t limbs[4] = {
+        0x8d3c4a5b6e7f1021ULL, 0x23456789abcdef01ULL,
+        0x1020304050607080ULL, 0xfedcba9876543210ULL
+    };
+    noun out;
+    noun_test_atom_fail_after(0);
+    int failed = !make_atom_checked(limbs, 4, &out);
+    noun_test_atom_fail_after(-1);
+    return failed;
+}
+
+void m38_resource_placement_experiment_boot(void)
+{
+    int jumped = setjmp(nock_abort);
+    if (jumped != 0) {
+        nock_budget_finish();
+        heap_persist_abort_tx();
+        if (noun_tx_active())
+            noun_tx_abort();
+        noun_test_copy_fail_after(-1);
+        noun_test_atom_fail_after(-1);
+        heap_set_mode(HEAP_MODE_SCRATCH);
+        heap_scratch_reset();
+        d8_clear_raw_catalog();
+        uart_puts("M38D8 REFUSE stage=evaluator-abort\r\n");
+        uart_puts("M38D8 TERMINAL status=refuse\r\n");
+        return;
+    }
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
+        g_catalog[i] = (d5_catalog_t){0};
+    for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
+        g_slots[i] = (d5_slot_t){.generation = 1};
+    g_publications = 0;
+    g_d7_batch_active = 0;
+    g_d7_batch_publications = 0;
+    g_d7_evaluator_ops_limit = 0;
+    g_d7_result_stage_limit = 0;
+    g_in_flight = 0;
+    g_result_arena.cell_count = 0;
+    g_result_arena.root = NOUN_ZERO;
+    g_nested_result_arena.cell_count = 0;
+    g_nested_result_arena.root = NOUN_ZERO;
+    d8_clear_raw_catalog();
+    noun_copy_map_hwm_reset();
+    noun_test_copy_mutations_reset();
+    noun_test_copy_fail_after(-1);
+    noun_test_atom_fail_after(-1);
+    heap_scratch_reset();
+    heap_set_mode(HEAP_MODE_SCRATCH);
+
+    d5_catalog_t catalog_before[D5_CATALOG_CAPACITY];
+    d5_slot_t slots_before[D5_SLOT_COUNT];
+    for (uint32_t i = 0; i < D5_CATALOG_CAPACITY; i++)
+        catalog_before[i] = g_catalog[i];
+    for (uint32_t i = 0; i < D5_SLOT_COUNT; i++)
+        slots_before[i] = g_slots[i];
+    uint64_t scratch_before = heap_cells_used(HEAP_MODE_SCRATCH);
+    uint64_t persist_before = heap_cells_used(HEAP_MODE_PERSIST);
+    uint64_t atom_bytes_before = atom_store_bytes_used();
+    uint64_t atom_occupancy_before = atom_store_index_occupancy();
+    uint64_t publications_before = g_publications;
+    uint8_t semantic_before[32];
+    d5_semantic_authority_digest(semantic_before);
+
+    noun input;
+    d8_record_t records[D8_RECORD_COUNT] = {0};
+    uint32_t active = 0, fault = 0;
+    cue_bounded_status_t cue_status;
+    if (!d5_decode_pill(&input, &cue_status)) {
+        d8_restore_and_refuse("decode-validation", catalog_before, slots_before,
+                              scratch_before, persist_before, atom_bytes_before,
+                              atom_occupancy_before, publications_before,
+                              semantic_before);
+        return;
+    }
+    if (!d8_decode_input(input, records, &active, &fault)) {
+        d8_restore_and_refuse("decode-validation", catalog_before, slots_before,
+                              scratch_before, persist_before, atom_bytes_before,
+                              atom_occupancy_before, publications_before,
+                              semantic_before);
+        return;
+    }
+    if (fault == D8_FAULT_DECODE_VALIDATION) {
+        d8_restore_and_refuse("decode-validation", catalog_before, slots_before,
+                              scratch_before, persist_before, atom_bytes_before,
+                              atom_occupancy_before, publications_before,
+                              semantic_before);
+        return;
+    }
+    for (uint32_t i = 0; i < D8_RECORD_COUNT; i++) {
+        if (!d8_validate_and_copy(&records[i])) {
+            d8_restore_and_refuse("decode-validation", catalog_before, slots_before,
+                                  scratch_before, persist_before, atom_bytes_before,
+                                  atom_occupancy_before, publications_before,
+                                  semantic_before);
+            return;
+        }
+        if (fault == D8_FAULT_RAW_CATALOG_COPY && i == 0) {
+            d8_restore_and_refuse("raw-catalog-copy", catalog_before, slots_before,
+                                  scratch_before, persist_before, atom_bytes_before,
+                                  atom_occupancy_before, publications_before,
+                                  semantic_before);
+            return;
+        }
+    }
+    if (fault == D8_FAULT_ATOM_DATA_INDEX) {
+        (void)d8_force_atom_store_failure();
+        d8_restore_and_refuse("atom-data-index", catalog_before, slots_before,
+                              scratch_before, persist_before, atom_bytes_before,
+                              atom_occupancy_before, publications_before,
+                              semantic_before);
+        return;
+    }
+    d5_warm_fixed_atoms();
+
+    d5_plan_t active_plan;
+    uint8_t active_core_id[32];
+    int active_catalog_index = -1;
+    if (!d7_preflight(records[active].requests, records[active].request_count,
+                      records[active].core, records[active].descriptor,
+                      records[active].policy, active_core_id, &active_plan,
+                      &active_catalog_index)
+        || !d5_same_bytes(active_core_id, records[active].core_id, 32)
+        || active_catalog_index != records[active].catalog_index) {
+        d8_restore_and_refuse("decode-validation", catalog_before, slots_before,
+                              scratch_before, persist_before, atom_bytes_before,
+                              atom_occupancy_before, publications_before,
+                              semantic_before);
+        return;
+    }
+
+    g_d7_batch_active = 1;
+    g_d7_batch_publications = 0;
+    for (uint32_t i = 0; i < D8_RECORD_COUNT; i++) {
+        if (!d7_admit_core((uint32_t)records[i].catalog_index,
+                           records[i].core, records[i].core_id)) {
+            d8_restore_and_refuse("persistent-copy", catalog_before, slots_before,
+                                  scratch_before, persist_before, atom_bytes_before,
+                                  atom_occupancy_before, publications_before,
+                                  semantic_before);
+            return;
+        }
+    }
+    if (fault == D8_FAULT_PERSISTENT_COPY) {
+        noun_test_copy_fail_after(0);
+        (void)d7_commit_catalog();
+        d8_restore_and_refuse("persistent-copy", catalog_before, slots_before,
+                              scratch_before, persist_before, atom_bytes_before,
+                              atom_occupancy_before, publications_before,
+                              semantic_before);
+        return;
+    }
+    if (fault == D8_FAULT_SCRATCH_ALLOCATION) {
+        noun probe;
+        noun_test_copy_fail_after(0);
+        (void)noun_copy_checked(records[active].core, &probe);
+        d8_restore_and_refuse("scratch-allocation", catalog_before, slots_before,
+                              scratch_before, persist_before, atom_bytes_before,
+                              atom_occupancy_before, publications_before,
+                              semantic_before);
+        return;
+    }
+
+    d7_result_record_t results[64];
+    uint32_t result_count = 0;
+    int batch_ok = 1;
+    for (uint32_t i = 0; i < records[active].request_count; i++) {
+        d7_apply_control(records[active].controls, records[active].control_count, i);
+        if (fault == D8_FAULT_RESULT_STAGING && i == 1)
+            g_d7_result_stage_limit = 1;
+        noun result = d7_run_one(&records[active].requests[i], records[active].core,
+                                 records[active].core_id, &active_plan,
+                                 active_catalog_index);
+        if (result != g_result_arena.root && result != NOUN_ZERO)
+            result = d5_result_stage(result);
+        if (result_count >= 64
+            || !d7_capture_result(records[active].requests[i].operation, result,
+                                  &results[result_count])) {
+            batch_ok = 0;
+            break;
+        }
+        uint32_t status = results[result_count].status;
+        result_count++;
+        if (status == D5_STATUS_REFUSE) {
+            batch_ok = 0;
+            break;
+        }
+    }
+    if (batch_ok && fault == D8_FAULT_PUBLICATION)
+        batch_ok = 0;
+    if (batch_ok && !d7_commit_catalog())
+        batch_ok = 0;
+    if (!batch_ok) {
+        const char *stage = fault == D8_FAULT_PUBLICATION ? "publication"
+            : fault == D8_FAULT_RESULT_STAGING ? "result-staging"
+            : "resourceabi-operation";
+        d8_restore_and_refuse(stage, catalog_before, slots_before,
+                              scratch_before, persist_before, atom_bytes_before,
+                              atom_occupancy_before, publications_before,
+                              semantic_before);
+        return;
+    }
+    g_d7_batch_active = 0;
+    g_publications = publications_before + g_d7_batch_publications;
+    if (noun_tx_active())
+        noun_tx_commit();
+    noun_test_copy_fail_after(-1);
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    (void)heap_scratch_rewind(0);
+    uint64_t copy_mutations = noun_test_copy_mutations();
+    d8_print_triple(&records[0]);
+    d8_print_triple(&records[1]);
+    uart_puts("M38D8 ACTIVE catalog_index="); d5_hex64(records[active].catalog_index);
+    uart_puts("\r\n");
+    for (uint32_t i = 0; i < result_count; i++)
+        d7_print_record(&results[i]);
+    d8_print_placement("published", copy_mutations);
+    uart_puts("M38D8 PUBLISHED catalog_entries="); d5_hex64(d8_catalog_entries());
+    uart_puts(" handles="); d5_hex64(d8_used_slots());
+    uart_puts(" transient_decoder_residue=");
+    d5_hex64(heap_cells_used(HEAP_MODE_SCRATCH));
+    uart_puts("\r\nM38D8 TERMINAL status=pass\r\n");
+}
+
 #endif

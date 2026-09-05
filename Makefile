@@ -137,6 +137,7 @@ M38_C ?= 0
 M38_D5_NATIVE ?= 0
 M38_D5_NATIVE_WITNESS ?= 0
 M38_D7_NATIVE ?= 0
+M38_D8_NATIVE ?= 0
 
 ifeq ($(M38_D5_NATIVE),1)
 ifneq ($(PLATFORM),qemu-virt)
@@ -155,6 +156,20 @@ $(error M38_D7_NATIVE=1 cannot be combined with M38_C=1)
 endif
 ifeq ($(M38_D5_NATIVE),1)
 $(error M38_D7_NATIVE=1 cannot be combined with M38_D5_NATIVE=1)
+endif
+endif
+ifeq ($(M38_D8_NATIVE),1)
+ifneq ($(PLATFORM),qemu-virt)
+$(error M38_D8_NATIVE=1 requires PLATFORM=qemu-virt; refusing native MMIO on $(PLATFORM))
+endif
+ifeq ($(M38_C),1)
+$(error M38_D8_NATIVE=1 cannot be combined with M38_C=1)
+endif
+ifeq ($(M38_D5_NATIVE),1)
+$(error M38_D8_NATIVE=1 cannot be combined with M38_D5_NATIVE=1)
+endif
+ifeq ($(M38_D7_NATIVE),1)
+$(error M38_D8_NATIVE=1 selects the D7 engine itself; do not pass M38_D7_NATIVE=1)
 endif
 endif
 
@@ -184,6 +199,9 @@ CFLAGS += -DM38_D5_NATIVE=1
 endif
 ifeq ($(M38_D7_NATIVE),1)
 CFLAGS += -DM38_D7_NATIVE=1
+endif
+ifeq ($(M38_D8_NATIVE),1)
+CFLAGS += -DM38_D8_NATIVE=1 -DM38_D7_NATIVE=1
 endif
 ifeq ($(M38_D5_NATIVE_WITNESS),1)
 ifneq ($(M38_D5_NATIVE),1)
@@ -362,11 +380,15 @@ M38_D7_NATIVE_OBJS =
 ifeq ($(M38_D7_NATIVE),1)
 M38_D7_NATIVE_OBJS = m38_resource_abi_target.o
 endif
-OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+M38_D8_NATIVE_OBJS =
+ifeq ($(M38_D8_NATIVE),1)
+M38_D8_NATIVE_OBJS = m38_resource_abi_target.o
+endif
+OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
 ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)
 OBJ_NAMES := $(filter-out m25_plan_record.o m25_target_core.o,$(OBJ_NAMES))
 endif
-CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M25_TARGET)-$(M26_DUPLEX)-$(M27_COMMISSION)-$(M28_COMMISSION)-$(M29_COMMISSION)-$(M36_TYPED)-$(M37_A)-$(M37_A_R)-$(M38_C)-$(M38_D5_NATIVE)-$(M38_D7_NATIVE)-$(M24_NODE_ID)
+CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M25_TARGET)-$(M26_DUPLEX)-$(M27_COMMISSION)-$(M28_COMMISSION)-$(M29_COMMISSION)-$(M36_TYPED)-$(M37_A)-$(M37_A_R)-$(M38_C)-$(M38_D5_NATIVE)-$(M38_D7_NATIVE)-$(M38_D8_NATIVE)-$(M24_NODE_ID)
 ifeq ($(M38_D5_NATIVE_WITNESS),1)
 CONFIG_KEY := $(CONFIG_KEY)-d5witness
 endif

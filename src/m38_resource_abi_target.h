@@ -15,3 +15,6 @@ void m38_resource_abi_boot(void);
 /* M38-D7 bounded compatibility-witness boundary.  The boot witness admits
  * only the canonical serialized ResourceCore plus its minimal R5 witness. */
 void m38_resource_compatibility_witness_boot(void);
+
+/* M38-D8 Wave 1 Phase 1 bounded placement/admission experiment. */
+void m38_resource_placement_experiment_boot(void);

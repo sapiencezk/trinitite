@@ -222,6 +222,9 @@ static uint32_t g_copy_key[COPY_MAP_MAX];
 static noun     g_copy_val[COPY_MAP_MAX];
 static uint8_t  g_copy_used[COPY_MAP_MAX];
 static int64_t  g_copy_fail_after = -1;
+#if defined(M38_D8_NATIVE)
+static int64_t  g_atom_fail_after = -1;
+#endif
 static uint64_t g_copy_entries;
 static uint64_t g_copy_entries_hwm;
 static uint64_t g_copy_mutations;
@@ -370,6 +373,13 @@ void noun_test_copy_fail_after(int64_t cells)
     g_copy_fail_after = cells;
 }
 
+#if defined(M38_D8_NATIVE)
+void noun_test_atom_fail_after(int64_t atoms)
+{
+    g_atom_fail_after = atoms;
+}
+#endif
+
 noun noun_persist(noun n)
 {
     int old = heap_mode;
@@ -514,6 +524,12 @@ int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
         *out = (noun)limbs[0];   /* direct(v) == v */
         return 1;
     }
+#if defined(M38_D8_NATIVE)
+    if (g_atom_fail_after == 0)
+        return 0;
+    if (g_atom_fail_after > 0)
+        g_atom_fail_after--;
+#endif
 
     /* Compute canonical byte length (trim trailing zero bytes of last limb) */
     size_t byte_len = (size - 1) * 8 + last_limb_bytes(limbs[size - 1]);

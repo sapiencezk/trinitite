@@ -6,9 +6,13 @@ SECTIONS {
     __core0_stack_base = 0x40040000;
     __core0_stack_top = 0x40080000;
     . = 0x40080000;
+    __text_start = .;
     .text.boot : { *(.text.boot) }
     .text       : { *(.text) }
+    __text_end = .;
+    __rodata_start = .;
     .rodata     : { *(.rodata*) }
+    __rodata_end = .;
     .data       : { *(.data*) }
 
     . = 0x48000000;

@@ -114,6 +114,9 @@ void noun_copy_map_hwm_reset(void);
 /* Test-only evidence for a forced partial-copy rollback. */
 void noun_test_copy_mutations_reset(void);
 uint64_t noun_test_copy_mutations(void);
+#if defined(M38_D8_NATIVE)
+void noun_test_atom_fail_after(int64_t atoms);
+#endif
 
 noun  alloc_cell(noun head, noun tail);
 int   alloc_cell_checked(noun head, noun tail, noun *out);
