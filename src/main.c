@@ -6,7 +6,9 @@
 #include "i2_ingress.h"
 #include "i2_admission_metrics.h"
 #include "digital_out.h"
-#if defined(M38_D8_NATIVE)
+#if defined(M38_D8_WAVE_A)
+#include "m38_resource_runtime.h"
+#elif defined(M38_D8_NATIVE)
 #include "m38_resource_abi_target.h"
 #elif defined(M38_D7_NATIVE)
 #include "m38_resource_abi_target.h"
@@ -33,7 +35,9 @@ void main(void) {
     i2_rx_init();
     cold_init();
 
-#if defined(M38_D8_NATIVE)
+#if defined(M38_D8_WAVE_A)
+    m38_resource_wave_a_boot();
+#elif defined(M38_D8_NATIVE)
     m38_resource_placement_experiment_boot();
 #elif defined(M38_D7_NATIVE)
     m38_resource_compatibility_witness_boot();
