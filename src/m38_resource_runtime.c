@@ -328,9 +328,11 @@ static uint64_t b0_live_roots(const ResourceRuntime *runtime)
         if (!session || session->state != 1) continue;
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++) {
             if (session->catalog[j].core != NOUN_ZERO) count++;
-            if (session->cache[j].core != NOUN_ZERO) count++;
-            if (session->cache[j].plan.formula != NOUN_ZERO) count++;
-            if (session->cache[j].plan.payload != NOUN_ZERO) count++;
+            if (session->cache[j].valid) {
+                if (session->cache[j].core != NOUN_ZERO) count++;
+                if (session->cache[j].plan.formula != NOUN_ZERO) count++;
+                if (session->cache[j].plan.payload != NOUN_ZERO) count++;
+            }
         }
         for (uint32_t j = 0; j < RESOURCE_MAX_LIVE_HANDLES; j++) {
             if (session->slots[j].handle_root != NOUN_ZERO) count++;
@@ -1111,12 +1113,17 @@ static int wave_copy_registered_roots(ResourceRuntime *runtime,
 #endif
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
             if (!wave_copy_root(session->catalog[j].core, &copies[i].catalog[j])) goto fail;
-        for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
+        for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++) {
+            /* An empty execution-cache entry owns no roots.  Do not copy
+             * whatever happens to be in its zeroed/stale payload fields as
+             * though admission authority had already become executable. */
+            if (!session->cache[j].valid) continue;
             if (!wave_copy_root(session->cache[j].core, &copies[i].cache_core[j])
                 || !wave_copy_root(session->cache[j].plan.formula,
                                    &copies[i].cache_formula[j])
                 || !wave_copy_root(session->cache[j].plan.payload,
                                    &copies[i].cache_payload[j])) goto fail;
+        }
         for (uint32_t j = 0; j < RESOURCE_MAX_LIVE_HANDLES; j++) {
             if (!wave_copy_root(session->slots[j].handle_root, &copies[i].handle[j])) goto fail;
             if (!wave_copy_root(session->slots[j].state_root, &copies[i].state[j])) goto fail;
@@ -1132,9 +1139,15 @@ static int wave_copy_registered_roots(ResourceRuntime *runtime,
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
             session->catalog[j].core = copies[i].catalog[j];
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++) {
-            session->cache[j].core = copies[i].cache_core[j];
-            session->cache[j].plan.formula = copies[i].cache_formula[j];
-            session->cache[j].plan.payload = copies[i].cache_payload[j];
+            if (session->cache[j].valid) {
+                session->cache[j].core = copies[i].cache_core[j];
+                session->cache[j].plan.formula = copies[i].cache_formula[j];
+                session->cache[j].plan.payload = copies[i].cache_payload[j];
+            } else {
+                session->cache[j].core = NOUN_ZERO;
+                session->cache[j].plan.formula = NOUN_ZERO;
+                session->cache[j].plan.payload = NOUN_ZERO;
+            }
         }
         for (uint32_t j = 0; j < RESOURCE_MAX_LIVE_HANDLES; j++) {
             session->slots[j].handle_root = copies[i].handle[j];
@@ -1294,9 +1307,15 @@ static void wave_apply_root_copies(ResourceRuntime *runtime,
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
             session->catalog[j].core = copies[i].catalog[j];
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++) {
-            session->cache[j].core = copies[i].cache_core[j];
-            session->cache[j].plan.formula = copies[i].cache_formula[j];
-            session->cache[j].plan.payload = copies[i].cache_payload[j];
+            if (session->cache[j].valid) {
+                session->cache[j].core = copies[i].cache_core[j];
+                session->cache[j].plan.formula = copies[i].cache_formula[j];
+                session->cache[j].plan.payload = copies[i].cache_payload[j];
+            } else {
+                session->cache[j].core = NOUN_ZERO;
+                session->cache[j].plan.formula = NOUN_ZERO;
+                session->cache[j].plan.payload = NOUN_ZERO;
+            }
         }
         for (uint32_t j = 0; j < RESOURCE_MAX_LIVE_HANDLES; j++) {
             session->slots[j].handle_root = copies[i].handle[j];
@@ -1323,12 +1342,14 @@ static int wave_promote_registration(ResourceRuntime *runtime,
         if (!session || session->state != 1) continue;
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
             if (!wave_copy_root(session->catalog[j].core, &copies[i].catalog[j])) goto fail;
-        for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
+        for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++) {
+            if (!session->cache[j].valid) continue;
             if (!wave_copy_root(session->cache[j].core, &copies[i].cache_core[j])
                 || !wave_copy_root(session->cache[j].plan.formula,
                                    &copies[i].cache_formula[j])
                 || !wave_copy_root(session->cache[j].plan.payload,
                                    &copies[i].cache_payload[j])) goto fail;
+        }
         for (uint32_t j = 0; j < RESOURCE_MAX_LIVE_HANDLES; j++) {
             if (!wave_copy_root(session->slots[j].handle_root, &copies[i].handle[j])) goto fail;
             if (!wave_copy_root(session->slots[j].state_root, &copies[i].state[j])) goto fail;
@@ -1492,15 +1513,9 @@ M38Status m38_resource_session_init(
         copy->core = new_cores[i];
         copy->core_jam_bytes = pre[i].core_jam_bytes;
         wave_copy(copy->core_jam, catalog->entries[i].resource_core_jam, pre[i].core_jam_bytes);
-        session->cache[i].valid = 1;
-        session->cache[i].descriptor = pre[i].descriptor;
-        session->cache[i].core = copy->core;
-        if (!wave_parse_plan(copy->core, &session->cache[i].plan)) {
-            /* The same core was validated before commit; this is an internal
-             * invariant failure, and no session has been published yet. */
-            wave_broker_release(runtime);
-            return M38_STATUS_INTERNAL;
-        }
+        /* Admission validation proves the catalog/core authority.  The
+         * execution plan is deliberately decoded only by the first LOAD,
+         * where cache, slot, and result publish as one operation. */
     }
     for (uint32_t i = 0; i < RESOURCE_MAX_LIVE_HANDLES; i++)
         session->slots[i].generation = 1;
@@ -1945,12 +1960,14 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
 #endif
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
             if (!wave_copy_root(other->catalog[j].core, &copies[i].catalog[j])) goto collective_fail;
-        for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
+        for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++) {
+            if (!other->cache[j].valid) continue;
             if (!wave_copy_root(other->cache[j].core, &copies[i].cache_core[j])
                 || !wave_copy_root(other->cache[j].plan.formula,
                                    &copies[i].cache_formula[j])
                 || !wave_copy_root(other->cache[j].plan.payload,
                                    &copies[i].cache_payload[j])) goto collective_fail;
+        }
         for (uint32_t j = 0; j < RESOURCE_MAX_LIVE_HANDLES; j++) {
             if (!wave_copy_root(other->slots[j].handle_root, &copies[i].handle[j])) goto collective_fail;
             if (!wave_copy_root(other->slots[j].state_root, &copies[i].state[j])) goto collective_fail;
@@ -2301,9 +2318,8 @@ static M38Status wave_dispatch_operation(ResourceRuntime *runtime,
         }
         WaveCacheEntry *cache = &session->cache[catalog_index];
         WavePlan staged_plan = cache->plan;
-        if (!cache->valid) {
-            if (wave_take_fault(runtime, WAVE_FAULT_CUE_CACHE_INSERT) != M38_STATUS_OK)
-                return M38_STATUS_CUE_CACHE_INSERT;
+        int cache_insert = !cache->valid;
+        if (cache_insert) {
             if (!wave_parse_plan(session->catalog[catalog_index].core, &staged_plan)) {
                 refusal_reason = RESOURCE_REASON_CORE_FAILURE;
                 goto refuse;
@@ -2352,6 +2368,12 @@ static M38Status wave_dispatch_operation(ResourceRuntime *runtime,
         wire_status = RESOURCE_WIRE_LOADED;
         owner = M38_RESULT_OWNER_PRIMARY;
         M38Status failure;
+        /* All decode/construction work is staged above.  This is the real
+         * first-LOAD cache-insertion commit gate: an injected failure leaves
+         * the empty execution cache, slot table, and result roots untouched. */
+        if (cache_insert
+            && wave_take_fault(runtime, WAVE_FAULT_CUE_CACHE_INSERT) != M38_STATUS_OK)
+            return M38_STATUS_CUE_CACHE_INSERT;
         if (wave_take_fault(runtime, WAVE_FAULT_ATOM_RESULT_STAGING) != M38_STATUS_OK)
             return M38_STATUS_ATOM_RESULT_STAGING;
         if (wave_take_fault(runtime, WAVE_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK)

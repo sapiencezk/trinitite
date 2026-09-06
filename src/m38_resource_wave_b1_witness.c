@@ -98,7 +98,26 @@ typedef struct B1Mark {
     uint8_t sha256[32];
 } B1Mark;
 
+typedef struct B1StaleProof {
+    uint64_t address;
+    uint64_t before_selector;
+    uint64_t before_base;
+    uint64_t before_top;
+    uint64_t after_selector;
+    uint64_t after_active_base;
+    uint64_t after_active_top;
+    uint64_t after_inactive_base;
+    uint64_t after_inactive_top;
+    uint64_t status;
+    uint8_t before_active;
+    uint8_t after_active;
+    uint8_t after_inactive;
+    uint8_t selector_flipped;
+    uint8_t valid;
+} B1StaleProof;
+
 static B1Mark b1_known[2][2];
+static B1StaleProof b1_stale_proof;
 static uint32_t b1_record_bytes[2];
 static uint32_t b1_core_bytes[2];
 static uint32_t b1_rows;
@@ -510,6 +529,37 @@ static void b1_put_hex(uint64_t value)
     for (int shift = 60; shift >= 0; shift -= 4) uart_putc((uint8_t)digits[(value >> shift) & 0xfu]);
 }
 
+static uint64_t b1_persist_base(uint64_t selector)
+{
+    return (uint64_t)HEAP_BASE + selector * (uint64_t)HEAP_PERSIST_HALF;
+}
+
+static int b1_range_contains(uint64_t address, uint64_t base, uint64_t top)
+{
+    return top >= base && top - base >= sizeof(cell_t)
+        && address >= base && address <= top - sizeof(cell_t);
+}
+
+static void b1_emit_stale_proof(void)
+{
+    uart_puts("M38D8B1 v=1 stale-proof addr="); b1_put_hex(b1_stale_proof.address);
+    uart_puts(" before_selector="); b1_put_u64(b1_stale_proof.before_selector);
+    uart_puts(" before_base="); b1_put_hex(b1_stale_proof.before_base);
+    uart_puts(" before_top="); b1_put_hex(b1_stale_proof.before_top);
+    uart_puts(" after_selector="); b1_put_u64(b1_stale_proof.after_selector);
+    uart_puts(" after_active_base="); b1_put_hex(b1_stale_proof.after_active_base);
+    uart_puts(" after_active_top="); b1_put_hex(b1_stale_proof.after_active_top);
+    uart_puts(" after_inactive_base="); b1_put_hex(b1_stale_proof.after_inactive_base);
+    uart_puts(" after_inactive_top="); b1_put_hex(b1_stale_proof.after_inactive_top);
+    uart_puts(" before_active="); b1_put_u64(b1_stale_proof.before_active);
+    uart_puts(" after_active="); b1_put_u64(b1_stale_proof.after_active);
+    uart_puts(" after_inactive="); b1_put_u64(b1_stale_proof.after_inactive);
+    uart_puts(" selector_flipped="); b1_put_u64(b1_stale_proof.selector_flipped);
+    uart_puts(" status="); b1_put_u64(b1_stale_proof.status);
+    uart_puts(" valid="); b1_put_u64(b1_stale_proof.valid);
+    uart_puts("\r\n");
+}
+
 static void b1_put_sha(const uint8_t digest[32])
 {
     static const char digits[] = "0123456789abcdef";
@@ -684,6 +734,7 @@ void m38_resource_b1_boot(void)
 
     b1_summary_hash = UINT64_C(1469598103934665603);
     b1_rows = b1_passes = b1_failures = 0;
+    b1_stale_proof = (B1StaleProof){0};
     for (uint32_t i = 0; i < 2; i++) for (uint32_t j = 0; j < 2; j++) b1_known[i][j].valid = 0;
 
     if (!b1_decode_pill(&input)) goto setup_refuse;
@@ -722,6 +773,9 @@ void m38_resource_b1_boot(void)
                       M38_STATUS_OK, B1_OP_LOAD, 1, 0x0eu, 4, &view);
     }
     if (!b1_read_load_view(view, &handle_a)) goto setup_refuse;
+    /* A cache-hit control is intentionally not consumed; keep it from
+     * leaking into the next session's first LOAD. */
+    m38_resource_test_fail_next(runtime, M38_FAULT_NONE);
 
     if (!b1_load_request(1, &request)) goto setup_refuse;
     (void)b1_call("session-b-load-event-data-order", session_b, 1, request,
@@ -825,6 +879,10 @@ void m38_resource_b1_boot(void)
     if (!b1_load_request(0, &request)) goto setup_refuse;
     (void)b1_call("reset-preserves-cache", session_a, 0, request,
                   M38_STATUS_OK, B1_OP_LOAD, 1, 0x0eu, 40, &view);
+    /* A reused cache deliberately does not consume the first-LOAD fault;
+     * clear that one-shot control before dispose/reinit exercises an empty
+     * cache again. */
+    m38_resource_test_fail_next(runtime, M38_FAULT_NONE);
     int same_capability = b1_read_load_view(view, &handle_a) && handle_a.capability == old_handle_a.capability
         && handle_a.generation != old_handle_a.generation;
     b1_row("reset-handle-generation", same_capability, M38_STATUS_OK, view, 1,
@@ -846,17 +904,53 @@ void m38_resource_b1_boot(void)
     if (!b1_make_selector(&selector) || !b1_handle_request(B1_OP_PEEK, &old_handle_a, selector, &request)) goto setup_refuse;
     (void)b1_call("reinit-refuses-old-authority", session_a, 0, request,
                   M38_STATUS_OK, B1_WIRE_REFUSE, 1, 0x0du, 44, &view);
+    m38_resource_test_fail_next(runtime, M38_FAULT_CUE_CACHE_INSERT);
     if (!b1_load_request(0, &request)) goto setup_refuse;
     (void)b1_call("reinit-load", session_a, 0, request,
-                  M38_STATUS_OK, B1_OP_LOAD, 1, 0x0eu, 45, &view);
+                  M38_STATUS_CUE_CACHE_INSERT, 0, 0, b1_mask_all(), 45, &view);
+    if (b1_last_status == M38_STATUS_CUE_CACHE_INSERT) {
+        if (!b1_load_request(0, &request)) goto setup_refuse;
+        (void)b1_call("reinit-load-retry", session_a, 0, request,
+                      M38_STATUS_OK, B1_OP_LOAD, 1, 0x0eu, 46, &view);
+    }
     if (!b1_read_load_view(view, &handle_a)) goto setup_refuse;
 
-    /* Make one old cell inactive by a real collective promotion. */
+    /* Allocate the negative-test cell in the active persistent semispace,
+     * then make it inactive by a real collective promotion.  The request
+     * used as the promotion control is built in scratch so only the named
+     * cell is the stale witness. */
     noun stale;
-    if (!alloc_cell_checked(direct(7), direct(9), &stale)
-        || !b1_valid_request(B1_OP_PEEK, &handle_b1, &plans[1], 0, &request)) goto setup_refuse;
+    heap_set_mode(HEAP_MODE_PERSIST);
+    uint64_t stale_before_selector = heap_persist_selector();
+    uint64_t stale_before_base = b1_persist_base(stale_before_selector);
+    uint64_t stale_before_top = stale_before_base + (uint64_t)HEAP_PERSIST_HALF;
+    if (!alloc_cell_checked(direct(7), direct(9), &stale)) goto setup_refuse;
+    b1_stale_proof.address = (uint64_t)cell_ptr(stale);
+    b1_stale_proof.before_selector = stale_before_selector;
+    b1_stale_proof.before_base = stale_before_base;
+    b1_stale_proof.before_top = stale_before_top;
+    b1_stale_proof.before_active = b1_range_contains(
+        b1_stale_proof.address, stale_before_base, stale_before_top);
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    if (!b1_valid_request(B1_OP_PEEK, &handle_b1, &plans[1], 0, &request)) goto setup_refuse;
     (void)b1_call("stale-cell-promotion-control", session_b, 1, request,
                   M38_STATUS_OK, B1_OP_PEEK, 1, 0x0bu, 46, &view);
+    b1_stale_proof.after_selector = heap_persist_selector();
+    b1_stale_proof.after_active_base = b1_persist_base(b1_stale_proof.after_selector);
+    b1_stale_proof.after_active_top = b1_stale_proof.after_active_base
+        + (uint64_t)HEAP_PERSIST_HALF;
+    uint64_t stale_inactive_selector = b1_stale_proof.after_selector ^ 1u;
+    b1_stale_proof.after_inactive_base = b1_persist_base(stale_inactive_selector);
+    b1_stale_proof.after_inactive_top = b1_stale_proof.after_inactive_base
+        + (uint64_t)HEAP_PERSIST_HALF;
+    b1_stale_proof.after_active = b1_range_contains(
+        b1_stale_proof.address, b1_stale_proof.after_active_base,
+        b1_stale_proof.after_active_top);
+    b1_stale_proof.after_inactive = b1_range_contains(
+        b1_stale_proof.address, b1_stale_proof.after_inactive_base,
+        b1_stale_proof.after_inactive_top);
+    b1_stale_proof.selector_flipped =
+        b1_stale_proof.after_selector != b1_stale_proof.before_selector;
     (void)b1_call("request-invalid-forged-cell", session_a, 0, cell_noun(0x12345678u),
                   M38_STATUS_REQUEST_INVALID, 0, 0, b1_mask_all(), 47, &view);
     (void)b1_call("request-invalid-out-of-range-cell", session_a, 0,
@@ -867,6 +961,13 @@ void m38_resource_b1_boot(void)
                   0, 0, b1_mask_all(), 49, &view);
     (void)b1_call("request-invalid-stale-cell", session_a, 0, stale,
                   M38_STATUS_REQUEST_INVALID, 0, 0, b1_mask_all(), 50, &view);
+    b1_stale_proof.status = b1_last_status;
+    b1_stale_proof.valid = b1_stale_proof.before_active
+        && b1_stale_proof.selector_flipped
+        && !b1_stale_proof.after_active
+        && b1_stale_proof.after_inactive
+        && b1_stale_proof.status == M38_STATUS_REQUEST_INVALID;
+    b1_emit_stale_proof();
     (void)b1_call("request-invalid-missing-indirect-atom", session_a, 0,
                   indirect(UINT64_C(0x3ffffffffffffffe)), M38_STATUS_REQUEST_INVALID,
                   0, 0, b1_mask_all(), 51, &view);
