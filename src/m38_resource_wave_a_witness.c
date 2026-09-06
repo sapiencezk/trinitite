@@ -329,6 +329,17 @@ static int witness_handle_from_load(const ResourceResultView *view, noun *handle
         && (*handle = fields[0], 1);
 }
 
+static int witness_rebase_handle(noun *handle)
+{
+    noun active;
+    /* The value originated in a published LOAD result.  Promotions may
+     * retire the cells backing that value, so copy the noun into the active
+     * persist semispace before submitting the next request. */
+    if (!handle || !noun_copy_checked(*handle, &active)) return 0;
+    *handle = active;
+    return 1;
+}
+
 static int witness_make_handle_request(uint32_t operation, noun handle,
                                        noun second, noun *request)
 {
@@ -527,7 +538,11 @@ void m38_resource_wave_a_boot(void)
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
     /* POKE-B republishes session B's result root, so use the LOAD handle
-     * noun already decoded from that published result before promotion. */
+     * noun re-read from that published result after POKE-A's promotion. */
+    if (!witness_handle_from_load(load_view_b, &handle_b)) {
+        witness_terminal("refuse");
+        return;
+    }
     if (!witness_make_stimulus(&plans[1], &stimulus_b)) {
         witness_terminal("refuse");
         return;
@@ -542,12 +557,15 @@ void m38_resource_wave_a_boot(void)
 
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
-    if (!witness_handle_from_load(load_view_b, &handle_b)) {
+    /* PEEK-B follows B's own promotion.  Its primary result body is a PEEK
+     * observation, not a LOAD result, so keep the handle noun decoded from
+     * B's LOAD publication above. */
+    if (!witness_build_tagged(WITNESS_SELECTOR_TAG, WITNESS_SELECTOR_SCHEMA,
+                              selector_fields, 1, &selector)) {
         witness_terminal("refuse");
         return;
     }
-    if (!witness_build_tagged(WITNESS_SELECTOR_TAG, WITNESS_SELECTOR_SCHEMA,
-                              selector_fields, 1, &selector)) {
+    if (!witness_rebase_handle(&handle_b)) {
         witness_terminal("refuse");
         return;
     }
@@ -562,7 +580,11 @@ void m38_resource_wave_a_boot(void)
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
     /* The LOAD view is borrowed and its root has since been republished by
-     * POKE-A; the handle noun itself remains the decoded LOAD ABI value. */
+     * POKE-A; rebase the decoded LOAD noun after PEEK-B's promotion. */
+    if (!witness_rebase_handle(&handle_a)) {
+        witness_terminal("refuse");
+        return;
+    }
     if (!witness_make_handle_request(WITNESS_OP_SNAPSHOT, handle_a, NOUN_ZERO, &request)) {
         witness_terminal("refuse");
         return;
@@ -577,6 +599,10 @@ void m38_resource_wave_a_boot(void)
 
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
+    if (!witness_rebase_handle(&handle_a)) {
+        witness_terminal("refuse");
+        return;
+    }
     if (!witness_make_handle_request(WITNESS_OP_RESTORE, handle_a, snapshot, &request)) {
         witness_terminal("refuse");
         return;
