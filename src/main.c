@@ -37,7 +37,11 @@ void main(void) {
     cold_init();
 
 #if defined(M38_D8_WAVE_A)
+#if defined(M38_D8_B0_OBSERVABILITY)
+    m38_resource_b0_boot();
+#else
     m38_resource_wave_a_boot();
+#endif
 #elif defined(M38_D8_NATIVE)
     m38_resource_placement_experiment_boot();
 #elif defined(M38_D7_NATIVE)

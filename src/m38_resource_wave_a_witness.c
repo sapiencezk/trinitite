@@ -2,10 +2,18 @@
 #include <stdint.h>
 
 #include "bounded_cue.h"
+#include "jam.h"
+#if defined(M38_D8_B0_OBSERVABILITY)
+#include "m38_resource_b0_observability.h"
+#include "m38_resource_test_controls.h"
+#endif
 #include "m38_resource_runtime.h"
 #include "memory.h"
 #include "noun.h"
 #include "nock.h"
+#if defined(M38_D8_B0_OBSERVABILITY)
+#include "sha256.h"
+#endif
 #include "uart.h"
 
 #define WITNESS_CORE_COUNT 2u
@@ -679,3 +687,442 @@ void m38_resource_wave_a_boot(void)
     }
     witness_terminal("pass");
 }
+
+#if defined(M38_D8_B0_OBSERVABILITY)
+
+typedef struct WitnessStateExternal {
+    uint32_t state_ids[WITNESS_MAX_PLAN_INSTANCES];
+    uint32_t values[WITNESS_MAX_PLAN_INSTANCES][WITNESS_MAX_PLAN_VALUES];
+} WitnessStateExternal;
+
+typedef struct WitnessSnapshotExternal {
+    WitnessHandleExternal handle;
+    WitnessStateExternal state;
+    uint64_t nonce;
+    uint8_t valid;
+} WitnessSnapshotExternal;
+
+static const char WITNESS_PROFILE_ID[] =
+    "1499kernel-i2-m38-numeric-execution-profile-v1-bounded";
+
+static void b0_put_u64(uint64_t value)
+{
+    char buf[24];
+    uint32_t used = 0;
+    if (value == 0) {
+        uart_puts("0");
+        return;
+    }
+    while (value != 0) {
+        buf[used++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+    while (used != 0) uart_putc((uint8_t)buf[--used]);
+}
+
+static void b0_sep(void) { uart_puts(","); }
+
+static void b0_mem(const char *name, const M38B0MemoryPoint *point)
+{
+    uart_puts(name); uart_puts("="); b0_put_u64(point->persistent_cells); b0_sep();
+    b0_put_u64(point->persistent_bytes); b0_sep(); b0_put_u64(point->scratch_cells); b0_sep();
+    b0_put_u64(point->scratch_bytes); b0_sep(); b0_put_u64(point->atom_bytes); b0_sep();
+    b0_put_u64(point->atom_index_occupancy); b0_sep(); b0_put_u64(point->atom_index_probe_depth);
+}
+
+static void b0_sha(const ResourceResultView *view)
+{
+    const uint8_t *bytes = 0;
+    uint64_t length = 0;
+    uint8_t digest[32];
+    jam_admission_budget_t budget;
+    uart_puts(" root_sha=");
+    jam_admission_budget_init(&budget, 2000000ULL);
+    if (!view || !view->root_slot
+        || jam_encode_bytes_identity_bounded(*view->root_slot, &bytes, &length, &budget) != 0) {
+        uart_puts("none");
+        return;
+    }
+    sha256_hash(bytes, length, digest);
+    static const char hex[] = "0123456789abcdef";
+    for (uint32_t i = 0; i < sizeof(digest); i++) {
+        uart_putc((uint8_t)hex[digest[i] >> 4]);
+        uart_putc((uint8_t)hex[digest[i] & 0xfu]);
+    }
+}
+
+static void b0_record_line(const M38B0Record *record, const ResourceResultView *view)
+{
+    uart_puts("M38D8B0 v=1 seq="); b0_put_u64(record->sequence);
+    uart_puts(" sid="); b0_put_u64(record->session_id);
+    uart_puts(" op="); b0_put_u64(record->operation);
+    uart_puts(" st="); b0_put_u64(record->final_status);
+    uart_puts(" wire="); b0_put_u64(record->wire_status);
+    uart_puts(" view="); b0_put_u64(record->view_published);
+    uart_puts(" roots="); b0_put_u64(record->semantic_roots_preserved);
+    uart_puts(" ev="); b0_put_u64(record->evaluator_ops); b0_sep();
+    b0_put_u64(record->evaluator_cells); b0_sep(); b0_put_u64(record->evaluator_peak_depth); b0_sep();
+    b0_put_u64(record->evaluator_aborted);
+    b0_mem(" before", &record->before); b0_mem(" peak", &record->peak); b0_mem(" after", &record->after);
+    uart_puts(" tx="); b0_put_u64(record->scratch_entry_mark); b0_sep();
+    b0_put_u64(record->scratch_final_mark); b0_sep(); b0_put_u64(record->scratch_rewound);
+    b0_sep(); b0_put_u64(record->semispace_before); b0_sep(); b0_put_u64(record->semispace_after);
+    b0_sep(); b0_put_u64(record->registered_sessions_before); b0_sep(); b0_put_u64(record->registered_sessions_after);
+    b0_sep(); b0_put_u64(record->live_roots_before); b0_sep(); b0_put_u64(record->live_roots_after);
+    b0_sep(); b0_put_u64(record->promotion_delta);
+    uart_puts(" cp="); b0_put_u64(record->copied_session_a_cells); b0_sep();
+    b0_put_u64(record->copied_session_b_cells); b0_sep(); b0_put_u64(record->copied_staged_cells); b0_sep();
+    b0_put_u64(record->copy_map_passes); b0_sep(); b0_put_u64(record->copy_map_clear_bytes); b0_sep();
+    b0_put_u64(record->copy_map_peak_entries); b0_sep(); b0_put_u64(record->copy_map_peak_probe_depth);
+    uart_puts(" dec="); b0_put_u64(record->resource_core_parse_count_before); b0_sep();
+    b0_put_u64(record->resource_core_parse_count_after); b0_sep();
+    b0_put_u64(record->request_safety_traversal_count); b0_sep(); b0_put_u64(record->request_decode_count);
+    uart_puts(" gen="); b0_put_u64(record->primary_generation_a_before); b0_sep();
+    b0_put_u64(record->primary_generation_a_after); b0_sep(); b0_put_u64(record->refusal_generation_a_before); b0_sep();
+    b0_put_u64(record->refusal_generation_a_after); b0_sep(); b0_put_u64(record->primary_generation_b_before); b0_sep();
+    b0_put_u64(record->primary_generation_b_after); b0_sep(); b0_put_u64(record->refusal_generation_b_before); b0_sep();
+    b0_put_u64(record->refusal_generation_b_after);
+    b0_sha(view);
+    uart_puts("\r\n");
+}
+
+static int b0_handle_from_noun(noun value, WitnessHandleExternal *out)
+{
+    noun fields[4];
+    uint64_t capability, generation;
+    uint32_t slot;
+    if (!out || !witness_record(value, fields, 4)
+        || !witness_u64(fields[0], UINT64_MAX, &capability) || capability == 0
+        || !witness_u(fields[1], WITNESS_MAX_LIVE_HANDLES, &slot) || slot == 0
+        || !witness_u64(fields[2], UINT64_MAX, &generation) || generation == 0
+        || !noun_atom_read_fixed(fields[3], out->admission_id, WITNESS_HANDLE_DIGEST_BYTES)) return 0;
+    out->capability = capability;
+    out->slot = slot;
+    out->generation = generation;
+    return 1;
+}
+
+static int b0_state_export(noun value, const WitnessPlan *plan,
+                           WitnessSnapshotExternal *out)
+{
+    noun tag, body, fields[4], instances[WITNESS_MAX_PLAN_INSTANCES];
+    uint32_t instance_count;
+    if (!witness_pair(value, &tag, &body)
+        || !witness_atom_text(tag, "m38-resource-abi-v1-numeric-state")
+        || !witness_record(body, fields, 4)
+        || !witness_atom_text(fields[2], WITNESS_PROFILE_ID)
+        || !witness_list(fields[3], instances, WITNESS_MAX_PLAN_INSTANCES, &instance_count)
+        || instance_count != plan->instance_count) return 0;
+    for (uint32_t i = 0; i < instance_count; i++) {
+        noun instance_tag, instance_body, instance_fields[4];
+        noun values[WITNESS_MAX_PLAN_VALUES];
+        uint32_t instance, state_id, value_count;
+        if (!witness_pair(instances[i], &instance_tag, &instance_body)
+            || !witness_atom_text(instance_tag, "m38-resource-abi-v1-instance-state")
+            || !witness_record(instance_body, instance_fields, 4)
+            || !witness_u(instance_fields[1], WITNESS_MAX_PLAN_INSTANCES, &instance)
+            || instance == 0 || !witness_u(instance_fields[2], WITNESS_MAX_PLAN_STATES, &state_id)
+            || !witness_list(instance_fields[3], values, WITNESS_MAX_PLAN_VALUES, &value_count)
+            || instance > plan->instance_count
+            || value_count != plan->types[plan->instance_types[instance - 1u] - 1u].value_count) return 0;
+        uint32_t index = instance - 1u;
+        const WitnessPlanType *type = &plan->types[plan->instance_types[index] - 1u];
+        if (state_id == 0 || state_id > type->state_count) return 0;
+        out->state.state_ids[index] = state_id;
+        for (uint32_t j = 0; j < value_count; j++) {
+            noun value_tag, value_body, value_fields[4];
+            uint32_t id, kind, raw;
+            if (!witness_pair(values[j], &value_tag, &value_body)
+                || !witness_atom_text(value_tag, "m38-resource-abi-v1-numeric-value")
+                || !witness_record(value_body, value_fields, 4)
+                || !witness_u(value_fields[1], WITNESS_MAX_PLAN_VALUES, &id)
+                || id != type->value_ids[j]
+                || !witness_u(value_fields[2], 2, &kind)
+                || kind != type->value_types[j]
+                || !witness_u(value_fields[3], kind == 1 ? 1 : 65535, &raw)) return 0;
+            out->state.values[index][j] = raw;
+        }
+    }
+    return 1;
+}
+
+static int b0_snapshot_export(const ResourceResultView *view, const WitnessPlan *plan,
+                              WitnessSnapshotExternal *out)
+{
+    noun body, fields[3];
+    if (!out || !view || !witness_result_body(view, &body)
+        || !witness_record(body, fields, 3)
+        || !b0_handle_from_noun(fields[0], &out->handle)
+        || !b0_state_export(fields[1], plan, out)
+        || !witness_u64(fields[2], UINT64_MAX, &out->nonce)) return 0;
+    out->valid = 1;
+    return 1;
+}
+
+static int b0_state_build(const WitnessSnapshotExternal *snapshot,
+                          const WitnessPlan *plan, noun *out)
+{
+    noun instances[WITNESS_MAX_PLAN_INSTANCES], admission;
+    if (!snapshot || !snapshot->valid
+        || !witness_digest_atom(snapshot->handle.admission_id, &admission)) return 0;
+    for (uint32_t i = plan->instance_count; i != 0; i--) {
+        uint32_t index = i - 1u;
+        const WitnessPlanType *type = &plan->types[plan->instance_types[index] - 1u];
+        noun values[WITNESS_MAX_PLAN_VALUES];
+        for (uint32_t j = type->value_count; j != 0; j--) {
+            uint32_t value = j - 1u;
+            if (!witness_make_value(type->value_ids[value], type->value_types[value],
+                                    snapshot->state.values[index][value], &values[value])) return 0;
+        }
+        noun value_list, instance_fields[3];
+        if (!witness_build_list(values, type->value_count, &value_list)) return 0;
+        instance_fields[0] = direct(index + 1u);
+        instance_fields[1] = direct(snapshot->state.state_ids[index]);
+        instance_fields[2] = value_list;
+        if (!witness_build_tagged("m38-resource-abi-v1-instance-state",
+                                  "m38-resource-abi-v1-instance-state-schema-v1",
+                                  instance_fields, 3, &instances[index])) return 0;
+    }
+    noun instance_list, fields[3];
+    if (!witness_build_list(instances, plan->instance_count, &instance_list)) return 0;
+    fields[0] = admission;
+    fields[1] = witness_cord(WITNESS_PROFILE_ID);
+    fields[2] = instance_list;
+    return witness_build_tagged("m38-resource-abi-v1-numeric-state",
+                                "m38-resource-abi-v1-numeric-state-schema-v1",
+                                fields, 3, out);
+}
+
+static int b0_snapshot_to_noun(const WitnessSnapshotExternal *snapshot,
+                               const WitnessPlan *plan, noun *out)
+{
+    noun handle, state, fields[3];
+    if (!snapshot || !snapshot->valid || !witness_handle_to_noun(&snapshot->handle, &handle)
+        || !b0_state_build(snapshot, plan, &state)) return 0;
+    fields[0] = handle;
+    fields[1] = state;
+    fields[2] = direct(snapshot->nonce);
+    return witness_build_record(fields, 3, out);
+}
+
+static int b0_make_stimulus(const WitnessPlan *plan, uint32_t delta, noun *out)
+{
+    const WitnessPlanType *chosen = 0;
+    uint32_t event_index = 0;
+    for (uint32_t i = 0; i < plan->type_count && !chosen; i++) {
+        const WitnessPlanType *type = &plan->types[i];
+        for (uint32_t j = 0; j < type->event_count; j++) {
+            if (type->event_value_counts[j] == 0) continue;
+            uint32_t first_id = type->event_value_ids[j][0];
+            for (uint32_t k = 0; k < type->value_count; k++)
+                if (type->value_ids[k] == first_id && type->value_types[k] == 1) {
+                    chosen = type; event_index = j; break;
+                }
+            if (chosen) break;
+        }
+    }
+    if (!chosen) return 0;
+    noun values[WITNESS_MAX_PLAN_VALUES];
+    uint32_t value_count = chosen->event_value_counts[event_index];
+    for (uint32_t i = 0; i < value_count; i++) {
+        uint32_t id = chosen->event_value_ids[event_index][i], kind = 0;
+        for (uint32_t j = 0; j < chosen->value_count; j++)
+            if (chosen->value_ids[j] == id) kind = chosen->value_types[j];
+        uint32_t value = kind == 1 ? (delta & 1u) : delta;
+        if ((kind != 1 && kind != 2) || !witness_make_value(id, kind, value, &values[i])) return 0;
+    }
+    noun value_list, fields[2];
+    if (!witness_build_list(values, value_count, &value_list)) return 0;
+    fields[0] = direct(chosen->event_ids[event_index]);
+    fields[1] = value_list;
+    return witness_build_tagged(WITNESS_STIMULUS_TAG, WITNESS_STIMULUS_SCHEMA, fields, 2, out);
+}
+
+static int b0_call(ResourceSession *session, noun request, M38Status expected_status,
+                   uint8_t expected_wire, const ResourceResultView **view_out,
+                   M38B0Record *record_out)
+{
+    const ResourceResultView *view = 0;
+    M38Status status = m38_resource_session_dispatch(session, request, &view);
+    if (!m38_resource_b0_read(record_out)) return 0;
+    b0_record_line(record_out, view);
+    if (view_out) *view_out = view;
+    return status == expected_status
+        && ((expected_status != M38_STATUS_OK && view == 0)
+            || (expected_status == M38_STATUS_OK
+                && view != 0 && view->wire_status == expected_wire));
+}
+
+void m38_resource_b0_boot(void)
+{
+    noun input;
+    uint32_t record_bytes[2], core_bytes[2];
+    if (!witness_decode_pill(&input) || !witness_extract_jams(input, record_bytes, core_bytes)) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    if (noun_tx_active()) noun_tx_abort();
+    heap_scratch_reset();
+    m38_resource_b0_reset();
+    SupervisorAdmissionEntry entries[2] = {
+        {witness_jams[0][0], record_bytes[0], witness_jams[0][1], core_bytes[0]},
+        {witness_jams[1][0], record_bytes[1], witness_jams[1][1], core_bytes[1]},
+    };
+    SupervisorAdmissionCatalog catalog;
+    ResourceRuntime *runtime;
+    ResourceSession *session_a, *session_b;
+    SessionCapability cap_a, cap_b;
+    if (m38_supervisor_admission_catalog_make(&catalog, entries, 2) != M38_STATUS_OK
+        || m38_resource_runtime_init(witness_control, WITNESS_RUNTIME_CONTROL_BYTES,
+                                     witness_workspace, WITNESS_RUNTIME_WORKSPACE_BYTES,
+                                     &runtime) != M38_STATUS_OK
+        || m38_resource_session_init(runtime, witness_session_a, WITNESS_SESSION_BYTES,
+                                     &catalog, &session_a, &cap_a) != M38_STATUS_OK
+        || m38_resource_session_init(runtime, witness_session_b, WITNESS_SESSION_BYTES,
+                                     &catalog, &session_b, &cap_b) != M38_STATUS_OK) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    (void)cap_a; (void)cap_b;
+    WitnessPlan plans[2];
+    for (uint32_t i = 0; i < 2; i++) {
+        noun core;
+        heap_set_mode(HEAP_MODE_PERSIST);
+        if (cue_bounded_bytes(witness_jams[i][1], core_bytes[i], &cue_i2_limits,
+                              HEAP_MODE_PERSIST, &core) != CUE_BOUNDED_OK
+            || !witness_parse_plan(core, &plans[i])) {
+            uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+        }
+        noun_tx_commit();
+    }
+    WitnessHandleExternal handles[2];
+    WitnessSnapshotExternal snapshots[2] = {0};
+    const ResourceResultView *previous_views[2] = {0};
+    uint64_t previous_generations[2] = {0};
+    M38B0Record record;
+    const ResourceResultView *view = 0;
+    noun request, core;
+    heap_set_mode(HEAP_MODE_PERSIST);
+    if (cue_bounded_bytes(witness_jams[0][1], core_bytes[0], &cue_i2_limits,
+                          HEAP_MODE_PERSIST, &core) != CUE_BOUNDED_OK) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    noun_tx_commit();
+    if (!witness_make_request(WITNESS_OP_LOAD, core, &request)
+        || !b0_call(session_a, request, M38_STATUS_OK, 1u, &view, &record)
+        || !witness_handle_from_load(view, &handles[0])) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    heap_set_mode(HEAP_MODE_PERSIST);
+    if (cue_bounded_bytes(witness_jams[1][1], core_bytes[1], &cue_i2_limits,
+                          HEAP_MODE_PERSIST, &core) != CUE_BOUNDED_OK) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    noun_tx_commit();
+    if (!witness_make_request(WITNESS_OP_LOAD, core, &request)
+        || !b0_call(session_b, request, M38_STATUS_OK, 1u, &view, &record)
+        || !witness_handle_from_load(view, &handles[1])) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+
+    for (uint32_t index = 0; index < 256u; index++) {
+        uint32_t target = index & 1u, turn = index / 2u, kind = turn & 7u;
+        ResourceSession *session = target == 0 ? session_a : session_b;
+        const WitnessPlan *plan = &plans[target];
+        WitnessHandleExternal *handle = &handles[target];
+        noun second = NOUN_ZERO;
+        uint32_t operation;
+        if (kind == 0u || kind == 1u) {
+            operation = WITNESS_OP_POKE;
+            if (!b0_make_stimulus(plan, 1u + ((turn * 3u + target) % 7u), &second)) {
+                uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+            }
+        } else if (kind == 2u || kind == 3u) {
+            operation = WITNESS_OP_PEEK;
+            noun selector_fields[1] = {direct(1)};
+            if (!witness_build_tagged(WITNESS_SELECTOR_TAG, WITNESS_SELECTOR_SCHEMA,
+                                      selector_fields, 1, &second)) {
+                uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+            }
+        } else if (kind == 4u || kind == 5u) {
+            operation = WITNESS_OP_SNAPSHOT;
+        } else {
+            operation = WITNESS_OP_RESTORE;
+            if (!b0_snapshot_to_noun(&snapshots[target], plan, &second)) {
+                uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+            }
+        }
+        heap_set_mode(HEAP_MODE_PERSIST);
+        const ResourceResultView *previous_view = previous_views[target];
+        uint64_t previous_generation = previous_generations[target];
+        if (!witness_make_handle_request(operation, handle, second, &request)
+            || !b0_call(session, request, M38_STATUS_OK, (uint8_t)operation,
+                        &view, &record)) {
+            uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+        }
+        if (previous_view && previous_view->generation == previous_generation) {
+            uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+        }
+        previous_views[target] = view;
+        previous_generations[target] = view->generation;
+        if (operation == WITNESS_OP_SNAPSHOT
+            && !b0_snapshot_export(view, plan, &snapshots[target])) {
+            uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+        }
+        view = 0;
+    }
+
+    noun selector_fields[1] = {direct(1)}, selector;
+    if (!witness_build_tagged(WITNESS_SELECTOR_TAG, WITNESS_SELECTOR_SCHEMA,
+                              selector_fields, 1, &selector)
+        || !witness_make_handle_request(WITNESS_OP_PEEK, &handles[0], selector, &request)
+        || !b0_call(session_b, request, M38_STATUS_OK, WITNESS_WIRE_REFUSE,
+                    &view, &record)) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    noun stimulus;
+    if (!b0_make_stimulus(&plans[0], 1u, &stimulus)
+        || !witness_make_handle_request(WITNESS_OP_POKE, &handles[0], stimulus, &request)) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    m38_resource_test_fail_next(runtime, M38_FAULT_COLLECTIVE_COMMIT);
+    if (!b0_call(session_a, request, M38_STATUS_COLLECTIVE_COMMIT, 0, &view, &record)
+        || record.view_published != 0 || record.semantic_roots_preserved == 0) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    if (!b0_make_stimulus(&plans[0], 1u, &stimulus)
+        || !witness_make_handle_request(WITNESS_OP_POKE, &handles[0], stimulus, &request)
+        || !b0_call(session_a, request, M38_STATUS_OK, 2u, &view, &record)) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    const ResourceResultView *accepted_view = view;
+    uint64_t accepted_generation = accepted_view->generation;
+    if (m38_resource_session_reset(runtime, session_a) != M38_STATUS_OK
+        || accepted_view->owner != M38_RESULT_OWNER_NONE
+        || accepted_view->generation == accepted_generation
+        || *accepted_view->root_slot != NOUN_ZERO) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    if (!witness_build_tagged(WITNESS_SELECTOR_TAG, WITNESS_SELECTOR_SCHEMA,
+                              selector_fields, 1, &selector)
+        || !witness_make_handle_request(WITNESS_OP_PEEK, &handles[0], selector, &request)
+        || !b0_call(session_a, request, M38_STATUS_OK, WITNESS_WIRE_REFUSE,
+                    &view, &record)) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    const ResourceResultView *reset_refusal_view = view;
+    uint64_t reset_refusal_generation = reset_refusal_view->generation;
+    if (m38_resource_session_dispose(runtime, session_a) != M38_STATUS_OK
+        || reset_refusal_view->owner != M38_RESULT_OWNER_NONE
+        || reset_refusal_view->generation == reset_refusal_generation
+        || *reset_refusal_view->root_slot != NOUN_ZERO) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    if (!b0_call(session_a, request, M38_STATUS_SESSION_CLOSED, 0,
+                 &view, &record)) {
+        uart_puts("M38D8B0 v=1 terminal=refuse\r\n"); return;
+    }
+    uart_puts("M38D8B0 v=1 focus=pass\r\n");
+    uart_puts("M38D8B0 v=1 atomicity=pass\r\n");
+    uart_puts("M38D8B0 v=1 terminal=pass\r\n");
+}
+
+#endif

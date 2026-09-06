@@ -2,6 +2,9 @@
 #include <stddef.h>
 #include "noun.h"
 #include "i2_admission_metrics.h"
+#if defined(M38_D8_B0_OBSERVABILITY)
+#include "m38_resource_b0_observability.h"
+#endif
 #include "memory.h"
 #include "blake3.h"
 #include "uart.h"
@@ -228,6 +231,14 @@ static int64_t  g_atom_fail_after = -1;
 static uint64_t g_copy_entries;
 static uint64_t g_copy_entries_hwm;
 static uint64_t g_copy_mutations;
+#if defined(M38_D8_B0_OBSERVABILITY)
+static M38B0CopyDomain g_b0_copy_domain;
+static uint64_t g_b0_copy_cells[4];
+static uint64_t g_b0_copy_passes;
+static uint64_t g_b0_copy_clear_bytes;
+static uint64_t g_b0_copy_peak_entries;
+static uint64_t g_b0_copy_peak_probe_depth;
+#endif
 
 static void copy_entry_inserted(void)
 {
@@ -237,6 +248,10 @@ static void copy_entry_inserted(void)
     i2_admission_metrics_max(
         &g_i2_admission_metrics.copy_cache_entries_hwm,
         g_copy_entries);
+#if defined(M38_D8_B0_OBSERVABILITY)
+    if (g_copy_entries > g_b0_copy_peak_entries)
+        g_b0_copy_peak_entries = g_copy_entries;
+#endif
 }
 
 static void copy_probe(uint32_t probe)
@@ -244,6 +259,10 @@ static void copy_probe(uint32_t probe)
     i2_admission_metrics_max(
         &g_i2_admission_metrics.copy_probe_hwm,
         (uint64_t)probe + 1u);
+#if defined(M38_D8_B0_OBSERVABILITY)
+    if ((uint64_t)probe + 1u > g_b0_copy_peak_probe_depth)
+        g_b0_copy_peak_probe_depth = (uint64_t)probe + 1u;
+#endif
 }
 
 static void copy_map_clear(void)
@@ -254,7 +273,19 @@ static void copy_map_clear(void)
     g_i2_admission_metrics.copy_passes++;
     g_i2_admission_metrics.copy_clear_count++;
     g_i2_admission_metrics.copy_clear_bytes += sizeof g_copy_used;
+#if defined(M38_D8_B0_OBSERVABILITY)
+    g_b0_copy_passes++;
+    g_b0_copy_clear_bytes += sizeof g_copy_used;
+#endif
 }
+
+#if defined(M38_D8_B0_OBSERVABILITY)
+static void b0_copy_cell_allocated(void)
+{
+    if (g_b0_copy_domain <= M38_B0_COPY_STAGED)
+        g_b0_copy_cells[g_b0_copy_domain]++;
+}
+#endif
 
 static noun noun_copy_rec(noun n)
 {
@@ -276,6 +307,9 @@ static noun noun_copy_rec(noun n)
     noun nh  = noun_copy_rec(c->head);
     noun nt  = noun_copy_rec(c->tail);
     noun neu = alloc_cell(nh, nt);
+#if defined(M38_D8_B0_OBSERVABILITY)
+    b0_copy_cell_allocated();
+#endif
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
         copy_probe(k);
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
@@ -334,6 +368,9 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
         g_copy_fail_after--;
     if (!alloc_cell_checked(nh, nt, &neu))
         return 0;
+#if defined(M38_D8_B0_OBSERVABILITY)
+    b0_copy_cell_allocated();
+#endif
     g_copy_mutations++;
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
         copy_probe(k);
@@ -372,6 +409,33 @@ void noun_test_copy_fail_after(int64_t cells)
 {
     g_copy_fail_after = cells;
 }
+
+#if defined(M38_D8_B0_OBSERVABILITY)
+void noun_b0_copy_metrics_reset(void)
+{
+    g_b0_copy_domain = M38_B0_COPY_NONE;
+    for (uint32_t i = 0; i < 4; i++) g_b0_copy_cells[i] = 0;
+    g_b0_copy_passes = 0;
+    g_b0_copy_clear_bytes = 0;
+    g_b0_copy_peak_entries = 0;
+    g_b0_copy_peak_probe_depth = 0;
+}
+
+void noun_b0_copy_domain_set(M38B0CopyDomain domain)
+{
+    g_b0_copy_domain = domain <= M38_B0_COPY_STAGED ? domain : M38_B0_COPY_NONE;
+}
+
+uint64_t noun_b0_copy_cells(M38B0CopyDomain domain)
+{
+    return domain <= M38_B0_COPY_STAGED ? g_b0_copy_cells[domain] : 0;
+}
+
+uint64_t noun_b0_copy_passes(void) { return g_b0_copy_passes; }
+uint64_t noun_b0_copy_clear_bytes(void) { return g_b0_copy_clear_bytes; }
+uint64_t noun_b0_copy_peak_entries(void) { return g_b0_copy_peak_entries; }
+uint64_t noun_b0_copy_peak_probe_depth(void) { return g_b0_copy_peak_probe_depth; }
+#endif
 
 #if defined(M38_D8_NATIVE)
 void noun_test_atom_fail_after(int64_t atoms)

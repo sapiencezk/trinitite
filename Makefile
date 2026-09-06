@@ -140,6 +140,7 @@ M38_D7_NATIVE ?= 0
 M38_D8_NATIVE ?= 0
 M38_D8_WAVE_A ?= 0
 M38_D8_WAVE_B_TEST_CONTROLS ?= 0
+M38_D8_B0_OBSERVABILITY ?= 0
 
 ifeq ($(M38_D5_NATIVE),1)
 ifneq ($(PLATFORM),qemu-virt)
@@ -197,6 +198,19 @@ ifneq ($(M38_D8_WAVE_A),1)
 $(error M38_D8_WAVE_B_TEST_CONTROLS=1 requires M38_D8_WAVE_A=1)
 endif
 CFLAGS += -DM38_D8_WAVE_B_TEST_CONTROLS=1
+endif
+
+ifeq ($(M38_D8_B0_OBSERVABILITY),1)
+ifneq ($(PLATFORM),qemu-virt)
+$(error M38_D8_B0_OBSERVABILITY=1 requires PLATFORM=qemu-virt)
+endif
+ifneq ($(M38_D8_WAVE_A),1)
+$(error M38_D8_B0_OBSERVABILITY=1 requires M38_D8_WAVE_A=1)
+endif
+ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
+$(error M38_D8_B0_OBSERVABILITY=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
+endif
+CFLAGS += -DM38_D8_B0_OBSERVABILITY=1
 endif
 
 ifeq ($(M36_TEST_CONTROLS),1)
@@ -418,12 +432,16 @@ ifeq ($(M38_D8_WAVE_A),1)
 M38_D8_WAVE_A_OBJS = m38_resource_core_descriptor.o m38_resource_runtime.o m38_resource_wave_a_witness.o
 endif
 OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
 ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)
 OBJ_NAMES := $(filter-out m25_plan_record.o m25_target_core.o,$(OBJ_NAMES))
 endif
 CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M25_TARGET)-$(M26_DUPLEX)-$(M27_COMMISSION)-$(M28_COMMISSION)-$(M29_COMMISSION)-$(M36_TYPED)-$(M37_A)-$(M37_A_R)-$(M38_C)-$(M38_D5_NATIVE)-$(M38_D7_NATIVE)-$(M38_D8_NATIVE)-$(M38_D8_WAVE_A)-$(M24_NODE_ID)
 ifeq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
 CONFIG_KEY := $(CONFIG_KEY)-m38wavebtest
+endif
+ifeq ($(M38_D8_B0_OBSERVABILITY),1)
+CONFIG_KEY := $(CONFIG_KEY)-m38b0
 endif
 ifeq ($(M38_D5_NATIVE_WITNESS),1)
 CONFIG_KEY := $(CONFIG_KEY)-d5witness
@@ -497,7 +515,7 @@ $(OBJDIR)/i2_admission_policy.o: $(SRCDIR)/i2_admission_policy.c \
 
 # Configuration-specific directories prevent preprocessor/backend object reuse.
 $(CONFIG_ELF): $(OBJS) | $(BUILD_DIR)
-	$(LD) $(LDFLAGS) -o $@ $^
+	$(LD) $(LDFLAGS) $(if $(filter 1,$(M38_D8_B0_OBSERVABILITY)),-Map=$@.map,) -o $@ $^
 
 # Create an empty stub pill if none exists (so the build doesn't fail).
 # Replace with a real pill using: python3 tools/mkpill.py <jam> <arvo|shrine> pill.bin

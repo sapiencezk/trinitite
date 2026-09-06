@@ -14,6 +14,9 @@
 #if defined(M38_D8_WAVE_B_TEST_CONTROLS)
 #include "m38_resource_test_controls.h"
 #endif
+#if defined(M38_D8_B0_OBSERVABILITY)
+#include "m38_resource_b0_observability.h"
+#endif
 
 /*
  * M38-D8 Wave A.
@@ -268,6 +271,96 @@ struct ResourceRuntime {
 
 /* The singleton lease is runtime ownership, not session/catalog/slot state. */
 static ResourceRuntime *g_wave_runtime_lease;
+
+#if defined(M38_D8_B0_OBSERVABILITY)
+static M38B0Record g_b0_work_record;
+static M38B0Record g_b0_last_record;
+static uint32_t g_b0_sequence;
+static uint8_t g_b0_has_record;
+static uint8_t g_b0_active;
+static uint64_t g_b0_safety_traversals;
+static uint64_t g_b0_request_decodes;
+static noun g_b0_primary_roots_before[RESOURCE_MAX_REGISTERED_SESSIONS];
+static noun g_b0_refusal_roots_before[RESOURCE_MAX_REGISTERED_SESSIONS];
+static void b0_note_safety_traversal(void);
+static void b0_note_request_decode(void);
+
+static void b0_zero(void *p, size_t n)
+{
+    uint8_t *bytes = (uint8_t *)p;
+    for (size_t i = 0; i < n; i++) bytes[i] = 0;
+}
+
+static void b0_memory_point(M38B0MemoryPoint *out)
+{
+    out->persistent_cells = heap_cells_used(HEAP_MODE_PERSIST);
+    out->persistent_bytes = out->persistent_cells * sizeof(cell_t);
+    out->scratch_cells = heap_cells_used(HEAP_MODE_SCRATCH);
+    out->scratch_bytes = out->scratch_cells * sizeof(cell_t);
+    out->atom_bytes = atom_store_bytes_used();
+    out->atom_index_occupancy = atom_store_index_occupancy();
+    out->atom_index_probe_depth = atom_store_probe_hwm();
+}
+
+static void b0_peak_sample(void)
+{
+    if (!g_b0_active) return;
+    M38B0MemoryPoint now;
+    b0_memory_point(&now);
+#define B0_MAX_FIELD(name) \
+    if (now.name > g_b0_work_record.peak.name) g_b0_work_record.peak.name = now.name
+    B0_MAX_FIELD(persistent_cells);
+    B0_MAX_FIELD(persistent_bytes);
+    B0_MAX_FIELD(scratch_cells);
+    B0_MAX_FIELD(scratch_bytes);
+    B0_MAX_FIELD(atom_bytes);
+    B0_MAX_FIELD(atom_index_occupancy);
+    B0_MAX_FIELD(atom_index_probe_depth);
+#undef B0_MAX_FIELD
+}
+
+static uint64_t b0_live_roots(const ResourceRuntime *runtime)
+{
+    uint64_t count = 0;
+    if (!runtime) return 0;
+    for (uint32_t i = 0; i < RESOURCE_MAX_REGISTERED_SESSIONS; i++) {
+        const ResourceSession *session = runtime->sessions[i];
+        if (!session || session->state != 1) continue;
+        for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++) {
+            if (session->catalog[j].core != NOUN_ZERO) count++;
+            if (session->cache[j].core != NOUN_ZERO) count++;
+            if (session->cache[j].plan.formula != NOUN_ZERO) count++;
+            if (session->cache[j].plan.payload != NOUN_ZERO) count++;
+        }
+        for (uint32_t j = 0; j < RESOURCE_MAX_LIVE_HANDLES; j++) {
+            if (session->slots[j].handle_root != NOUN_ZERO) count++;
+            if (session->slots[j].state_root != NOUN_ZERO) count++;
+            if (session->slots[j].snapshot_root != NOUN_ZERO) count++;
+        }
+        if (session->primary_root != NOUN_ZERO) count++;
+        if (session->refusal_root != NOUN_ZERO) count++;
+    }
+    return count;
+}
+
+static void b0_generations(uint64_t *primary_a, uint64_t *refusal_a,
+                           uint64_t *primary_b, uint64_t *refusal_b,
+                           const ResourceRuntime *runtime)
+{
+    *primary_a = *refusal_a = *primary_b = *refusal_b = 0;
+    if (!runtime) return;
+    ResourceSession *a = runtime->sessions[0];
+    ResourceSession *b = runtime->sessions[1];
+    if (a && a->state == 1) {
+        *primary_a = a->primary_generation;
+        *refusal_a = a->refusal_generation;
+    }
+    if (b && b->state == 1) {
+        *primary_b = b->primary_generation;
+        *refusal_b = b->refusal_generation;
+    }
+}
+#endif
 
 static size_t wave_strlen(const char *s)
 {
@@ -555,6 +648,9 @@ static int wave_safe_noun(ResourceRuntime *runtime, noun root)
         uint32_t index = top - 1u;
         noun n = stack[index];
         uint32_t depth = depths[index];
+#if defined(M38_D8_B0_OBSERVABILITY)
+        if (g_b0_active) b0_note_safety_traversal();
+#endif
         if (!noun_is_cell(n)) {
             if (noun_is_indirect(n) && atom_store_get(indirect_hash(n)) == 0)
                 return 0;
@@ -842,6 +938,126 @@ static int wave_session_valid(ResourceSession *session)
         && session->state != 0;
 }
 
+#if defined(M38_D8_B0_OBSERVABILITY)
+static void b0_begin(ResourceSession *session)
+{
+    b0_zero(&g_b0_work_record, sizeof(g_b0_work_record));
+    g_b0_active = 1;
+    g_b0_safety_traversals = 0;
+    g_b0_request_decodes = 0;
+    b0_zero(g_b0_primary_roots_before, sizeof(g_b0_primary_roots_before));
+    b0_zero(g_b0_refusal_roots_before, sizeof(g_b0_refusal_roots_before));
+    noun_b0_copy_metrics_reset();
+    nock_b0_metrics_reset();
+    g_b0_work_record.schema_version = M38_B0_SCHEMA_VERSION;
+    g_b0_work_record.image_identity = M38_B0_IMAGE_ID;
+    g_b0_work_record.contract_identity = M38_B0_CONTRACT_ID;
+    if (wave_session_valid(session)) {
+        ResourceRuntime *runtime = session->runtime;
+        g_b0_work_record.session_id = (uint8_t)(session->registry_index + 1u);
+        g_b0_work_record.resource_core_parse_count_before = session->parse_count;
+        g_b0_work_record.registered_sessions_before = runtime->session_count;
+        g_b0_work_record.live_roots_before = b0_live_roots(runtime);
+        g_b0_work_record.semispace_before = (uint8_t)heap_persist_selector();
+        for (uint32_t i = 0; i < RESOURCE_MAX_REGISTERED_SESSIONS; i++) {
+            ResourceSession *other = runtime->sessions[i];
+            g_b0_primary_roots_before[i] = other ? other->primary_root : NOUN_ZERO;
+            g_b0_refusal_roots_before[i] = other ? other->refusal_root : NOUN_ZERO;
+        }
+        b0_generations(&g_b0_work_record.primary_generation_a_before,
+                       &g_b0_work_record.refusal_generation_a_before,
+                       &g_b0_work_record.primary_generation_b_before,
+                       &g_b0_work_record.refusal_generation_b_before, runtime);
+    }
+    b0_memory_point(&g_b0_work_record.before);
+    g_b0_work_record.peak = g_b0_work_record.before;
+    g_b0_work_record.scratch_entry_mark = heap_scratch_mark();
+}
+
+static void b0_finish(M38Status status, const ResourceResultView **out_view)
+{
+    if (!g_b0_active) return;
+    ResourceRuntime *runtime = 0;
+    if (g_wave_runtime_lease && g_wave_runtime_lease->state != 0)
+        runtime = g_wave_runtime_lease;
+    b0_peak_sample();
+    b0_memory_point(&g_b0_work_record.after);
+    g_b0_work_record.scratch_final_mark = heap_scratch_mark();
+    g_b0_work_record.scratch_rewound =
+        g_b0_work_record.scratch_final_mark == g_b0_work_record.scratch_entry_mark;
+    g_b0_work_record.semispace_after = runtime ? (uint8_t)heap_persist_selector() : 0;
+    g_b0_work_record.registered_sessions_after = runtime ? runtime->session_count : 0;
+    g_b0_work_record.live_roots_after = b0_live_roots(runtime);
+    g_b0_work_record.promotion_delta =
+        g_b0_work_record.semispace_after != g_b0_work_record.semispace_before;
+    if (runtime) {
+        ResourceSession *session = g_b0_work_record.session_id == 0 ? 0
+            : runtime->sessions[g_b0_work_record.session_id - 1u];
+        g_b0_work_record.resource_core_parse_count_after = session ? session->parse_count : 0;
+        b0_generations(&g_b0_work_record.primary_generation_a_after,
+                       &g_b0_work_record.refusal_generation_a_after,
+                       &g_b0_work_record.primary_generation_b_after,
+                       &g_b0_work_record.refusal_generation_b_after, runtime);
+    }
+    g_b0_work_record.final_status = (uint32_t)status;
+    g_b0_work_record.view_published = out_view && *out_view ? 1u : 0u;
+    g_b0_work_record.semantic_roots_preserved = 0u;
+    if (status != M38_STATUS_OK && runtime
+        && g_b0_work_record.semispace_after == g_b0_work_record.semispace_before) {
+        g_b0_work_record.semantic_roots_preserved = 1u;
+        for (uint32_t i = 0; i < RESOURCE_MAX_REGISTERED_SESSIONS; i++) {
+            ResourceSession *other = runtime->sessions[i];
+            if (!other || other->primary_root != g_b0_primary_roots_before[i]
+                || other->refusal_root != g_b0_refusal_roots_before[i])
+                g_b0_work_record.semantic_roots_preserved = 0u;
+        }
+    }
+    g_b0_work_record.wire_status =
+        (status == M38_STATUS_OK && out_view && *out_view) ? (*out_view)->wire_status : 0;
+    g_b0_work_record.evaluator_ops = nock_ops_used();
+    g_b0_work_record.evaluator_cells = nock_cells_used();
+    g_b0_work_record.evaluator_peak_depth = nock_eval_stack_peak();
+    g_b0_work_record.evaluator_aborted = nock_budget_abort_reason() != 0;
+    g_b0_work_record.request_safety_traversal_count = g_b0_safety_traversals;
+    g_b0_work_record.request_decode_count = g_b0_request_decodes;
+    g_b0_work_record.copied_session_a_cells = noun_b0_copy_cells(M38_B0_COPY_SESSION_A);
+    g_b0_work_record.copied_session_b_cells = noun_b0_copy_cells(M38_B0_COPY_SESSION_B);
+    g_b0_work_record.copied_staged_cells = noun_b0_copy_cells(M38_B0_COPY_STAGED);
+    g_b0_work_record.copy_map_passes = noun_b0_copy_passes();
+    g_b0_work_record.copy_map_clear_bytes = noun_b0_copy_clear_bytes();
+    g_b0_work_record.copy_map_peak_entries = noun_b0_copy_peak_entries();
+    g_b0_work_record.copy_map_peak_probe_depth = noun_b0_copy_peak_probe_depth();
+    g_b0_work_record.sequence = g_b0_sequence == UINT32_MAX ? UINT32_MAX : ++g_b0_sequence;
+    g_b0_last_record = g_b0_work_record;
+    g_b0_has_record = 1;
+    g_b0_active = 0;
+}
+
+void m38_resource_b0_reset(void)
+{
+    b0_zero(&g_b0_work_record, sizeof(g_b0_work_record));
+    b0_zero(&g_b0_last_record, sizeof(g_b0_last_record));
+    g_b0_sequence = 0;
+    g_b0_has_record = 0;
+    g_b0_active = 0;
+}
+
+int m38_resource_b0_read(M38B0Record *out)
+{
+    if (!out || !g_b0_has_record) return 0;
+    *out = g_b0_last_record;
+    g_b0_has_record = 0;
+    return 1;
+}
+
+static void b0_note_safety_traversal(void) { g_b0_safety_traversals++; }
+static void b0_note_request_decode(void) { g_b0_request_decodes++; }
+static void b0_set_operation(uint32_t operation)
+{
+    g_b0_work_record.operation = operation <= M38_B0_OP_RESTORE ? (uint8_t)operation : 0;
+}
+#endif
+
 static void wave_broker_release(ResourceRuntime *runtime)
 {
     runtime->broker_owner = 0;
@@ -890,6 +1106,9 @@ static int wave_copy_registered_roots(ResourceRuntime *runtime,
     for (uint32_t i = 0; i < RESOURCE_MAX_REGISTERED_SESSIONS; i++) {
         ResourceSession *session = runtime->sessions[i];
         if (!session || session->state != 1) continue;
+#if defined(M38_D8_B0_OBSERVABILITY)
+        noun_b0_copy_domain_set((M38B0CopyDomain)(i + 1u));
+#endif
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
             if (!wave_copy_root(session->catalog[j].core, &copies[i].catalog[j])) goto fail;
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
@@ -1532,6 +1751,9 @@ typedef struct WaveRequest {
 
 static int wave_request_decode(noun request, WaveRequest *out)
 {
+#if defined(M38_D8_B0_OBSERVABILITY)
+    if (g_b0_active) b0_note_request_decode();
+#endif
     noun tag, body, fields[3], args[2];
     if (!wave_pair(request, &tag, &body)
         || !wave_atom_text(tag, RESOURCE_REQUEST_TAG)
@@ -1718,6 +1940,9 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
     for (uint32_t i = 0; i < RESOURCE_MAX_REGISTERED_SESSIONS; i++) {
         ResourceSession *other = runtime->sessions[i];
         if (!other || other->state != 1) continue;
+#if defined(M38_D8_B0_OBSERVABILITY)
+        noun_b0_copy_domain_set((M38B0CopyDomain)(i + 1u));
+#endif
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
             if (!wave_copy_root(other->catalog[j].core, &copies[i].catalog[j])) goto collective_fail;
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
@@ -1734,11 +1959,17 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
         if (!wave_copy_root(other->primary_root, &copies[i].primary)) goto collective_fail;
         if (!wave_copy_root(other->refusal_root, &copies[i].refusal)) goto collective_fail;
     }
+ #if defined(M38_D8_B0_OBSERVABILITY)
+    noun_b0_copy_domain_set(M38_B0_COPY_STAGED);
+#endif
     if (!wave_copy_root(staged_handle, &handle_copy)
         || !wave_copy_root(staged_state, &state_copy)
         || !wave_copy_root(staged_snapshot, &snapshot_copy)
         || !wave_copy_root(staged_result, &result_copy))
         goto collective_fail;
+#if defined(M38_D8_B0_OBSERVABILITY)
+    b0_peak_sample();
+#endif
     heap_persist_commit_tx();
     wave_apply_root_copies(runtime, copies);
     if (owner == M38_RESULT_OWNER_PRIMARY)
@@ -2268,21 +2499,34 @@ refuse:
 M38Status m38_resource_session_dispatch(ResourceSession *session, noun request,
                                         const ResourceResultView **out_view)
 {
-    if (!out_view) return M38_STATUS_INVALID_ARGUMENT;
+#if defined(M38_D8_B0_OBSERVABILITY)
+#define B0_DISPATCH_RETURN(value) do { \
+        M38Status b0_status = (value); \
+        b0_finish(b0_status, out_view); \
+        return b0_status; \
+    } while (0)
+    b0_begin(session);
+#else
+#define B0_DISPATCH_RETURN(value) return (value)
+#endif
+    if (!out_view) B0_DISPATCH_RETURN(M38_STATUS_INVALID_ARGUMENT);
     *out_view = 0;
-    if (!wave_session_valid(session)) return M38_STATUS_RUNTIME_UNINITIALIZED;
+    if (!wave_session_valid(session)) B0_DISPATCH_RETURN(M38_STATUS_RUNTIME_UNINITIALIZED);
     ResourceRuntime *runtime = session->runtime;
-    if (session->state == 2) return M38_STATUS_SESSION_CLOSED;
-    if (session->in_flight) return M38_STATUS_SESSION_BUSY;
+    if (session->state == 2) B0_DISPATCH_RETURN(M38_STATUS_SESSION_CLOSED);
+    if (session->in_flight) B0_DISPATCH_RETURN(M38_STATUS_SESSION_BUSY);
     if (runtime->broker_owner != 0 || runtime->state != 2)
-        return M38_STATUS_RUNTIME_BUSY;
-    if (!wave_safe_noun(runtime, request)) return M38_STATUS_REQUEST_INVALID;
+        B0_DISPATCH_RETURN(M38_STATUS_RUNTIME_BUSY);
+    if (!wave_safe_noun(runtime, request)) B0_DISPATCH_RETURN(M38_STATUS_REQUEST_INVALID);
     WaveRequest decoded = {0};
     /* Safety failure is a C-boundary error.  A safely traversable noun that
      * merely misses the ResourceABI grammar is an ordinary wire refusal. */
     if (!wave_request_decode(request, &decoded)) decoded.operation = 0;
+#if defined(M38_D8_B0_OBSERVABILITY)
+    b0_set_operation(decoded.operation);
+#endif
     M38Status broker_fault = wave_take_fault(runtime, WAVE_FAULT_BROKER_BEGIN);
-    if (broker_fault != M38_STATUS_OK) return broker_fault;
+    if (broker_fault != M38_STATUS_OK) B0_DISPATCH_RETURN(broker_fault);
     runtime->broker_owner = (uint8_t)(session->registry_index + 1u);
     runtime->state = 3;
     session->in_flight = 1;
@@ -2292,7 +2536,7 @@ M38Status m38_resource_session_dispatch(ResourceSession *session, noun request,
     if (!noun_tx_begin(HEAP_MODE_SCRATCH)) {
         session->in_flight = 0;
         wave_broker_release(runtime);
-        return M38_STATUS_INTERNAL;
+        B0_DISPATCH_RETURN(M38_STATUS_INTERNAL);
     }
     M38Status status = wave_dispatch_operation(runtime, session, &decoded, out_view);
     if (status != M38_STATUS_OK) {
@@ -2305,7 +2549,8 @@ M38Status m38_resource_session_dispatch(ResourceSession *session, noun request,
     session->in_flight = 0;
     wave_broker_release(runtime);
     (void)heap_scratch_rewind(scratch_mark);
-    return status;
+    B0_DISPATCH_RETURN(status);
+#undef B0_DISPATCH_RETURN
 }
 
 static M38Status wave_lifecycle_begin(ResourceRuntime *runtime,

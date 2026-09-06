@@ -5,6 +5,9 @@
 #include "uart.h"
 #include "setjmp.h"
 #include "forth.h"
+#if defined(M38_D8_B0_OBSERVABILITY)
+#include "m38_resource_b0_observability.h"
+#endif
 
 /* ── Crash recovery point ────────────────────────────────────────────────── */
 
@@ -57,6 +60,17 @@ void nock_budget_finish(void)
     g_eval_stack_current = 0;
     g_eval_stack_limit = NOCK_EVALUATOR_STACK_LIMIT;
 }
+
+#if defined(M38_D8_B0_OBSERVABILITY)
+void nock_b0_metrics_reset(void)
+{
+    g_ops_used = 0;
+    g_cells_used = 0;
+    g_budget_abort_reason = 0;
+    g_eval_stack_current = 0;
+    g_eval_stack_peak = 0;
+}
+#endif
 
 uint64_t nock_budget_get(void)
 {

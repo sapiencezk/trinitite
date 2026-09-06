@@ -68,6 +68,9 @@ void     nock_eval_stack_set_limit(uint64_t limit);
 void     nock_wall_check_set(int (*fn)(void)); /* 1 → budget abort */
 /* Tick one op; may longjmp. Public so SKA eval paths share the same budget. */
 void     nock_budget_tick(void);
+#if defined(M38_D8_B0_OBSERVABILITY)
+void     nock_b0_metrics_reset(void);
+#endif
 #ifdef M8_EVIDENCE
 uint64_t nock_cell_budget_selftest(void);
 #endif
