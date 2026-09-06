@@ -96,27 +96,27 @@ M38Status m38_supervisor_admission_catalog_make(
     SupervisorAdmissionCatalog *out_catalog,
     const SupervisorAdmissionEntry *entries, uint32_t entry_count);
 
+/* Session storage is caller-owned and must remain allocated, aligned, and
+ * untouched from successful init through reset/dispose.  The catalog is
+ * borrowed only for this call and is copied before it returns. */
 M38Status m38_resource_session_init(
     ResourceRuntime *runtime,
     void *storage, size_t storage_bytes,
     const SupervisorAdmissionCatalog *catalog,
     ResourceSession **out_session, SessionCapability *out_capability);
 
-/* Session storage is caller-owned and must remain allocated, aligned, and
- * untouched from successful init through reset/dispose.  The catalog is
- * borrowed only for this call and is copied before it returns. */
-M38Status m38_resource_session_dispatch(
-    ResourceSession *session, noun request,
-    const ResourceResultView **out_view);
-
 /* On entry, out_view is cleared after it is confirmed non-NULL.  Only an
  * accepted request or ordinary wire refusal returns OK with a non-NULL view;
  * busy, unsafe-noun, and injected/native fault paths return a non-OK status
  * and publish no refusal.  Requests are borrowed for this one transaction;
  * callers own any external serialization or byte/scalar encoding needed to
- * carry values across publication invalidation.  All calls and result-view
- * reads require one external serialized executor; callers must not retain a
- * raw movable noun from root_slot across a later operation/promotion. */
+ * carry values across publication invalidation.  This operation and its
+ * result-view reads require one external serialized executor; callers must
+ * not retain a raw movable noun from root_slot across a later
+ * operation/promotion. */
+M38Status m38_resource_session_dispatch(
+    ResourceSession *session, noun request,
+    const ResourceResultView **out_view);
 
 M38Status m38_resource_session_reset(ResourceRuntime *runtime,
                                      ResourceSession *session);

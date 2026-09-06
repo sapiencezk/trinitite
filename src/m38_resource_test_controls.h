@@ -2,8 +2,9 @@
 
 #include "m38_resource_runtime.h"
 
-/* Wave B-only test controls.  This header is intentionally unavailable to a
- * normal Wave A/public-ABI compile unless M38_D8_WAVE_B_TEST_CONTROLS is set. */
+/* Wave B-only test controls.  The fault vocabulary remains available to
+ * source that needs to describe test points, but the setter declaration is
+ * exposed only by a build that explicitly defines the Wave B control flag. */
 typedef enum M38FaultPoint {
     M38_FAULT_NONE = 0,
     M38_FAULT_BROKER_BEGIN,
@@ -15,5 +16,7 @@ typedef enum M38FaultPoint {
     M38_FAULT_RESTORE_COMMIT,
 } M38FaultPoint;
 
+#if defined(M38_D8_WAVE_B_TEST_CONTROLS)
 void m38_resource_test_fail_next(ResourceRuntime *runtime,
                                  M38FaultPoint fault);
+#endif
