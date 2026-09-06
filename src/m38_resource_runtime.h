@@ -9,6 +9,9 @@ typedef struct ResourceRuntime ResourceRuntime;
 typedef struct ResourceSession ResourceSession;
 
 typedef struct SupervisorAdmissionEntry {
+    /* Borrowed caller storage: each byte range must remain readable,
+     * unchanged, and non-overlapping through the return from every
+     * m38_resource_session_init that consumes this catalog. */
     const uint8_t *record_jam;
     size_t record_jam_bytes;
     const uint8_t *resource_core_jam;
@@ -16,6 +19,9 @@ typedef struct SupervisorAdmissionEntry {
 } SupervisorAdmissionEntry;
 
 typedef struct SupervisorAdmissionCatalog {
+    /* The catalog object and entries array are caller-owned borrowed input.
+     * Successful session init copies the bounded canonical fields and Jam
+     * bytes; callers may release or overwrite them after that call returns. */
     const SupervisorAdmissionEntry *entries;
     uint32_t entry_count;
 } SupervisorAdmissionCatalog;
@@ -29,9 +35,12 @@ typedef enum ResultOwner {
 } ResultOwner;
 
 typedef struct ResourceResultView {
-    /* The view object and root_slot address are session-owned and stable for
-     * the session lifetime.  Promotion may rewrite *root_slot; callers must
-     * reread it after any other runtime operation. */
+    /* The view object and root_slot address are session-owned and stable only
+     * until session reset/dispose.  A primary slot is invalidated by the next
+     * accepted primary publication; a refusal slot by the next ordinary
+     * refusal.  Any non-OK call preserves both slots.  Promotion may rewrite
+     * *root_slot: callers must reread it after each runtime operation and must
+     * externally serialize any value that must survive that invalidation. */
     const noun *root_slot;
     uint64_t generation;
     uint8_t wire_status;
@@ -80,6 +89,9 @@ M38Status m38_resource_runtime_init(
     void *init_workspace, size_t init_workspace_bytes,
     ResourceRuntime **out_runtime);
 
+/* The output catalog is a borrowed view over caller-owned entries and Jam
+ * bytes.  Its storage must remain live through session-init return; no public
+ * call retains those borrowed nouns or byte ranges after successful copying. */
 M38Status m38_supervisor_admission_catalog_make(
     SupervisorAdmissionCatalog *out_catalog,
     const SupervisorAdmissionEntry *entries, uint32_t entry_count);
@@ -90,6 +102,9 @@ M38Status m38_resource_session_init(
     const SupervisorAdmissionCatalog *catalog,
     ResourceSession **out_session, SessionCapability *out_capability);
 
+/* Session storage is caller-owned and must remain allocated, aligned, and
+ * untouched from successful init through reset/dispose.  The catalog is
+ * borrowed only for this call and is copied before it returns. */
 M38Status m38_resource_session_dispatch(
     ResourceSession *session, noun request,
     const ResourceResultView **out_view);
@@ -97,16 +112,22 @@ M38Status m38_resource_session_dispatch(
 /* On entry, out_view is cleared after it is confirmed non-NULL.  Only an
  * accepted request or ordinary wire refusal returns OK with a non-NULL view;
  * busy, unsafe-noun, and injected/native fault paths return a non-OK status
- * and publish no refusal.  Calls are externally serialized. */
+ * and publish no refusal.  Requests are borrowed for this one transaction;
+ * callers own any external serialization or byte/scalar encoding needed to
+ * carry values across publication invalidation.  All calls and result-view
+ * reads require one external serialized executor; callers must not retain a
+ * raw movable noun from root_slot across a later operation/promotion. */
 
 M38Status m38_resource_session_reset(ResourceRuntime *runtime,
                                      ResourceSession *session);
 M38Status m38_resource_session_dispose(ResourceRuntime *runtime,
                                        ResourceSession *session);
 
-/* Reset invalidates live handles/snapshots/results but preserves the copied
- * catalog and capability.  Dispose unregisters and closes the session;
- * reinitialization then requires a fresh capability. */
+/* Reset invalidates live handles, snapshots, and both result slots but
+ * preserves the copied catalog and capability.  Dispose unregisters and
+ * closes the session; reinitialization then requires fresh caller storage and
+ * a fresh capability.  Lifecycle calls participate in the same external
+ * serialization/transaction requirement as dispatch. */
 
 size_t m38_resource_runtime_storage_bytes(void);
 size_t m38_resource_runtime_control_storage_bytes(void);

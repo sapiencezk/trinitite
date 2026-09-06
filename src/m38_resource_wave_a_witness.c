@@ -17,6 +17,9 @@
 #define WITNESS_MAX_PLAN_STATES 8u
 #define WITNESS_MAX_PLAN_INSTANCES 8u
 #define WITNESS_MAX_VALUES 16u
+#define WITNESS_HANDLE_DIGEST_BYTES 32u
+#define WITNESS_MAX_LIVE_HANDLES 8u
+#define WITNESS_LAYOUT_CHURN_CELLS 64u
 
 #define WITNESS_OP_LOAD 1u
 #define WITNESS_OP_POKE 2u
@@ -38,6 +41,16 @@ static const char WITNESS_SELECTOR_SCHEMA[] = "m38-resource-abi-v1-numeric-selec
 static const uint32_t WITNESS_RUNTIME_CONTROL_BYTES = 64u * 1024u;
 static const uint32_t WITNESS_RUNTIME_WORKSPACE_BYTES = 4u * 1024u * 1024u;
 static const uint32_t WITNESS_SESSION_BYTES = 2u * 1024u * 1024u;
+
+/* A published LOAD noun is movable.  This witness-owned record is the only
+ * handle state retained across a later runtime operation: it contains only
+ * validated fixed-width scalars and the canonical 32-byte admission digest. */
+typedef struct WitnessHandleExternal {
+    uint64_t capability;
+    uint32_t slot;
+    uint64_t generation;
+    uint8_t admission_id[WITNESS_HANDLE_DIGEST_BYTES];
+} WitnessHandleExternal;
 
 static uint8_t witness_control[64u * 1024u]
     __attribute__((aligned(64)));
@@ -128,6 +141,40 @@ static int witness_u(noun n, uint64_t max, uint32_t *out)
     if (!noun_is_direct(n) || direct_val(n) > max) return 0;
     *out = (uint32_t)direct_val(n);
     return 1;
+}
+
+static int witness_u64(noun n, uint64_t max, uint64_t *out)
+{
+    uint8_t bytes[sizeof(uint64_t)] = {0};
+    uint64_t value = 0;
+    if (!out || !noun_is_atom(n)
+        || !noun_atom_read_fixed(n, bytes, sizeof(bytes))) return 0;
+    for (uint32_t i = 0; i < sizeof(bytes); i++)
+        value |= (uint64_t)bytes[i] << (8u * i);
+    if (value > max) return 0;
+    *out = value;
+    return 1;
+}
+
+static int witness_u64_atom(uint64_t value, noun *out)
+{
+    if (!out) return 0;
+    if (value <= 0x7FFFFFFFFFFFFFFFULL) {
+        *out = direct(value);
+        return 1;
+    }
+    return make_atom_checked(&value, 1, out);
+}
+
+static int witness_digest_atom(const uint8_t digest[WITNESS_HANDLE_DIGEST_BYTES],
+                               noun *out)
+{
+    uint64_t limbs[WITNESS_HANDLE_DIGEST_BYTES / sizeof(uint64_t)] = {0};
+    if (!digest || !out) return 0;
+    for (uint32_t i = 0; i < WITNESS_HANDLE_DIGEST_BYTES / sizeof(uint64_t); i++)
+        for (uint32_t j = 0; j < sizeof(uint64_t); j++)
+            limbs[i] |= (uint64_t)digest[i * sizeof(uint64_t) + j] << (8u * j);
+    return make_atom_checked(limbs, WITNESS_HANDLE_DIGEST_BYTES / sizeof(uint64_t), out);
 }
 
 static int witness_build_list(const noun *items, uint32_t count, noun *out)
@@ -318,35 +365,72 @@ static int witness_result_body(const ResourceResultView *view, noun *body)
     return 1;
 }
 
-static int witness_handle_from_load(const ResourceResultView *view, noun *handle)
+static int witness_handle_from_load(const ResourceResultView *view,
+                                    WitnessHandleExternal *handle)
 {
     /* The published ABI result noun is the only handle source.  This helper
-     * re-reads root_slot on every call, including after promotion, instead of
-     * retaining a slot alias or cached handle. */
-    noun body, fields[2];
-    return witness_result_body(view, &body)
-        && witness_record(body, fields, 2)
-        && (*handle = fields[0], 1);
-}
-
-static int witness_rebase_handle(noun *handle)
-{
-    noun active;
-    /* The value originated in a published LOAD result.  Promotions may
-     * retire the cells backing that value, so copy the noun into the active
-     * persist semispace before submitting the next request. */
-    if (!handle || !noun_copy_checked(*handle, &active)) return 0;
-    *handle = active;
+     * re-reads root_slot while that LOAD publication is valid, then exports
+     * only validated fixed-width fields.  No movable noun is retained. */
+    noun body, fields[2], handle_fields[4];
+    uint64_t capability, generation;
+    uint32_t slot;
+    if (!view || !handle || view->owner != M38_RESULT_OWNER_PRIMARY
+        || view->wire_status != WITNESS_OP_LOAD
+        || !witness_result_body(view, &body)
+        || !witness_record(body, fields, 2)
+        || !witness_record(fields[0], handle_fields, 4)
+        || !witness_u64(handle_fields[0], UINT64_MAX, &capability)
+        || capability == 0
+        || !witness_u(handle_fields[1], WITNESS_MAX_LIVE_HANDLES, &slot)
+        || slot == 0
+        || !witness_u64(handle_fields[2], UINT64_MAX, &generation)
+        || generation == 0
+        || !noun_atom_read_fixed(handle_fields[3], handle->admission_id,
+                                 WITNESS_HANDLE_DIGEST_BYTES)) return 0;
+    handle->capability = capability;
+    handle->slot = slot;
+    handle->generation = generation;
     return 1;
 }
 
-static int witness_make_handle_request(uint32_t operation, noun handle,
+static int witness_layout_churn(void)
+{
+    /* Deliberately consume a fixed bounded prefix of the active persist
+     * semispace before each post-LOAD request.  The public operation sequence
+     * is unchanged; this makes the two-flip stale-pointer control deterministic
+     * instead of depending on incidental allocation layout. */
+    noun filler = NOUN_ZERO;
+    for (uint32_t i = 0; i < WITNESS_LAYOUT_CHURN_CELLS; i++) {
+        noun next;
+        if (!alloc_cell_checked(direct(0xA500u + i), filler, &next)) return 0;
+        filler = next;
+    }
+    return 1;
+}
+
+static int witness_handle_to_noun(const WitnessHandleExternal *handle, noun *out)
+{
+    noun fields[4], admission;
+    if (!handle || !out || handle->capability == 0 || handle->slot == 0
+        || handle->generation == 0
+        || !witness_u64_atom(handle->capability, &fields[0])
+        || !witness_u64_atom(handle->generation, &fields[2])
+        || !witness_digest_atom(handle->admission_id, &admission)) return 0;
+    fields[1] = direct(handle->slot);
+    fields[3] = admission;
+    return witness_build_record(fields, 4, out);
+}
+
+static int witness_make_handle_request(uint32_t operation,
+                                       const WitnessHandleExternal *handle,
                                        noun second, noun *request)
 {
-    noun args;
-    if (operation == WITNESS_OP_SNAPSHOT) args = handle;
+    noun handle_noun, args;
+    if (!witness_layout_churn() || !witness_handle_to_noun(handle, &handle_noun))
+        return 0;
+    if (operation == WITNESS_OP_SNAPSHOT) args = handle_noun;
     else {
-        noun fields[2] = {handle, second};
+        noun fields[2] = {handle_noun, second};
         if (!witness_build_record(fields, 2, &args)) return 0;
     }
     return witness_make_request(operation, args, request);
@@ -473,9 +557,9 @@ void m38_resource_wave_a_boot(void)
         noun_tx_commit();
     }
 
-    noun request, handle_a, handle_b, stimulus_a, stimulus_b, selector;
+    noun request, stimulus_a, stimulus_b, selector;
+    WitnessHandleExternal handle_a, handle_b;
     const ResourceResultView *view = 0;
-    const ResourceResultView *load_view_a = 0;
     if (!witness_make_request(WITNESS_OP_LOAD, cores[0], &request)) {
         witness_terminal("refuse");
         return;
@@ -486,7 +570,6 @@ void m38_resource_wave_a_boot(void)
         witness_terminal("refuse");
         return;
     }
-    load_view_a = view;
 
     /* Promotion rewrites persist roots.  Re-cue this externally owned core
      * before submitting the second session's load. */
@@ -508,7 +591,6 @@ void m38_resource_wave_a_boot(void)
         witness_terminal("refuse");
         return;
     }
-    const ResourceResultView *load_view_b = view;
     if (!witness_make_stimulus(&plans[0], &stimulus_a)
         || !witness_make_stimulus(&plans[1], &stimulus_b)) {
         witness_terminal("refuse");
@@ -523,11 +605,7 @@ void m38_resource_wave_a_boot(void)
 
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
-    if (!witness_handle_from_load(load_view_a, &handle_a)) {
-        witness_terminal("refuse");
-        return;
-    }
-    if (!witness_make_handle_request(WITNESS_OP_POKE, handle_a, stimulus_a, &request)) {
+    if (!witness_make_handle_request(WITNESS_OP_POKE, &handle_a, stimulus_a, &request)) {
         witness_terminal("refuse");
         return;
     }
@@ -537,17 +615,13 @@ void m38_resource_wave_a_boot(void)
 
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
-    /* POKE-B republishes session B's result root, so use the LOAD handle
-     * noun re-read from that published result after POKE-A's promotion. */
-    if (!witness_handle_from_load(load_view_b, &handle_b)) {
-        witness_terminal("refuse");
-        return;
-    }
+    /* POKE-B republishes session B's result root.  Reconstruct a fresh handle
+     * noun from the fixed external record immediately before this request. */
     if (!witness_make_stimulus(&plans[1], &stimulus_b)) {
         witness_terminal("refuse");
         return;
     }
-    if (!witness_make_handle_request(WITNESS_OP_POKE, handle_b, stimulus_b, &request)) {
+    if (!witness_make_handle_request(WITNESS_OP_POKE, &handle_b, stimulus_b, &request)) {
         witness_terminal("refuse");
         return;
     }
@@ -558,18 +632,13 @@ void m38_resource_wave_a_boot(void)
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
     /* PEEK-B follows B's own promotion.  Its primary result body is a PEEK
-     * observation, not a LOAD result, so keep the handle noun decoded from
-     * B's LOAD publication above. */
+     * observation, not a LOAD result, so reconstruct from B's external record. */
     if (!witness_build_tagged(WITNESS_SELECTOR_TAG, WITNESS_SELECTOR_SCHEMA,
                               selector_fields, 1, &selector)) {
         witness_terminal("refuse");
         return;
     }
-    if (!witness_rebase_handle(&handle_b)) {
-        witness_terminal("refuse");
-        return;
-    }
-    if (!witness_make_handle_request(WITNESS_OP_PEEK, handle_b, selector, &request)) {
+    if (!witness_make_handle_request(WITNESS_OP_PEEK, &handle_b, selector, &request)) {
         witness_terminal("refuse");
         return;
     }
@@ -580,12 +649,8 @@ void m38_resource_wave_a_boot(void)
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
     /* The LOAD view is borrowed and its root has since been republished by
-     * POKE-A; rebase the decoded LOAD noun after PEEK-B's promotion. */
-    if (!witness_rebase_handle(&handle_a)) {
-        witness_terminal("refuse");
-        return;
-    }
-    if (!witness_make_handle_request(WITNESS_OP_SNAPSHOT, handle_a, NOUN_ZERO, &request)) {
+     * POKE-A.  Reconstruct A's handle from fixed external bytes. */
+    if (!witness_make_handle_request(WITNESS_OP_SNAPSHOT, &handle_a, NOUN_ZERO, &request)) {
         witness_terminal("refuse");
         return;
     }
@@ -599,11 +664,10 @@ void m38_resource_wave_a_boot(void)
 
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
-    if (!witness_rebase_handle(&handle_a)) {
-        witness_terminal("refuse");
-        return;
-    }
-    if (!witness_make_handle_request(WITNESS_OP_RESTORE, handle_a, snapshot, &request)) {
+    /* The snapshot is consumed in this same publication lifetime: no runtime
+     * operation occurs between reading it from SNAPSHOT-A and dispatching
+     * RESTORE-A.  The handle is reconstructed from external bytes again. */
+    if (!witness_make_handle_request(WITNESS_OP_RESTORE, &handle_a, snapshot, &request)) {
         witness_terminal("refuse");
         return;
     }
