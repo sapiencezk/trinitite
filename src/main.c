@@ -8,6 +8,7 @@
 #include "digital_out.h"
 #if defined(M38_D8_WAVE_A)
 #include "m38_resource_runtime.h"
+#include "m38_resource_wave_a_witness.h"
 #elif defined(M38_D8_NATIVE)
 #include "m38_resource_abi_target.h"
 #elif defined(M38_D7_NATIVE)

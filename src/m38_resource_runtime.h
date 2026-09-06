@@ -33,10 +33,15 @@ typedef struct ResourceResultView {
      * the session lifetime.  Promotion may rewrite *root_slot; callers must
      * reread it after any other runtime operation. */
     const noun *root_slot;
+    const noun *handle_slot;
     uint64_t generation;
     uint8_t wire_status;
     ResultOwner owner;
 } ResourceResultView;
+
+/* The runtime never owns caller storage and never exposes its internal
+ * numeric ResourceCore/profile representation.  The Wave A witness is a
+ * separate test-only translation unit. */
 
 typedef enum M38Status {
     M38_STATUS_OK = 0,
@@ -123,6 +128,3 @@ typedef enum M38FaultPoint {
 
 void m38_resource_test_fail_next(ResourceRuntime *runtime,
                                  M38FaultPoint fault);
-
-/* QEMU entry point for the separately built Wave A witness. */
-void m38_resource_wave_a_boot(void);

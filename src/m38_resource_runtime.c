@@ -4,14 +4,12 @@
 #include "blake3.h"
 #include "bounded_cue.h"
 #include "jam.h"
+#include "m38_resource_core_descriptor.h"
 #include "m38_resource_runtime.h"
 #include "memory.h"
 #include "nock.h"
 #include "sha256.h"
 #include "setjmp.h"
-#if defined(M38_D8_WAVE_A)
-#include "uart.h"
-#endif
 
 /*
  * M38-D8 Wave A.
@@ -161,30 +159,10 @@ static const char *const RESOURCE_NESTED_SCHEMAS[13] = {
     "m38-resource-abi-v1-zero-state-schema-v1"
 };
 
-static const uint8_t RESOURCE_CORE_IDS[2][32] = {
-    {0x4e,0x2d,0x08,0x3b,0x69,0x3a,0xa2,0x16,0x4b,0xf0,0x45,0xcb,0xc0,0x71,0xf1,0x1f,
-     0x24,0xb2,0xd1,0x95,0x1e,0x0c,0x78,0x1f,0x6b,0xc7,0x40,0x01,0x0c,0x65,0xa7,0xa5},
-    {0x94,0xd0,0x6e,0x4c,0x39,0xbb,0x4d,0x6c,0x0a,0x85,0x42,0xfb,0x03,0x12,0x1f,0x49,
-     0x64,0x43,0xc2,0x72,0xca,0xe6,0x44,0x5f,0x09,0xa7,0x37,0x8e,0xeb,0x5f,0x66,0xd6}
-};
-static const uint8_t RESOURCE_BATTERY_IDS[2][32] = {
-    {0x08,0x46,0xf5,0xa4,0x97,0x30,0x90,0x05,0x98,0xd1,0x6e,0x07,0x85,0x0f,0xce,0xa4,
-     0xa8,0x19,0x56,0xa4,0x76,0x10,0x8d,0x72,0x47,0x19,0x91,0xb7,0xf4,0x21,0xae,0x91},
-    {0xc5,0x0b,0xde,0x89,0x10,0x13,0x2d,0x6f,0x0e,0xd8,0x0f,0x0a,0x76,0xf8,0x83,0x66,
-     0x7c,0xd7,0x7d,0xe0,0x07,0xa4,0xb7,0xa6,0x51,0x5d,0x57,0x39,0x76,0xe5,0x40,0x1d}
-};
-static const uint8_t RESOURCE_PAYLOAD_IDS[2][32] = {
-    {0x11,0x26,0xc3,0xa9,0x48,0xc1,0x76,0x68,0xe3,0xe8,0xc3,0xce,0x0a,0x03,0x27,0x90,
-     0x45,0x61,0xe2,0x51,0x24,0x1a,0xba,0x56,0xee,0x84,0xbe,0x8c,0x39,0x33,0xe5,0xfa},
-    {0xb0,0x8c,0xb2,0x0c,0x24,0x8b,0x46,0x53,0x6b,0xd8,0x15,0x63,0xf3,0xbf,0x57,0xd2,
-     0xa0,0xa9,0xf6,0x71,0x58,0x4f,0x72,0x9c,0x8d,0x5e,0x59,0xcb,0x52,0x2f,0x68,0xe4}
-};
-static const uint8_t RESOURCE_ADMISSION_IDS[2][32] = {
-    {0x82,0x0f,0xb4,0x6a,0x3e,0x4f,0x4c,0x00,0x70,0xa6,0x05,0xe8,0x1a,0x53,0x6d,0xfe,
-     0x2d,0x58,0x0b,0x8a,0x9a,0x65,0x6a,0x84,0x84,0x7a,0xaa,0x90,0x3e,0x0b,0x7e,0xb1},
-    {0xbb,0x14,0x27,0x6d,0xfa,0x50,0x22,0x55,0x29,0x9e,0x62,0x0e,0x01,0x11,0xdd,0xc0,
-     0x89,0x05,0x62,0x76,0xbf,0x61,0x6b,0x77,0x1e,0x4b,0xb7,0x45,0x3d,0x87,0x6e,0xc2}
-};
+#define RESOURCE_CORE_IDS m38_resource_core_ids
+#define RESOURCE_BATTERY_IDS m38_resource_battery_ids
+#define RESOURCE_PAYLOAD_IDS m38_resource_payload_ids
+#define RESOURCE_ADMISSION_IDS m38_resource_admission_ids
 
 typedef struct WavePlanType {
     uint32_t id;
@@ -474,6 +452,19 @@ static int wave_generation_advance(uint64_t current, uint64_t *next)
     return 1;
 }
 
+/* Result views are externally observable.  Unlike a slot generation, a
+ * result generation may start at zero, but it must never wrap to a value that
+ * could make a newer view indistinguishable from an older one. */
+static int wave_result_generation_advance(uint64_t current, uint64_t *next)
+{
+    if (!next || current == UINT64_MAX) {
+        if (next) *next = 0;
+        return 0;
+    }
+    *next = current + 1u;
+    return 1;
+}
+
 static int wave_domain_digest(ResourceRuntime *runtime, noun value,
                               const char *domain, uint8_t digest[32])
 {
@@ -633,9 +624,9 @@ static int wave_record_validate(ResourceRuntime *runtime,
     uint8_t core_id[32];
     uint32_t index = 0xFFFFFFFFu;
     if (!wave_atom_bytes(fields[1], core_id, sizeof(core_id))) return 0;
-    for (uint32_t i = 0; i < 2; i++)
+    for (uint32_t i = 0; i < M38_RESOURCE_CORE_COUNT; i++)
         if (wave_bytes_equal(core_id, RESOURCE_CORE_IDS[i], sizeof(core_id))) index = i;
-    if (index >= 2) return 0;
+    if (index >= M38_RESOURCE_CORE_COUNT || !m38_resource_core_admitted(index)) return 0;
     uint32_t core_bytes;
     if (!wave_u(fields[2], RESOURCE_MAX_CORE_JAM_BYTES, &core_bytes)
         || core_bytes != entry->resource_core_jam_bytes
@@ -651,7 +642,8 @@ static int wave_record_validate(ResourceRuntime *runtime,
     if (!wave_list(fields[6], bindings, 15, &count) || count != 15) return 0;
     for (uint32_t i = 0; i < count; i++)
         if (!wave_forward_binding(bindings[i], i)) return 0;
-    if (!wave_atom_text(fields[7], RESOURCE_PROFILE_ID)
+    const M38ResourceCoreDescriptor *descriptor = m38_resource_core_descriptor(index);
+    if (!descriptor || !wave_atom_text(fields[7], descriptor->profile_id)
         || !wave_list(fields[8], supported, 2, &count) || count != 2)
         return 0;
     for (uint32_t i = 0; i < 2; i++) {
@@ -1700,7 +1692,15 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
     WaveRootCopies copies[RESOURCE_MAX_REGISTERED_SESSIONS];
     noun handle_copy = NOUN_ZERO, state_copy = NOUN_ZERO;
     noun snapshot_copy = NOUN_ZERO, result_copy = NOUN_ZERO;
+    uint64_t next_result_generation;
     if (owner != M38_RESULT_OWNER_PRIMARY && owner != M38_RESULT_OWNER_REFUSAL) {
+        *failure = M38_STATUS_SLOT_PUBLICATION;
+        return 0;
+    }
+    if (!wave_result_generation_advance(
+            owner == M38_RESULT_OWNER_PRIMARY ? session->primary_generation
+                                               : session->refusal_generation,
+            &next_result_generation)) {
         *failure = M38_STATUS_SLOT_PUBLICATION;
         return 0;
     }
@@ -1737,19 +1737,32 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
         session->primary_root = result_copy;
     else
         session->refusal_root = result_copy;
-    if (staged_slot) session->slots[slot_index] = *staged_slot;
-    if (staged_handle != NOUN_ZERO) session->slots[slot_index].handle_root = handle_copy;
-    if (staged_state != NOUN_ZERO) session->slots[slot_index].state_root = state_copy;
-    if (staged_snapshot != NOUN_ZERO) session->slots[slot_index].snapshot_root = snapshot_copy;
+    if (staged_slot) {
+        /* A staged slot is a value copy made before the persist flip.  Roots
+         * omitted by this operation must come from the freshly copied live
+         * slot, not from that stale pre-flip value copy. */
+        noun preserved_handle = session->slots[slot_index].handle_root;
+        noun preserved_state = session->slots[slot_index].state_root;
+        noun preserved_snapshot = session->slots[slot_index].snapshot_root;
+        session->slots[slot_index] = *staged_slot;
+        session->slots[slot_index].handle_root =
+            staged_handle != NOUN_ZERO ? handle_copy : preserved_handle;
+        session->slots[slot_index].state_root =
+            staged_state != NOUN_ZERO ? state_copy : preserved_state;
+        session->slots[slot_index].snapshot_root =
+            staged_snapshot != NOUN_ZERO ? snapshot_copy : preserved_snapshot;
+    }
     if (owner == M38_RESULT_OWNER_PRIMARY) {
-        session->primary_generation++;
+        session->primary_generation = next_result_generation;
         session->primary_view.root_slot = &session->primary_root;
+        session->primary_view.handle_slot = staged_slot ? &session->slots[slot_index].handle_root : 0;
         session->primary_view.generation = session->primary_generation;
         session->primary_view.wire_status = wire_status;
         session->primary_view.owner = M38_RESULT_OWNER_PRIMARY;
     } else {
-        session->refusal_generation++;
+        session->refusal_generation = next_result_generation;
         session->refusal_view.root_slot = &session->refusal_root;
+        session->refusal_view.handle_slot = 0;
         session->refusal_view.generation = session->refusal_generation;
         session->refusal_view.wire_status = wire_status;
         session->refusal_view.owner = M38_RESULT_OWNER_REFUSAL;
@@ -2313,15 +2326,25 @@ M38Status m38_resource_session_reset(ResourceRuntime *runtime,
         wave_broker_release(runtime);
         return M38_STATUS_COLLECTIVE_COMMIT;
     }
+    uint64_t next_primary_generation, next_refusal_generation;
+    if (!wave_result_generation_advance(session->primary_generation,
+                                        &next_primary_generation)
+        || !wave_result_generation_advance(session->refusal_generation,
+                                           &next_refusal_generation)) {
+        wave_broker_release(runtime);
+        return M38_STATUS_SLOT_PUBLICATION;
+    }
     session->primary_root = NOUN_ZERO;
     session->refusal_root = NOUN_ZERO;
-    session->primary_generation++;
-    session->refusal_generation++;
+    session->primary_generation = next_primary_generation;
+    session->refusal_generation = next_refusal_generation;
     session->primary_view.root_slot = &session->primary_root;
+    session->primary_view.handle_slot = 0;
     session->primary_view.generation = session->primary_generation;
     session->primary_view.wire_status = 0;
     session->primary_view.owner = M38_RESULT_OWNER_NONE;
     session->refusal_view.root_slot = &session->refusal_root;
+    session->refusal_view.handle_slot = 0;
     session->refusal_view.generation = session->refusal_generation;
     session->refusal_view.wire_status = 0;
     session->refusal_view.owner = M38_RESULT_OWNER_NONE;
@@ -2353,6 +2376,14 @@ M38Status m38_resource_session_dispose(ResourceRuntime *runtime,
         wave_broker_release(runtime);
         return M38_STATUS_COLLECTIVE_COMMIT;
     }
+    uint64_t next_primary_generation, next_refusal_generation;
+    if (!wave_result_generation_advance(session->primary_generation,
+                                        &next_primary_generation)
+        || !wave_result_generation_advance(session->refusal_generation,
+                                           &next_refusal_generation)) {
+        wave_broker_release(runtime);
+        return M38_STATUS_SLOT_PUBLICATION;
+    }
     uint32_t index = session->registry_index;
     runtime->sessions[index] = 0;
     if (runtime->session_count != 0) runtime->session_count--;
@@ -2365,11 +2396,15 @@ M38Status m38_resource_session_dispose(ResourceRuntime *runtime,
     session->primary_root = NOUN_ZERO;
     session->refusal_root = NOUN_ZERO;
     session->primary_view.root_slot = &session->primary_root;
-    session->primary_view.generation++;
+    session->primary_view.handle_slot = 0;
+    session->primary_generation = next_primary_generation;
+    session->primary_view.generation = session->primary_generation;
     session->primary_view.wire_status = 0;
     session->primary_view.owner = M38_RESULT_OWNER_NONE;
     session->refusal_view.root_slot = &session->refusal_root;
-    session->refusal_view.generation++;
+    session->refusal_view.handle_slot = 0;
+    session->refusal_generation = next_refusal_generation;
+    session->refusal_view.generation = session->refusal_generation;
     session->refusal_view.wire_status = 0;
     session->refusal_view.owner = M38_RESULT_OWNER_NONE;
     session->session_transaction_id = ++runtime->broker_transaction_id;
@@ -2381,310 +2416,3 @@ _Static_assert(sizeof(ResourceRuntime) <= RESOURCE_RUNTIME_CONTROL_BYTES,
                "ResourceRuntime exceeds its fixed control reservation");
 _Static_assert(sizeof(ResourceSession) <= RESOURCE_SESSION_BYTES,
                "ResourceSession exceeds its fixed storage reservation");
-
-#if defined(M38_D8_WAVE_A)
-#include "uart.h"
-
-static uint8_t g_wave_boot_control[RESOURCE_RUNTIME_CONTROL_BYTES]
-    __attribute__((aligned(RESOURCE_STORAGE_ALIGNMENT)));
-static uint8_t g_wave_boot_workspace[RESOURCE_RUNTIME_WORKSPACE_BYTES]
-    __attribute__((aligned(RESOURCE_STORAGE_ALIGNMENT)));
-static uint8_t g_wave_boot_session_a[RESOURCE_SESSION_BYTES]
-    __attribute__((aligned(RESOURCE_STORAGE_ALIGNMENT)));
-static uint8_t g_wave_boot_session_b[RESOURCE_SESSION_BYTES]
-    __attribute__((aligned(RESOURCE_STORAGE_ALIGNMENT)));
-static uint8_t g_wave_boot_jams[2][2][RESOURCE_MAX_CORE_JAM_BYTES]
-    __attribute__((aligned(RESOURCE_STORAGE_ALIGNMENT)));
-
-static uint32_t wave_boot_atom_bytes(noun atom)
-{
-    if (noun_is_direct(atom)) {
-        uint64_t value = direct_val(atom);
-        uint32_t bytes = 0;
-        while (value != 0) { bytes++; value >>= 8; }
-        return bytes == 0 ? 1u : bytes;
-    }
-    if (!noun_is_indirect(atom)) return 0;
-    atom_t *stored = atom_store_get(indirect_hash(atom));
-    if (!stored) return 0;
-    if (stored->size == 0 || stored->size > RESOURCE_MAX_CORE_JAM_BYTES / sizeof(uint64_t))
-        return 0;
-    uint64_t last = stored->limbs[stored->size - 1u];
-    uint32_t significant = sizeof(uint64_t);
-    while (significant > 1u && ((last >> ((significant - 1u) * 8u)) & 0xffu) == 0)
-        significant--;
-    return (uint32_t)((stored->size - 1u) * sizeof(uint64_t) + significant);
-}
-
-static int wave_boot_decode_pill(noun *input)
-{
-    volatile uint8_t *base = (volatile uint8_t *)(uintptr_t)PILL_BASE;
-    uint64_t bytes = 0;
-    for (uint32_t i = 0; i < 8; i++) bytes |= (uint64_t)base[i] << (8u * i);
-    if (bytes == 0 || bytes > 1024u * 1024u) return 0;
-    noun decoded;
-    cue_bounded_status_t status = cue_bounded_bytes(
-        (const uint8_t *)(uintptr_t)(PILL_BASE + 16u), bytes,
-        &cue_i2_limits, HEAP_MODE_SCRATCH, &decoded);
-    if (status != CUE_BOUNDED_OK) return 0;
-    *input = decoded;
-    return 1;
-}
-
-static int wave_boot_extract_jams(noun input, uint32_t record_bytes_out[2],
-                                  uint32_t core_bytes_out[2])
-{
-    noun rows[2], pair[2];
-    uint32_t row_count;
-    if (!wave_list(input, rows, 2, &row_count) || row_count != 2) return 0;
-    for (uint32_t i = 0; i < 2; i++) {
-        uint32_t record_bytes, core_bytes;
-        if (!wave_record(rows[i], pair, 2)) return 0;
-        record_bytes = wave_boot_atom_bytes(pair[0]);
-        core_bytes = wave_boot_atom_bytes(pair[1]);
-        if (record_bytes == 0 || core_bytes == 0
-            || record_bytes > RESOURCE_MAX_RECORD_JAM_BYTES
-            || core_bytes > RESOURCE_MAX_CORE_JAM_BYTES
-            || !noun_atom_read_fixed(pair[0], g_wave_boot_jams[i][0], record_bytes)
-            || !noun_atom_read_fixed(pair[1], g_wave_boot_jams[i][1], core_bytes))
-            return 0;
-        record_bytes_out[i] = record_bytes;
-        core_bytes_out[i] = core_bytes;
-    }
-    return 1;
-}
-
-/* Witness-only stimulus construction is derived from the admitted plan so
- * the event-data-order formula is not accidentally driven with the counter
- * fixture's value ids. */
-static int wave_boot_make_plan_stimulus(const WavePlan *plan, noun *out)
-{
-    const WavePlanType *chosen_type = 0;
-    uint32_t chosen_event = 0;
-    uint32_t chosen_event_index = 0;
-    for (uint32_t i = 0; i < plan->type_count && !chosen_type; i++) {
-        const WavePlanType *type = &plan->types[i];
-        for (uint32_t j = 0; j < type->event_count; j++) {
-            if (type->event_value_counts[j] == 0) continue;
-            uint32_t first_id = type->event_value_ids[j][0];
-            uint32_t first_type = 0;
-            for (uint32_t k = 0; k < type->value_count; k++) {
-                if (type->value_ids[k] == first_id) {
-                    first_type = type->value_types[k];
-                    break;
-                }
-            }
-            if (first_type == 1) {
-                chosen_type = type;
-                chosen_event = type->event_ids[j];
-                chosen_event_index = j;
-                break;
-            }
-        }
-    }
-    if (!chosen_type) return 0;
-
-    noun values[RESOURCE_MAX_PLAN_VALUES];
-    uint32_t value_count = chosen_type->event_value_counts[chosen_event_index];
-    for (uint32_t i = 0; i < value_count; i++) {
-        uint32_t value_id = chosen_type->event_value_ids[chosen_event_index][i];
-        uint32_t value_type = 0;
-        for (uint32_t j = 0; j < chosen_type->value_count; j++) {
-            if (chosen_type->value_ids[j] == value_id) {
-                value_type = chosen_type->value_types[j];
-                break;
-            }
-        }
-        if ((value_type != 1 && value_type != 2)
-            || !wave_value_build(value_id, value_type,
-                                 value_type == 1 ? 0 : 12, &values[i]))
-            return 0;
-    }
-    noun value_list, fields[2];
-    if (!wave_build_list(values, value_count, &value_list)) return 0;
-    fields[0] = direct(chosen_event);
-    fields[1] = value_list;
-    return wave_build_tagged(RESOURCE_STIMULUS_TAG, RESOURCE_STIMULUS_SCHEMA,
-                             fields, 2, out);
-}
-
-static int wave_boot_make_request(uint32_t operation, noun args, noun *out)
-{
-    noun fields[2] = {direct(operation), args};
-    noun body;
-    if (!wave_build_tagged(RESOURCE_REQUEST_TAG, RESOURCE_REQUEST_SCHEMA,
-                           fields, 2, &body))
-        return 0;
-    *out = body;
-    return 1;
-}
-
-static int wave_boot_result_body(const ResourceResultView *view, noun *body)
-{
-    noun tag, result_body, fields[3];
-    if (!view || !view->root_slot || !wave_pair(*view->root_slot, &tag, &result_body)
-        || !wave_atom_text(tag, RESOURCE_RESULT_TAG)
-        || !wave_record(result_body, fields, 3))
-        return 0;
-    *body = fields[2];
-    return 1;
-}
-
-static int wave_boot_make_handle_request(ResourceSession *session, uint32_t operation,
-                                         uint32_t slot, noun second, noun *request)
-{
-    noun handle;
-    if (!wave_handle_build(session, slot, session->slots[slot - 1u].generation,
-                           session->slots[slot - 1u].catalog_index, &handle))
-        return 0;
-    noun args;
-    if (operation == RESOURCE_OP_SNAPSHOT) {
-        args = handle;
-    } else {
-        noun pair[2] = {handle, second};
-        if (!wave_build_record(pair, 2, &args)) return 0;
-    }
-    return wave_boot_make_request(operation, args, request);
-}
-
-static void wave_boot_line(const char *operation, M38Status status,
-                           const ResourceResultView *view)
-{
-    uart_puts("M38D8A op=");
-    uart_puts(operation);
-    uart_puts(" status=");
-    if (status == M38_STATUS_OK) uart_puts(view ? "ok" : "no-view");
-    else if (status == M38_STATUS_REQUEST_INVALID) uart_puts("request-invalid");
-    else uart_puts("fault");
-    uart_puts("\r\n");
-}
-
-void m38_resource_wave_a_boot(void)
-{
-    noun input;
-    uint32_t record_bytes[2], core_bytes[2];
-    if (!wave_boot_decode_pill(&input)) {
-        uart_puts("M38D8A TERMINAL status=refuse reason=input\r\n");
-        return;
-    }
-    if (!wave_boot_extract_jams(input, record_bytes, core_bytes)) {
-        uart_puts("M38D8A TERMINAL status=refuse reason=input\r\n");
-        return;
-    }
-    if (noun_tx_active()) noun_tx_abort();
-    heap_scratch_reset();
-
-    SupervisorAdmissionEntry entries[2] = {
-        {g_wave_boot_jams[0][0], record_bytes[0], g_wave_boot_jams[0][1], core_bytes[0]},
-        {g_wave_boot_jams[1][0], record_bytes[1], g_wave_boot_jams[1][1], core_bytes[1]},
-    };
-    SupervisorAdmissionCatalog catalog;
-    ResourceRuntime *runtime;
-    M38Status catalog_status = m38_supervisor_admission_catalog_make(&catalog, entries, 2);
-    if (catalog_status != M38_STATUS_OK) {
-        uart_puts("M38D8A TERMINAL status=refuse reason=init\r\n");
-        return;
-    }
-    M38Status runtime_status = m38_resource_runtime_init(
-        g_wave_boot_control, sizeof(g_wave_boot_control),
-        g_wave_boot_workspace, sizeof(g_wave_boot_workspace), &runtime);
-    if (runtime_status != M38_STATUS_OK) {
-        uart_puts("M38D8A TERMINAL status=refuse reason=init\r\n");
-        return;
-    }
-    ResourceSession *session_a, *session_b;
-    SessionCapability capability_a, capability_b;
-    M38Status session_a_status = m38_resource_session_init(
-        runtime, g_wave_boot_session_a, sizeof(g_wave_boot_session_a), &catalog,
-        &session_a, &capability_a);
-    if (session_a_status != M38_STATUS_OK) {
-        uart_puts("M38D8A TERMINAL status=refuse reason=session\r\n");
-        return;
-    }
-    M38Status session_b_status = m38_resource_session_init(
-        runtime, g_wave_boot_session_b, sizeof(g_wave_boot_session_b), &catalog,
-        &session_b, &capability_b);
-    if (session_b_status != M38_STATUS_OK) {
-        uart_puts("M38D8A TERMINAL status=refuse reason=session\r\n");
-        return;
-    }
-    (void)capability_a;
-    (void)capability_b;
-
-    noun cores[2];
-    for (uint32_t i = 0; i < 2; i++) {
-        heap_set_mode(HEAP_MODE_PERSIST);
-        if (cue_bounded_bytes(g_wave_boot_jams[i][1], entries[i].resource_core_jam_bytes,
-                              &cue_i2_limits, HEAP_MODE_PERSIST, &cores[i]) != CUE_BOUNDED_OK) {
-            uart_puts("M38D8A TERMINAL status=refuse reason=core\r\n");
-            return;
-        }
-        noun_tx_commit();
-    }
-    const ResourceResultView *view = 0;
-    noun request;
-    heap_set_mode(HEAP_MODE_PERSIST);
-    if (!wave_boot_make_request(RESOURCE_OP_LOAD, cores[0], &request)) return;
-    M38Status status = m38_resource_session_dispatch(session_a, request, &view);
-    wave_boot_line("LOAD-A", status, view);
-    view = 0;
-    /* Promotion invalidates noun roots from the prior transaction.  Re-cue
-     * the second external core before using it. */
-    heap_set_mode(HEAP_MODE_PERSIST);
-    if (cue_bounded_bytes(g_wave_boot_jams[1][1], entries[1].resource_core_jam_bytes,
-                          &cue_i2_limits, HEAP_MODE_PERSIST, &cores[1]) != CUE_BOUNDED_OK)
-        return;
-    noun_tx_commit();
-    heap_set_mode(HEAP_MODE_PERSIST);
-    if (!wave_boot_make_request(RESOURCE_OP_LOAD, cores[1], &request)) return;
-    status = m38_resource_session_dispatch(session_b, request, &view);
-    wave_boot_line("LOAD-B", status, view);
-
-    noun stimulus_a, stimulus_b, selector;
-    if (!wave_boot_make_plan_stimulus(
-            &session_a->cache[session_a->slots[0].catalog_index].plan,
-            &stimulus_a)
-        || !wave_boot_make_plan_stimulus(
-            &session_b->cache[session_b->slots[0].catalog_index].plan,
-            &stimulus_b)) return;
-    noun selector_fields[1] = {direct(1)};
-    if (!wave_build_tagged(RESOURCE_SELECTOR_TAG, RESOURCE_SELECTOR_SCHEMA,
-                              selector_fields, 1, &selector))
-        return;
-    view = 0;
-    heap_set_mode(HEAP_MODE_PERSIST);
-    if (!wave_boot_make_handle_request(session_a, RESOURCE_OP_POKE, 1, stimulus_a, &request)) return;
-    status = m38_resource_session_dispatch(session_a, request, &view);
-    wave_boot_line("POKE-A", status, view);
-    view = 0;
-    heap_set_mode(HEAP_MODE_PERSIST);
-    if (!wave_boot_make_handle_request(session_b, RESOURCE_OP_POKE, 1, stimulus_b, &request)) return;
-    status = m38_resource_session_dispatch(session_b, request, &view);
-    wave_boot_line("POKE-B", status, view);
-    view = 0;
-    heap_set_mode(HEAP_MODE_PERSIST);
-    if (!wave_boot_make_handle_request(session_b, RESOURCE_OP_PEEK, 1, selector, &request)) return;
-    status = m38_resource_session_dispatch(session_b, request, &view);
-    wave_boot_line("PEEK-B", status, view);
-    view = 0;
-    heap_set_mode(HEAP_MODE_PERSIST);
-    if (!wave_boot_make_handle_request(session_a, RESOURCE_OP_SNAPSHOT, 1, NOUN_ZERO, &request)) return;
-    status = m38_resource_session_dispatch(session_a, request, &view);
-    wave_boot_line("SNAPSHOT-A", status, view);
-    if (status == M38_STATUS_OK && view) {
-        noun snapshot;
-        if (wave_boot_result_body(view, &snapshot)) {
-            view = 0;
-            heap_set_mode(HEAP_MODE_PERSIST);
-            if (wave_boot_make_handle_request(session_a, RESOURCE_OP_RESTORE, 1,
-                                              snapshot, &request)) {
-                status = m38_resource_session_dispatch(session_a, request, &view);
-                wave_boot_line("RESTORE-A", status, view);
-            }
-        }
-    }
-    uart_puts("M38D8A TERMINAL status=pass\r\n");
-}
-#else
-void m38_resource_wave_a_boot(void) {}
-#endif
