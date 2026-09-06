@@ -526,10 +526,8 @@ void m38_resource_wave_a_boot(void)
 
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
-    if (!witness_handle_from_load(load_view_b, &handle_b)) {
-        witness_terminal("refuse");
-        return;
-    }
+    /* POKE-B republishes session B's result root, so use the LOAD handle
+     * noun already decoded from that published result before promotion. */
     if (!witness_make_stimulus(&plans[1], &stimulus_b)) {
         witness_terminal("refuse");
         return;
@@ -563,10 +561,8 @@ void m38_resource_wave_a_boot(void)
 
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
-    if (!witness_handle_from_load(load_view_a, &handle_a)) {
-        witness_terminal("refuse");
-        return;
-    }
+    /* The LOAD view is borrowed and its root has since been republished by
+     * POKE-A; the handle noun itself remains the decoded LOAD ABI value. */
     if (!witness_make_handle_request(WITNESS_OP_SNAPSHOT, handle_a, NOUN_ZERO, &request)) {
         witness_terminal("refuse");
         return;
@@ -581,10 +577,6 @@ void m38_resource_wave_a_boot(void)
 
     heap_set_mode(HEAP_MODE_PERSIST);
     view = 0;
-    if (!witness_handle_from_load(load_view_a, &handle_a)) {
-        witness_terminal("refuse");
-        return;
-    }
     if (!witness_make_handle_request(WITNESS_OP_RESTORE, handle_a, snapshot, &request)) {
         witness_terminal("refuse");
         return;
