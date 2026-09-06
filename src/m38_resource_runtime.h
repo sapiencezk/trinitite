@@ -29,6 +29,9 @@ typedef enum ResultOwner {
 } ResultOwner;
 
 typedef struct ResourceResultView {
+    /* The view object and root_slot address are session-owned and stable for
+     * the session lifetime.  Promotion may rewrite *root_slot; callers must
+     * reread it after any other runtime operation. */
     const noun *root_slot;
     uint64_t generation;
     uint8_t wire_status;
@@ -63,6 +66,9 @@ typedef enum M38Status {
     M38_STATUS_INTERNAL = 24,
 } M38Status;
 
+/* Runtime initialization claims the process-wide serialized noun/Nock domain.
+ * The caller retains ownership of both storage regions and must keep them
+ * alive until every registered session has been disposed. */
 M38Status m38_resource_runtime_init(
     void *control_storage, size_t control_storage_bytes,
     void *init_workspace, size_t init_workspace_bytes,
@@ -82,10 +88,19 @@ M38Status m38_resource_session_dispatch(
     ResourceSession *session, noun request,
     const ResourceResultView **out_view);
 
+/* On entry, out_view is cleared after it is confirmed non-NULL.  Only an
+ * accepted request or ordinary wire refusal returns OK with a non-NULL view;
+ * busy, unsafe-noun, and injected/native fault paths return a non-OK status
+ * and publish no refusal.  Calls are externally serialized. */
+
 M38Status m38_resource_session_reset(ResourceRuntime *runtime,
                                      ResourceSession *session);
 M38Status m38_resource_session_dispose(ResourceRuntime *runtime,
                                        ResourceSession *session);
+
+/* Reset invalidates live handles/snapshots/results but preserves the copied
+ * catalog and capability.  Dispose unregisters and closes the session;
+ * reinitialization then requires a fresh capability. */
 
 size_t m38_resource_runtime_storage_bytes(void);
 size_t m38_resource_runtime_control_storage_bytes(void);
