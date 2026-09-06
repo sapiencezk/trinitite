@@ -11,6 +11,10 @@
 #include "sha256.h"
 #include "setjmp.h"
 
+#if defined(M38_D8_WAVE_B_TEST_CONTROLS)
+#include "m38_resource_test_controls.h"
+#endif
+
 /*
  * M38-D8 Wave A.
  *
@@ -114,7 +118,19 @@ static const char RESOURCE_ADMISSION_DOMAIN[] = "1499kernel:i2:m38:resource-abi-
 static const char RESOURCE_CORE_DOMAIN[] = "1499kernel:i2:m38-d0-r3:resource-core:v3";
 static const char RESOURCE_FORMULA_DOMAIN[] = "1499kernel:i2:m38-d0-r3:formula:v3";
 static const char RESOURCE_PAYLOAD_DOMAIN[] = "1499kernel:i2:m38-d0-r3:resource-payload:v3";
-static const char RESOURCE_PROFILE_ID[] = "1499kernel-i2-m38-numeric-execution-profile-v1-bounded";
+
+/* Private fault vocabulary.  The public runtime header has no fault setter;
+ * Wave B test builds translate their test-only enum at the boundary below. */
+typedef enum WaveFaultPoint {
+    WAVE_FAULT_NONE = 0,
+    WAVE_FAULT_BROKER_BEGIN,
+    WAVE_FAULT_CUE_CACHE_INSERT,
+    WAVE_FAULT_SLOT_PUBLICATION,
+    WAVE_FAULT_EVALUATOR_ABORT,
+    WAVE_FAULT_ATOM_RESULT_STAGING,
+    WAVE_FAULT_COLLECTIVE_COMMIT,
+    WAVE_FAULT_RESTORE_COMMIT,
+} WaveFaultPoint;
 
 static const char *const RESOURCE_BINDING_NAMES[15] = {
     "ResourceABIRequest", "ResourceABIResult", "NumericValue",
@@ -159,11 +175,6 @@ static const char *const RESOURCE_NESTED_SCHEMAS[13] = {
     "m38-resource-abi-v1-zero-state-schema-v1"
 };
 
-#define RESOURCE_CORE_IDS m38_resource_core_ids
-#define RESOURCE_BATTERY_IDS m38_resource_battery_ids
-#define RESOURCE_PAYLOAD_IDS m38_resource_payload_ids
-#define RESOURCE_ADMISSION_IDS m38_resource_admission_ids
-
 typedef struct WavePlanType {
     uint32_t id;
     uint32_t value_count;
@@ -189,8 +200,7 @@ typedef struct WavePlan {
 
 typedef struct WaveCacheEntry {
     uint8_t valid;
-    uint8_t core_id[32];
-    uint8_t payload_id[32];
+    const M38ResourceCoreDescriptor *descriptor;
     noun core;
     noun payload;
     WavePlan plan;
@@ -211,10 +221,7 @@ typedef struct WaveSlot {
 
 typedef struct WaveCatalogCopy {
     uint8_t valid;
-    uint8_t core_id[32];
-    uint8_t battery_id[32];
-    uint8_t payload_id[32];
-    uint8_t admission_id[32];
+    const M38ResourceCoreDescriptor *descriptor;
     uint32_t core_jam_bytes;
     uint8_t core_jam[RESOURCE_MAX_CORE_JAM_BYTES];
     noun core;
@@ -252,7 +259,7 @@ struct ResourceRuntime {
     uint64_t next_capability;
     uint64_t broker_transaction_id;
     uint64_t promoted_root_count;
-    M38FaultPoint next_fault;
+    uint8_t next_fault;
     ResourceSession *sessions[RESOURCE_MAX_REGISTERED_SESSIONS];
 };
 
@@ -611,8 +618,8 @@ static int wave_forward_binding(noun value, uint32_t expected)
 
 static int wave_record_validate(ResourceRuntime *runtime,
                                 const SupervisorAdmissionEntry *entry,
-                                noun record, uint32_t *catalog_index,
-                                uint8_t admission_id[32])
+                                noun record,
+                                const M38ResourceCoreDescriptor **descriptor_out)
 {
     noun tag, body, fields[11];
     if (!wave_pair(record, &tag, &body)
@@ -622,11 +629,10 @@ static int wave_record_validate(ResourceRuntime *runtime,
         return 0;
     }
     uint8_t core_id[32];
-    uint32_t index = 0xFFFFFFFFu;
     if (!wave_atom_bytes(fields[1], core_id, sizeof(core_id))) return 0;
-    for (uint32_t i = 0; i < M38_RESOURCE_CORE_COUNT; i++)
-        if (wave_bytes_equal(core_id, RESOURCE_CORE_IDS[i], sizeof(core_id))) index = i;
-    if (index >= M38_RESOURCE_CORE_COUNT || !m38_resource_core_admitted(index)) return 0;
+    const M38ResourceCoreDescriptor *descriptor =
+        m38_resource_core_descriptor(core_id);
+    if (!descriptor) return 0;
     uint32_t core_bytes;
     if (!wave_u(fields[2], RESOURCE_MAX_CORE_JAM_BYTES, &core_bytes)
         || core_bytes != entry->resource_core_jam_bytes
@@ -635,15 +641,14 @@ static int wave_record_validate(ResourceRuntime *runtime,
     uint8_t sha[32];
     sha256_hash(entry->resource_core_jam, entry->resource_core_jam_bytes, sha);
     if (!wave_identity(fields[3], sha)
-        || !wave_identity(fields[4], RESOURCE_BATTERY_IDS[index])
-        || !wave_identity(fields[5], RESOURCE_PAYLOAD_IDS[index])) return 0;
+        || !wave_identity(fields[4], descriptor->battery_id)
+        || !wave_identity(fields[5], descriptor->payload_id)) return 0;
     noun bindings[15], supported[2], nested[13], limits[3];
     uint32_t count;
     if (!wave_list(fields[6], bindings, 15, &count) || count != 15) return 0;
     for (uint32_t i = 0; i < count; i++)
         if (!wave_forward_binding(bindings[i], i)) return 0;
-    const M38ResourceCoreDescriptor *descriptor = m38_resource_core_descriptor(index);
-    if (!descriptor || !wave_atom_text(fields[7], descriptor->profile_id)
+    if (!wave_atom_text(fields[7], descriptor->profile_id)
         || !wave_list(fields[8], supported, 2, &count) || count != 2)
         return 0;
     for (uint32_t i = 0; i < 2; i++) {
@@ -665,6 +670,7 @@ static int wave_record_validate(ResourceRuntime *runtime,
 
     const uint8_t *canonical;
     uint64_t canonical_bytes;
+    uint8_t admission_id[32];
     jam_admission_budget_t budget;
     jam_admission_budget_init(&budget, 2000000ULL);
     if (jam_encode_bytes_identity_bounded(record, &canonical, &canonical_bytes, &budget) != 0
@@ -676,8 +682,8 @@ static int wave_record_validate(ResourceRuntime *runtime,
     for (size_t i = 0; i < domain_bytes; i++) preimage[i] = (uint8_t)RESOURCE_ADMISSION_DOMAIN[i];
     for (uint64_t i = 0; i < canonical_bytes; i++) preimage[domain_bytes + i] = canonical[i];
     sha256_hash(preimage, domain_bytes + (size_t)canonical_bytes, admission_id);
-    if (!wave_bytes_equal(admission_id, RESOURCE_ADMISSION_IDS[index], 32)) return 0;
-    *catalog_index = index;
+    if (!wave_bytes_equal(admission_id, descriptor->admission_id, 32)) return 0;
+    *descriptor_out = descriptor;
     return 1;
 }
 
@@ -781,9 +787,7 @@ static int wave_parse_plan(noun core, WavePlan *out)
 }
 
 static int wave_core_validate(ResourceRuntime *runtime, noun core,
-                              const uint8_t expected_id[32],
-                              const uint8_t expected_battery[32],
-                              const uint8_t expected_payload[32],
+                              const M38ResourceCoreDescriptor *descriptor,
                               const uint8_t *expected_jam, size_t expected_jam_bytes,
                               WavePlan *plan)
 {
@@ -791,11 +795,11 @@ static int wave_core_validate(ResourceRuntime *runtime, noun core,
     if (!wave_pair(core, &formula, &payload) || !wave_parse_plan(core, plan)) return 0;
     uint8_t digest[32];
     if (!wave_domain_digest(runtime, formula, RESOURCE_FORMULA_DOMAIN, digest)
-        || !wave_bytes_equal(digest, expected_battery, sizeof(digest))
+        || !wave_bytes_equal(digest, descriptor->battery_id, sizeof(digest))
         || !wave_domain_digest(runtime, payload, RESOURCE_PAYLOAD_DOMAIN, digest)
-        || !wave_bytes_equal(digest, expected_payload, sizeof(digest))
+        || !wave_bytes_equal(digest, descriptor->payload_id, sizeof(digest))
         || !wave_domain_digest(runtime, core, RESOURCE_CORE_DOMAIN, digest)
-        || !wave_bytes_equal(digest, expected_id, sizeof(digest))) return 0;
+        || !wave_bytes_equal(digest, descriptor->core_id, sizeof(digest))) return 0;
     const uint8_t *canonical;
     uint64_t canonical_bytes;
     jam_admission_budget_t budget;
@@ -807,12 +811,8 @@ static int wave_core_validate(ResourceRuntime *runtime, noun core,
 }
 
 typedef struct WavePreflightEntry {
-    uint32_t catalog_index;
+    const M38ResourceCoreDescriptor *descriptor;
     uint32_t core_jam_bytes;
-    uint8_t core_id[32];
-    uint8_t battery_id[32];
-    uint8_t payload_id[32];
-    uint8_t admission_id[32];
     WavePlan plan;
 } WavePreflightEntry;
 
@@ -848,24 +848,24 @@ static void wave_broker_release(ResourceRuntime *runtime)
     runtime->state = 2;
 }
 
-static M38Status wave_fault_status(M38FaultPoint fault)
+static M38Status wave_fault_status(WaveFaultPoint fault)
 {
     switch (fault) {
-    case M38_FAULT_BROKER_BEGIN: return M38_STATUS_BROKER_BEGIN;
-    case M38_FAULT_CUE_CACHE_INSERT: return M38_STATUS_CUE_CACHE_INSERT;
-    case M38_FAULT_SLOT_PUBLICATION: return M38_STATUS_SLOT_PUBLICATION;
-    case M38_FAULT_EVALUATOR_ABORT: return M38_STATUS_EVALUATOR_ABORT;
-    case M38_FAULT_ATOM_RESULT_STAGING: return M38_STATUS_ATOM_RESULT_STAGING;
-    case M38_FAULT_COLLECTIVE_COMMIT: return M38_STATUS_COLLECTIVE_COMMIT;
-    case M38_FAULT_RESTORE_COMMIT: return M38_STATUS_RESTORE_COMMIT;
+    case WAVE_FAULT_BROKER_BEGIN: return M38_STATUS_BROKER_BEGIN;
+    case WAVE_FAULT_CUE_CACHE_INSERT: return M38_STATUS_CUE_CACHE_INSERT;
+    case WAVE_FAULT_SLOT_PUBLICATION: return M38_STATUS_SLOT_PUBLICATION;
+    case WAVE_FAULT_EVALUATOR_ABORT: return M38_STATUS_EVALUATOR_ABORT;
+    case WAVE_FAULT_ATOM_RESULT_STAGING: return M38_STATUS_ATOM_RESULT_STAGING;
+    case WAVE_FAULT_COLLECTIVE_COMMIT: return M38_STATUS_COLLECTIVE_COMMIT;
+    case WAVE_FAULT_RESTORE_COMMIT: return M38_STATUS_RESTORE_COMMIT;
     default: return M38_STATUS_INTERNAL;
     }
 }
 
-static M38Status wave_take_fault(ResourceRuntime *runtime, M38FaultPoint point)
+static M38Status wave_take_fault(ResourceRuntime *runtime, WaveFaultPoint point)
 {
-    if (runtime->next_fault == point) {
-        runtime->next_fault = M38_FAULT_NONE;
+    if (runtime->next_fault == (uint8_t)point) {
+        runtime->next_fault = (uint8_t)WAVE_FAULT_NONE;
         return wave_fault_status(point);
     }
     return M38_STATUS_OK;
@@ -939,12 +939,12 @@ static int wave_preflight_entry(ResourceRuntime *runtime,
                                 WavePreflightEntry *out)
 {
     noun record;
-    uint32_t index;
+    const M38ResourceCoreDescriptor *descriptor;
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (cue_bounded_bytes(entry->record_jam, entry->record_jam_bytes,
                           &cue_i2_limits, HEAP_MODE_SCRATCH, &record) != CUE_BOUNDED_OK)
         return 0;
-    if (!wave_record_validate(runtime, entry, record, &index, out->admission_id)) {
+    if (!wave_record_validate(runtime, entry, record, &descriptor)) {
         if (noun_tx_active()) noun_tx_abort();
         return 0;
     }
@@ -965,20 +965,14 @@ static int wave_preflight_entry(ResourceRuntime *runtime,
                           &cue_i2_limits, HEAP_MODE_SCRATCH, &core) != CUE_BOUNDED_OK)
         return 0;
     if (!wave_safe_noun(runtime, core)
-        || !wave_core_validate(runtime, core, RESOURCE_CORE_IDS[index],
-                               RESOURCE_BATTERY_IDS[index], RESOURCE_PAYLOAD_IDS[index],
+        || !wave_core_validate(runtime, core, descriptor,
                                entry->resource_core_jam, entry->resource_core_jam_bytes,
                                &out->plan)) {
         if (noun_tx_active()) noun_tx_abort();
         return 0;
     }
-    out->catalog_index = index;
+    out->descriptor = descriptor;
     out->core_jam_bytes = (uint32_t)entry->resource_core_jam_bytes;
-    for (uint32_t i = 0; i < 32; i++) {
-        out->core_id[i] = RESOURCE_CORE_IDS[index][i];
-        out->battery_id[i] = RESOURCE_BATTERY_IDS[index][i];
-        out->payload_id[i] = RESOURCE_PAYLOAD_IDS[index][i];
-    }
     noun_tx_abort();
     return 1;
 }
@@ -1000,7 +994,7 @@ static M38Status wave_catalog_preflight(ResourceRuntime *runtime,
         if (!wave_preflight_entry(runtime, entry, &out[i]))
             return M38_STATUS_CATALOG_INVALID;
         for (uint32_t j = 0; j < i; j++) {
-            if (out[j].catalog_index == out[i].catalog_index)
+            if (out[j].descriptor == out[i].descriptor)
                 return M38_STATUS_CATALOG_DUPLICATE;
         }
     }
@@ -1131,9 +1125,7 @@ static int wave_promote_registration(ResourceRuntime *runtime,
             goto fail;
         WavePlan persisted_plan;
         if (!wave_safe_noun(runtime, new_cores[i])
-            || !wave_core_validate(runtime, new_cores[i], RESOURCE_CORE_IDS[pre[i].catalog_index],
-                                   RESOURCE_BATTERY_IDS[pre[i].catalog_index],
-                                   RESOURCE_PAYLOAD_IDS[pre[i].catalog_index],
+            || !wave_core_validate(runtime, new_cores[i], pre[i].descriptor,
                                    catalog->entries[i].resource_core_jam,
                                    catalog->entries[i].resource_core_jam_bytes,
                                    &persisted_plan)) {
@@ -1275,16 +1267,16 @@ M38Status m38_resource_session_init(
     session->capability = capability;
     session->session_transaction_id = ++runtime->broker_transaction_id;
     for (uint32_t i = 0; i < catalog->entry_count; i++) {
-        WaveCatalogCopy *copy = &session->catalog[pre[i].catalog_index];
+        WaveCatalogCopy *copy = &session->catalog[i];
         copy->valid = 1;
+        copy->descriptor = pre[i].descriptor;
         copy->core = new_cores[i];
         copy->core_jam_bytes = pre[i].core_jam_bytes;
         wave_copy(copy->core_jam, catalog->entries[i].resource_core_jam, pre[i].core_jam_bytes);
-        for (uint32_t j = 0; j < 32; j++) copy->core_id[j] = pre[i].core_id[j];
-        for (uint32_t j = 0; j < 32; j++) copy->battery_id[j] = pre[i].battery_id[j];
-        for (uint32_t j = 0; j < 32; j++) copy->payload_id[j] = pre[i].payload_id[j];
-        for (uint32_t j = 0; j < 32; j++) copy->admission_id[j] = pre[i].admission_id[j];
-        if (!wave_parse_plan(copy->core, &session->cache[pre[i].catalog_index].plan)) {
+        session->cache[i].valid = 1;
+        session->cache[i].descriptor = pre[i].descriptor;
+        session->cache[i].core = copy->core;
+        if (!wave_parse_plan(copy->core, &session->cache[i].plan)) {
             /* The same core was validated before commit; this is an internal
              * invariant failure, and no session has been published yet. */
             wave_broker_release(runtime);
@@ -1336,10 +1328,14 @@ M38Status m38_resource_runtime_init(
     return M38_STATUS_OK;
 }
 
+#if defined(M38_D8_WAVE_B_TEST_CONTROLS)
 void m38_resource_test_fail_next(ResourceRuntime *runtime, M38FaultPoint fault)
 {
-    if (wave_runtime_valid(runtime)) runtime->next_fault = fault;
+    if (wave_runtime_valid(runtime) && fault >= M38_FAULT_NONE
+        && fault <= M38_FAULT_RESTORE_COMMIT)
+        runtime->next_fault = (uint8_t)fault;
 }
+#endif
 
 static int wave_handle_build(const ResourceSession *session, uint32_t slot,
                              uint64_t generation, uint32_t catalog_index,
@@ -1347,7 +1343,9 @@ static int wave_handle_build(const ResourceSession *session, uint32_t slot,
 {
     noun fields[4], admission;
     if (catalog_index >= RESOURCE_MAX_ADMISSION_ENTRIES
-        || !wave_digest_atom(session->catalog[catalog_index].admission_id, &admission))
+        || !session->catalog[catalog_index].descriptor
+        || !wave_digest_atom(session->catalog[catalog_index].descriptor->admission_id,
+                             &admission))
         return 0;
     if (!wave_capability_atom(session->capability, &fields[0])
         || !wave_u64_atom(generation, &fields[2])) return 0;
@@ -1387,8 +1385,13 @@ static int wave_state_build(const ResourceSession *session, const WavePlan *plan
     noun instance_list;
     if (!wave_build_list(instances, plan->instance_count, &instance_list)) return 0;
     noun admission;
-    if (!wave_digest_atom(session->catalog[catalog_index].admission_id, &admission)) return 0;
-    noun fields[3] = {admission, wave_cord(RESOURCE_PROFILE_ID), instance_list};
+    if (catalog_index >= RESOURCE_MAX_ADMISSION_ENTRIES
+        || !session->catalog[catalog_index].descriptor
+        || !wave_digest_atom(session->catalog[catalog_index].descriptor->admission_id,
+                             &admission)) return 0;
+    noun fields[3] = {admission,
+                      wave_cord(session->catalog[catalog_index].descriptor->profile_id),
+                      instance_list};
     return wave_build_tagged(RESOURCE_STATE_TAG, RESOURCE_STATE_SCHEMA, fields, 3, out);
 }
 
@@ -1457,7 +1460,8 @@ static int wave_handle_decode(const ResourceSession *session, noun value,
         || generation == 0
         || session->slots[slot - 1u].catalog_index >= RESOURCE_MAX_ADMISSION_ENTRIES
         || !session->catalog[session->slots[slot - 1u].catalog_index].valid
-        || !wave_identity(fields[3], session->catalog[session->slots[slot - 1u].catalog_index].admission_id)
+        || !session->catalog[session->slots[slot - 1u].catalog_index].descriptor
+        || !wave_identity(fields[3], session->catalog[session->slots[slot - 1u].catalog_index].descriptor->admission_id)
         || !session->slots[slot - 1u].used
         || session->slots[slot - 1u].generation != generation)
         return 0;
@@ -1559,11 +1563,14 @@ static int wave_core_index(ResourceRuntime *runtime, ResourceSession *session,
         || bytes == 0 || bytes > RESOURCE_MAX_CORE_JAM_BYTES)
         return 0;
     if (!wave_domain_digest(runtime, core, RESOURCE_CORE_DOMAIN, identity)) return 0;
+    const M38ResourceCoreDescriptor *descriptor =
+        m38_resource_core_descriptor(identity);
+    if (!descriptor) return 0;
     for (uint32_t i = 0; i < RESOURCE_MAX_ADMISSION_ENTRIES; i++) {
         WaveCatalogCopy *entry = &session->catalog[i];
-        if (entry->valid && bytes == entry->core_jam_bytes
+        if (entry->valid && entry->descriptor == descriptor && bytes == entry->core_jam_bytes
             && wave_bytes_equal(canonical, entry->core_jam, bytes)
-            && wave_bytes_equal(identity, entry->core_id, sizeof(identity))) {
+            && wave_bytes_equal(identity, entry->descriptor->core_id, sizeof(identity))) {
             *index_out = i;
             return 1;
         }
@@ -1628,8 +1635,9 @@ static int wave_snapshot_apply(const ResourceSession *session, const WavePlan *p
         || !wave_atom_text(state_tag, RESOURCE_STATE_TAG)
         || !wave_record(state_body, state_fields, 4)
         || !wave_atom_text(state_fields[0], RESOURCE_STATE_SCHEMA)
-        || !wave_identity(state_fields[1], session->catalog[catalog_index].admission_id)
-        || !wave_atom_text(state_fields[2], RESOURCE_PROFILE_ID)) return 0;
+        || !session->catalog[catalog_index].descriptor
+        || !wave_identity(state_fields[1], session->catalog[catalog_index].descriptor->admission_id)
+        || !wave_atom_text(state_fields[2], session->catalog[catalog_index].descriptor->profile_id)) return 0;
     uint32_t decoded_slot;
     uint64_t snapshot_nonce;
     if (!wave_handle_decode(session, fields[0], &decoded_slot)
@@ -1755,14 +1763,12 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
     if (owner == M38_RESULT_OWNER_PRIMARY) {
         session->primary_generation = next_result_generation;
         session->primary_view.root_slot = &session->primary_root;
-        session->primary_view.handle_slot = staged_slot ? &session->slots[slot_index].handle_root : 0;
         session->primary_view.generation = session->primary_generation;
         session->primary_view.wire_status = wire_status;
         session->primary_view.owner = M38_RESULT_OWNER_PRIMARY;
     } else {
         session->refusal_generation = next_result_generation;
         session->refusal_view.root_slot = &session->refusal_root;
-        session->refusal_view.handle_slot = 0;
         session->refusal_view.generation = session->refusal_generation;
         session->refusal_view.wire_status = wire_status;
         session->refusal_view.owner = M38_RESULT_OWNER_REFUSAL;
@@ -1814,7 +1820,9 @@ static int wave_runtime_state_build(const ResourceSession *session,
 {
     noun rows[RESOURCE_MAX_PLAN_INSTANCES];
     noun identity;
-    if (!wave_digest_atom(session->catalog[catalog_index].payload_id, &identity)) return 0;
+    if (catalog_index >= RESOURCE_MAX_ADMISSION_ENTRIES
+        || !session->catalog[catalog_index].descriptor
+        || !wave_digest_atom(session->catalog[catalog_index].descriptor->payload_id, &identity)) return 0;
     for (uint32_t i = plan->instance_count; i != 0; i--) {
         uint32_t instance = i - 1u;
         const WavePlanType *type = &plan->types[plan->instance_types[instance] - 1u];
@@ -1885,7 +1893,9 @@ static int wave_runtime_stimulus_build(const ResourceSession *session,
     }
     noun runtime_value_list, identity, runtime_fields[4], runtime_body;
     if (!wave_build_list(runtime_values, value_count, &runtime_value_list)
-        || !wave_digest_atom(session->catalog[catalog_index].payload_id, &identity)) return 0;
+        || catalog_index >= RESOURCE_MAX_ADMISSION_ENTRIES
+        || !session->catalog[catalog_index].descriptor
+        || !wave_digest_atom(session->catalog[catalog_index].descriptor->payload_id, &identity)) return 0;
     runtime_fields[0] = identity;
     runtime_fields[1] = direct(instance + 1u);
     runtime_fields[2] = direct(event);
@@ -1951,7 +1961,8 @@ static int wave_runtime_product_commit(const ResourceSession *session,
     if (!wave_pair(product, &tag, &body)
         || !wave_atom_text(tag, "m38-product-v2")
         || !wave_record(body, fields, 7)
-        || !wave_identity(fields[0], session->catalog[catalog_index].payload_id)
+        || !session->catalog[catalog_index].descriptor
+        || !wave_identity(fields[0], session->catalog[catalog_index].descriptor->payload_id)
         || !wave_atom_text(fields[1], "commit")) return 0;
     noun observations[32], trace[128];
     uint32_t observation_count, trace_count;
@@ -1963,7 +1974,7 @@ static int wave_runtime_product_commit(const ResourceSession *session,
     if (!wave_pair(fields[2], &state_tag, &state_body)
         || !noun_is_direct(state_tag) || direct_val(state_tag) != RESOURCE_RUNTIME_STATE_TAG
         || !wave_record(state_body, state_fields, 2)
-        || !wave_identity(state_fields[0], session->catalog[catalog_index].payload_id)
+        || !wave_identity(state_fields[0], session->catalog[catalog_index].descriptor->payload_id)
         || !wave_list(state_fields[1], rows, RESOURCE_MAX_PLAN_INSTANCES, &row_count)
         || row_count != plan->instance_count) return 0;
 
@@ -2060,7 +2071,7 @@ static M38Status wave_dispatch_operation(ResourceRuntime *runtime,
         WaveCacheEntry *cache = &session->cache[catalog_index];
         WavePlan staged_plan = cache->plan;
         if (!cache->valid) {
-            if (wave_take_fault(runtime, M38_FAULT_CUE_CACHE_INSERT) != M38_STATUS_OK)
+            if (wave_take_fault(runtime, WAVE_FAULT_CUE_CACHE_INSERT) != M38_STATUS_OK)
                 return M38_STATUS_CUE_CACHE_INSERT;
             if (!wave_parse_plan(session->catalog[catalog_index].core, &staged_plan)) {
                 refusal_reason = RESOURCE_REASON_CORE_FAILURE;
@@ -2110,9 +2121,9 @@ static M38Status wave_dispatch_operation(ResourceRuntime *runtime,
         wire_status = RESOURCE_WIRE_LOADED;
         owner = M38_RESULT_OWNER_PRIMARY;
         M38Status failure;
-        if (wave_take_fault(runtime, M38_FAULT_ATOM_RESULT_STAGING) != M38_STATUS_OK)
+        if (wave_take_fault(runtime, WAVE_FAULT_ATOM_RESULT_STAGING) != M38_STATUS_OK)
             return M38_STATUS_ATOM_RESULT_STAGING;
-        if (wave_take_fault(runtime, M38_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK)
+        if (wave_take_fault(runtime, WAVE_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK)
             return M38_STATUS_COLLECTIVE_COMMIT;
         if (!wave_promote_operation(runtime, session, free_slot, &staged_slot,
                                     handle, state, NOUN_ZERO, result, owner,
@@ -2168,7 +2179,7 @@ static M38Status wave_dispatch_operation(ResourceRuntime *runtime,
     staged_slot = session->slots[slot_index];
     if (request->operation == RESOURCE_OP_POKE) {
         M38Status evaluation_status = M38_STATUS_OK;
-        if (wave_take_fault(runtime, M38_FAULT_EVALUATOR_ABORT) != M38_STATUS_OK)
+        if (wave_take_fault(runtime, WAVE_FAULT_EVALUATOR_ABORT) != M38_STATUS_OK)
             return M38_STATUS_EVALUATOR_ABORT;
         if (!wave_poke_result(session, slot_index, plan, request->second,
                               &staged_slot, &state, &result, &evaluation_status)) {
@@ -2223,7 +2234,7 @@ static M38Status wave_dispatch_operation(ResourceRuntime *runtime,
         staged_slot.state_root = state;
         wire_status = RESOURCE_WIRE_RESTORE;
         owner = M38_RESULT_OWNER_PRIMARY;
-        if (wave_take_fault(runtime, M38_FAULT_RESTORE_COMMIT) != M38_STATUS_OK)
+        if (wave_take_fault(runtime, WAVE_FAULT_RESTORE_COMMIT) != M38_STATUS_OK)
             return M38_STATUS_RESTORE_COMMIT;
         goto publish;
     }
@@ -2231,11 +2242,11 @@ static M38Status wave_dispatch_operation(ResourceRuntime *runtime,
 
 publish: {
         M38Status failure;
-        if (wave_take_fault(runtime, M38_FAULT_ATOM_RESULT_STAGING) != M38_STATUS_OK)
+        if (wave_take_fault(runtime, WAVE_FAULT_ATOM_RESULT_STAGING) != M38_STATUS_OK)
             return M38_STATUS_ATOM_RESULT_STAGING;
-        if (wave_take_fault(runtime, M38_FAULT_SLOT_PUBLICATION) != M38_STATUS_OK)
+        if (wave_take_fault(runtime, WAVE_FAULT_SLOT_PUBLICATION) != M38_STATUS_OK)
             return M38_STATUS_SLOT_PUBLICATION;
-        if (wave_take_fault(runtime, M38_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK)
+        if (wave_take_fault(runtime, WAVE_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK)
             return M38_STATUS_COLLECTIVE_COMMIT;
         if (!wave_promote_operation(runtime, session, slot_index, &staged_slot,
                                     handle, state, snapshot, result, owner,
@@ -2245,11 +2256,11 @@ publish: {
         return M38_STATUS_OK;
     }
 refuse:
-    if (wave_take_fault(runtime, M38_FAULT_ATOM_RESULT_STAGING) != M38_STATUS_OK)
+    if (wave_take_fault(runtime, WAVE_FAULT_ATOM_RESULT_STAGING) != M38_STATUS_OK)
         return M38_STATUS_ATOM_RESULT_STAGING;
-    if (wave_take_fault(runtime, M38_FAULT_SLOT_PUBLICATION) != M38_STATUS_OK)
+    if (wave_take_fault(runtime, WAVE_FAULT_SLOT_PUBLICATION) != M38_STATUS_OK)
         return M38_STATUS_SLOT_PUBLICATION;
-    if (wave_take_fault(runtime, M38_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK)
+    if (wave_take_fault(runtime, WAVE_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK)
         return M38_STATUS_COLLECTIVE_COMMIT;
     return wave_publish_refusal(runtime, session, refusal_reason, out_view);
 }
@@ -2270,7 +2281,7 @@ M38Status m38_resource_session_dispatch(ResourceSession *session, noun request,
     /* Safety failure is a C-boundary error.  A safely traversable noun that
      * merely misses the ResourceABI grammar is an ordinary wire refusal. */
     if (!wave_request_decode(request, &decoded)) decoded.operation = 0;
-    M38Status broker_fault = wave_take_fault(runtime, M38_FAULT_BROKER_BEGIN);
+    M38Status broker_fault = wave_take_fault(runtime, WAVE_FAULT_BROKER_BEGIN);
     if (broker_fault != M38_STATUS_OK) return broker_fault;
     runtime->broker_owner = (uint8_t)(session->registry_index + 1u);
     runtime->state = 3;
@@ -2317,7 +2328,7 @@ M38Status m38_resource_session_reset(ResourceRuntime *runtime,
 {
     M38Status status = wave_lifecycle_begin(runtime, session);
     if (status != M38_STATUS_OK) return status;
-    if (wave_take_fault(runtime, M38_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK) {
+    if (wave_take_fault(runtime, WAVE_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK) {
         wave_broker_release(runtime);
         return M38_STATUS_COLLECTIVE_COMMIT;
     }
@@ -2339,12 +2350,10 @@ M38Status m38_resource_session_reset(ResourceRuntime *runtime,
     session->primary_generation = next_primary_generation;
     session->refusal_generation = next_refusal_generation;
     session->primary_view.root_slot = &session->primary_root;
-    session->primary_view.handle_slot = 0;
     session->primary_view.generation = session->primary_generation;
     session->primary_view.wire_status = 0;
     session->primary_view.owner = M38_RESULT_OWNER_NONE;
     session->refusal_view.root_slot = &session->refusal_root;
-    session->refusal_view.handle_slot = 0;
     session->refusal_view.generation = session->refusal_generation;
     session->refusal_view.wire_status = 0;
     session->refusal_view.owner = M38_RESULT_OWNER_NONE;
@@ -2367,7 +2376,7 @@ M38Status m38_resource_session_dispose(ResourceRuntime *runtime,
 {
     M38Status status = wave_lifecycle_begin(runtime, session);
     if (status != M38_STATUS_OK) return status;
-    if (wave_take_fault(runtime, M38_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK) {
+    if (wave_take_fault(runtime, WAVE_FAULT_COLLECTIVE_COMMIT) != M38_STATUS_OK) {
         wave_broker_release(runtime);
         return M38_STATUS_COLLECTIVE_COMMIT;
     }
@@ -2396,13 +2405,11 @@ M38Status m38_resource_session_dispose(ResourceRuntime *runtime,
     session->primary_root = NOUN_ZERO;
     session->refusal_root = NOUN_ZERO;
     session->primary_view.root_slot = &session->primary_root;
-    session->primary_view.handle_slot = 0;
     session->primary_generation = next_primary_generation;
     session->primary_view.generation = session->primary_generation;
     session->primary_view.wire_status = 0;
     session->primary_view.owner = M38_RESULT_OWNER_NONE;
     session->refusal_view.root_slot = &session->refusal_root;
-    session->refusal_view.handle_slot = 0;
     session->refusal_generation = next_refusal_generation;
     session->refusal_view.generation = session->refusal_generation;
     session->refusal_view.wire_status = 0;

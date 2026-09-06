@@ -320,10 +320,9 @@ static int witness_result_body(const ResourceResultView *view, noun *body)
 
 static int witness_handle_from_load(const ResourceResultView *view, noun *handle)
 {
-    if (view && view->handle_slot && *view->handle_slot != NOUN_ZERO) {
-        *handle = *view->handle_slot;
-        return 1;
-    }
+    /* The published ABI result noun is the only handle source.  This helper
+     * re-reads root_slot on every call, including after promotion, instead of
+     * retaining a slot alias or cached handle. */
     noun body, fields[2];
     return witness_result_body(view, &body)
         && witness_record(body, fields, 2)

@@ -33,7 +33,6 @@ typedef struct ResourceResultView {
      * the session lifetime.  Promotion may rewrite *root_slot; callers must
      * reread it after any other runtime operation. */
     const noun *root_slot;
-    const noun *handle_slot;
     uint64_t generation;
     uint8_t wire_status;
     ResultOwner owner;
@@ -71,9 +70,11 @@ typedef enum M38Status {
     M38_STATUS_INTERNAL = 24,
 } M38Status;
 
-/* Runtime initialization claims the process-wide serialized noun/Nock domain.
- * The caller retains ownership of both storage regions and must keep them
- * alive until every registered session has been disposed. */
+/* Runtime initialization claims the process-wide serialized noun/Nock domain
+ * for a cold boot.  The caller retains ownership of both storage regions and
+ * must keep them alive until every registered session has been disposed.  The
+ * process-global lease is cold-boot-owned; this API makes no same-process
+ * release/reinitialization claim. */
 M38Status m38_resource_runtime_init(
     void *control_storage, size_t control_storage_bytes,
     void *init_workspace, size_t init_workspace_bytes,
@@ -113,18 +114,3 @@ size_t m38_resource_runtime_init_workspace_bytes(void);
 size_t m38_resource_runtime_storage_alignment(void);
 size_t m38_resource_session_storage_bytes(void);
 size_t m38_resource_session_storage_alignment(void);
-
-/* Test-only fault selection.  It is deliberately not a dispatch input. */
-typedef enum M38FaultPoint {
-    M38_FAULT_NONE = 0,
-    M38_FAULT_BROKER_BEGIN,
-    M38_FAULT_CUE_CACHE_INSERT,
-    M38_FAULT_SLOT_PUBLICATION,
-    M38_FAULT_EVALUATOR_ABORT,
-    M38_FAULT_ATOM_RESULT_STAGING,
-    M38_FAULT_COLLECTIVE_COMMIT,
-    M38_FAULT_RESTORE_COMMIT,
-} M38FaultPoint;
-
-void m38_resource_test_fail_next(ResourceRuntime *runtime,
-                                 M38FaultPoint fault);
