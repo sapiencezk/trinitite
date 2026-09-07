@@ -54,6 +54,7 @@
 #define RESOURCE_MAX_PLAN_VALUES              16u
 #define RESOURCE_MAX_PLAN_STATES              8u
 #define RESOURCE_MAX_PLAN_INSTANCES           8u
+#define RESOURCE_MAX_BOUNDARIES               128u
 #define RESOURCE_MAX_VALUES                    16u
 #define RESOURCE_MAX_SNAPSHOT_NONCE            0xFFFFFFFFULL
 
@@ -110,6 +111,8 @@ static const char RESOURCE_VALUE_TAG[] = "m38-resource-abi-v1-numeric-value";
 static const char RESOURCE_VALUE_SCHEMA[] = "m38-resource-abi-v1-numeric-value-schema-v1";
 static const char RESOURCE_EFFECTS_TAG[] = "m38-resource-abi-v1-numeric-effects";
 static const char RESOURCE_EFFECTS_SCHEMA[] = "m38-resource-abi-v1-numeric-effects-schema-v1";
+static const char RESOURCE_EFFECT_TAG[] = "m38-resource-abi-v1-numeric-effect";
+static const char RESOURCE_EFFECT_SCHEMA[] = "m38-resource-abi-v1-numeric-effect-schema-v1";
 static const char RESOURCE_OBSERVATIONS_TAG[] = "m38-resource-abi-v1-numeric-observations";
 static const char RESOURCE_OBSERVATIONS_SCHEMA[] = "m38-resource-abi-v1-numeric-observations-schema-v1";
 static const char RESOURCE_OBSERVATION_TAG[] = "m38-resource-abi-v1-numeric-observation";
@@ -128,6 +131,7 @@ static const char RESOURCE_ADMISSION_DOMAIN[] = "1499kernel:i2:m38:resource-abi-
 static const char RESOURCE_CORE_DOMAIN[] = "1499kernel:i2:m38-d0-r3:resource-core:v3";
 static const char RESOURCE_FORMULA_DOMAIN[] = "1499kernel:i2:m38-d0-r3:formula:v3";
 static const char RESOURCE_PAYLOAD_DOMAIN[] = "1499kernel:i2:m38-d0-r3:resource-payload:v3";
+static const char RESOURCE_PROFILE[] = "1499kernel-i2-m38-numeric-execution-profile-v1-bounded";
 
 /* Private fault vocabulary.  The public runtime header has no fault setter;
  * Wave B test builds translate their test-only enum at the boundary below. */
@@ -194,16 +198,24 @@ typedef struct WavePlanType {
     uint32_t value_initials[RESOURCE_MAX_PLAN_VALUES];
     uint32_t event_count;
     uint32_t event_ids[RESOURCE_MAX_PLAN_EVENTS];
+    uint32_t event_directions[RESOURCE_MAX_PLAN_EVENTS];
     uint32_t event_value_counts[RESOURCE_MAX_PLAN_EVENTS];
     uint32_t event_value_ids[RESOURCE_MAX_PLAN_EVENTS][RESOURCE_MAX_PLAN_VALUES];
     uint32_t state_count;
 } WavePlanType;
+
+typedef struct WaveEndpoint {
+    uint32_t instance; /* zero based */
+    uint32_t event;    /* index in the type's all-event table */
+} WaveEndpoint;
 
 typedef struct WavePlan {
     uint32_t type_count;
     uint32_t instance_count;
     uint32_t instance_types[RESOURCE_MAX_PLAN_INSTANCES];
     WavePlanType types[RESOURCE_MAX_PLAN_TYPES];
+    uint32_t boundary_counts[2]; /* ingress, egress */
+    WaveEndpoint boundaries[2][RESOURCE_MAX_BOUNDARIES];
     noun formula;
     noun payload;
 } WavePlan;
@@ -231,6 +243,7 @@ typedef struct WaveSlot {
 
 typedef struct WaveCatalogCopy {
     uint8_t valid;
+    M38ResourceCoreDescriptor descriptor_storage;
     const M38ResourceCoreDescriptor *descriptor;
     uint32_t core_jam_bytes;
     uint8_t core_jam[RESOURCE_MAX_CORE_JAM_BYTES];
@@ -758,7 +771,7 @@ static int wave_forward_binding(noun value, uint32_t expected)
 static int wave_record_validate(ResourceRuntime *runtime,
                                 const SupervisorAdmissionEntry *entry,
                                 noun record,
-                                const M38ResourceCoreDescriptor **descriptor_out)
+                                M38ResourceCoreDescriptor *descriptor_out)
 {
     noun tag, body, fields[11];
     if (!wave_pair(record, &tag, &body)
@@ -767,11 +780,11 @@ static int wave_record_validate(ResourceRuntime *runtime,
         || !wave_atom_text(fields[0], RESOURCE_RECORD_SCHEMA)) {
         return 0;
     }
-    uint8_t core_id[32];
-    if (!wave_atom_bytes(fields[1], core_id, sizeof(core_id))) return 0;
-    const M38ResourceCoreDescriptor *descriptor =
-        m38_resource_core_descriptor(core_id);
-    if (!descriptor) return 0;
+    M38ResourceCoreDescriptor descriptor = {0};
+    if (!wave_atom_bytes(fields[1], descriptor.core_id, 32)
+        || !wave_atom_bytes(fields[4], descriptor.battery_id, 32)
+        || !wave_atom_bytes(fields[5], descriptor.payload_id, 32)) return 0;
+    descriptor.profile_id = RESOURCE_PROFILE;
     uint32_t core_bytes;
     if (!wave_u(fields[2], RESOURCE_MAX_CORE_JAM_BYTES, &core_bytes)
         || core_bytes != entry->resource_core_jam_bytes
@@ -779,15 +792,13 @@ static int wave_record_validate(ResourceRuntime *runtime,
         return 0;
     uint8_t sha[32];
     sha256_hash(entry->resource_core_jam, entry->resource_core_jam_bytes, sha);
-    if (!wave_identity(fields[3], sha)
-        || !wave_identity(fields[4], descriptor->battery_id)
-        || !wave_identity(fields[5], descriptor->payload_id)) return 0;
+    if (!wave_identity(fields[3], sha)) return 0;
     noun bindings[15], supported[2], nested[13], limits[3];
     uint32_t count;
     if (!wave_list(fields[6], bindings, 15, &count) || count != 15) return 0;
     for (uint32_t i = 0; i < count; i++)
         if (!wave_forward_binding(bindings[i], i)) return 0;
-    if (!wave_atom_text(fields[7], descriptor->profile_id)
+    if (!wave_atom_text(fields[7], descriptor.profile_id)
         || !wave_list(fields[8], supported, 2, &count) || count != 2)
         return 0;
     for (uint32_t i = 0; i < 2; i++) {
@@ -795,7 +806,8 @@ static int wave_record_validate(ResourceRuntime *runtime,
         if (!wave_record(supported[i], sf, 3)
             || !wave_atom_text(sf[0], i == 0 ? "BOOL" : "UINT16")
             || !wave_u(sf[1], 2, &core_bytes) || core_bytes != i + 1u
-            || !wave_u(sf[2], i == 0 ? 1 : 65535, &core_bytes))
+            || !wave_u(sf[2], i == 0 ? 1 : 65535, &core_bytes)
+            || core_bytes != (i == 0 ? 1u : 65535u))
             return 0;
     }
     if (!wave_list(fields[9], nested, 13, &count) || count != 13) return 0;
@@ -821,7 +833,7 @@ static int wave_record_validate(ResourceRuntime *runtime,
     for (size_t i = 0; i < domain_bytes; i++) preimage[i] = (uint8_t)RESOURCE_ADMISSION_DOMAIN[i];
     for (uint64_t i = 0; i < canonical_bytes; i++) preimage[domain_bytes + i] = canonical[i];
     sha256_hash(preimage, domain_bytes + (size_t)canonical_bytes, admission_id);
-    if (!wave_bytes_equal(admission_id, descriptor->admission_id, 32)) return 0;
+    wave_copy(descriptor.admission_id, admission_id, sizeof(admission_id));
     *descriptor_out = descriptor;
     return 1;
 }
@@ -871,12 +883,13 @@ static int wave_parse_plan(noun core, WavePlan *out)
             uint32_t direction, event_value_count;
             if (!wave_record(events[j], ef, 3)
                 || !wave_u(ef[0], 0xFFFF, &type->event_ids[j])
-                || type->event_ids[j] == 0
+                || type->event_ids[j] != j + 1u
                 || !wave_u(ef[1], 2, &direction)
                 || !wave_list(ef[2], event_values, RESOURCE_MAX_PLAN_VALUES,
                               &event_value_count))
                 return 0;
             type->event_value_counts[j] = event_value_count;
+            type->event_directions[j] = direction;
             for (uint32_t k = 0; k < event_value_count; k++)
                 if (!wave_u(event_values[k], RESOURCE_MAX_PLAN_VALUES,
                             &type->event_value_ids[j][k])
@@ -895,6 +908,12 @@ static int wave_parse_plan(noun core, WavePlan *out)
                            &type->value_initials[j]))
                 return 0;
         }
+        for (uint32_t j = 0; j < event_count; j++)
+            for (uint32_t k = 0; k < type->event_value_counts[j]; k++) {
+                if (type->event_value_ids[j][k] > value_count) return 0;
+                for (uint32_t l = 0; l < k; l++)
+                    if (type->event_value_ids[j][k] == type->event_value_ids[j][l]) return 0;
+            }
         type->state_count = state_count;
         uint32_t initial_states = 0;
         for (uint32_t j = 0; j < state_count; j++) {
@@ -920,6 +939,39 @@ static int wave_parse_plan(noun core, WavePlan *out)
             || wave_plan_type(&plan, type_id) == 0)
             return 0;
         plan.instance_types[i] = type_id;
+    }
+    /* Boundary rows are part of the admitted payload, never inferred from a
+     * first matching FB type. Globally qualified codes preserve instance
+     * identity even when several instances share one type. */
+    for (uint32_t direction = 0; direction < 2; direction++) {
+        noun endpoints[RESOURCE_MAX_BOUNDARIES];
+        uint32_t count;
+        if (!wave_list(semantic[3 + direction], endpoints, RESOURCE_MAX_BOUNDARIES, &count)) return 0;
+        plan.boundary_counts[direction] = count;
+        for (uint32_t i = 0; i < count; i++) {
+            noun ef[3], values[RESOURCE_MAX_PLAN_VALUES];
+            uint32_t instance, code, value_count;
+            if (!wave_record(endpoints[i], ef, 3)
+                || !wave_u(ef[0], plan.instance_count, &instance) || instance == 0
+                || !wave_u(ef[1], 65535, &code)
+                || code / 1024u != instance || code % 1024u == 0
+                || !wave_list(ef[2], values, RESOURCE_MAX_PLAN_VALUES, &value_count)) return 0;
+            WavePlanType *type = &plan.types[plan.instance_types[instance - 1u] - 1u];
+            uint32_t event = code % 1024u - 1u;
+            if (event >= type->event_count || type->event_directions[event] != direction
+                || value_count != type->event_value_counts[event]) return 0;
+            for (uint32_t j = 0; j < value_count; j++) {
+                noun vf[2];
+                uint32_t id, kind, local = type->event_value_ids[event][j];
+                if (!wave_record(values[j], vf, 2) || !wave_u(vf[0], 65535, &id)
+                    || id != instance * 1024u + local
+                    || !wave_u(vf[1], 2, &kind) || kind != type->value_types[local - 1u]) return 0;
+            }
+            for (uint32_t j = 0; j < i; j++)
+                if (plan.boundaries[direction][j].instance == instance - 1u
+                    && plan.boundaries[direction][j].event == event) return 0;
+            plan.boundaries[direction][i] = (WaveEndpoint){instance - 1u, event};
+        }
     }
     *out = plan;
     return 1;
@@ -950,7 +1002,7 @@ static int wave_core_validate(ResourceRuntime *runtime, noun core,
 }
 
 typedef struct WavePreflightEntry {
-    const M38ResourceCoreDescriptor *descriptor;
+    M38ResourceCoreDescriptor descriptor;
     uint32_t core_jam_bytes;
     WavePlan plan;
 } WavePreflightEntry;
@@ -1215,7 +1267,7 @@ static int wave_preflight_entry(ResourceRuntime *runtime,
                                 WavePreflightEntry *out)
 {
     noun record;
-    const M38ResourceCoreDescriptor *descriptor;
+    M38ResourceCoreDescriptor descriptor;
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (cue_bounded_bytes(entry->record_jam, entry->record_jam_bytes,
                           &cue_i2_limits, HEAP_MODE_SCRATCH, &record) != CUE_BOUNDED_OK)
@@ -1241,7 +1293,7 @@ static int wave_preflight_entry(ResourceRuntime *runtime,
                           &cue_i2_limits, HEAP_MODE_SCRATCH, &core) != CUE_BOUNDED_OK)
         return 0;
     if (!wave_safe_noun(runtime, core)
-        || !wave_core_validate(runtime, core, descriptor,
+        || !wave_core_validate(runtime, core, &descriptor,
                                entry->resource_core_jam, entry->resource_core_jam_bytes,
                                &out->plan)) {
         if (noun_tx_active()) noun_tx_abort();
@@ -1270,7 +1322,8 @@ static M38Status wave_catalog_preflight(ResourceRuntime *runtime,
         if (!wave_preflight_entry(runtime, entry, &out[i]))
             return M38_STATUS_CATALOG_INVALID;
         for (uint32_t j = 0; j < i; j++) {
-            if (out[j].descriptor == out[i].descriptor)
+            if (wave_bytes_equal(out[j].descriptor.core_id,
+                                 out[i].descriptor.core_id, 32))
                 return M38_STATUS_CATALOG_DUPLICATE;
         }
     }
@@ -1409,7 +1462,7 @@ static int wave_promote_registration(ResourceRuntime *runtime,
             goto fail;
         WavePlan persisted_plan;
         if (!wave_safe_noun(runtime, new_cores[i])
-            || !wave_core_validate(runtime, new_cores[i], pre[i].descriptor,
+            || !wave_core_validate(runtime, new_cores[i], &pre[i].descriptor,
                                    catalog->entries[i].resource_core_jam,
                                    catalog->entries[i].resource_core_jam_bytes,
                                    &persisted_plan)) {
@@ -1553,7 +1606,8 @@ M38Status m38_resource_session_init(
     for (uint32_t i = 0; i < catalog->entry_count; i++) {
         WaveCatalogCopy *copy = &session->catalog[i];
         copy->valid = 1;
-        copy->descriptor = pre[i].descriptor;
+        copy->descriptor_storage = pre[i].descriptor;
+        copy->descriptor = &copy->descriptor_storage;
         copy->core = new_cores[i];
         copy->core_jam_bytes = pre[i].core_jam_bytes;
         wave_copy(copy->core_jam, catalog->entries[i].resource_core_jam, pre[i].core_jam_bytes);
@@ -1796,16 +1850,54 @@ static int wave_refusal_build(uint32_t reason, noun *out)
                               result_fields, 2, out);
 }
 
-static int wave_empty_effects(noun *out)
+static int wave_outputs_build(const WavePlan *plan, noun source,
+                               noun *effects_out, noun *observations_out)
 {
-    noun fields[1] = {NOUN_ZERO};
-    return wave_build_tagged(RESOURCE_EFFECTS_TAG, RESOURCE_EFFECTS_SCHEMA, fields, 1, out);
-}
-
-static int wave_empty_observations(noun *out)
-{
-    noun fields[1] = {NOUN_ZERO};
-    return wave_build_tagged(RESOURCE_OBSERVATIONS_TAG, RESOURCE_OBSERVATIONS_SCHEMA, fields, 1, out);
+    noun rows[32], effects[32], observations[32];
+    uint32_t count;
+    if (!wave_list(source, rows, 32, &count)) return 0;
+    for (uint32_t i = 0; i < count; i++) {
+        noun instance_n, tail, event_n, values_n, values[RESOURCE_MAX_PLAN_VALUES];
+        uint32_t instance, output, count_values;
+        if (!wave_pair(rows[i], &instance_n, &tail)
+            || !wave_pair(tail, &event_n, &values_n)
+            || !wave_u(instance_n, plan->instance_count, &instance) || instance == 0
+            || !wave_u(event_n, RESOURCE_MAX_PLAN_EVENTS, &output) || output == 0
+            || !wave_list(values_n, values, RESOURCE_MAX_PLAN_VALUES, &count_values)) return 0;
+        const WavePlanType *type = &plan->types[plan->instance_types[instance - 1u] - 1u];
+        uint32_t ordinal = 0, event = type->event_count;
+        for (uint32_t j = 0; j < type->event_count; j++)
+            if (type->event_directions[j] == 1 && ++ordinal == output) { event = j; break; }
+        if (event == type->event_count || count_values != type->event_value_counts[event]) return 0;
+        uint32_t admitted = 0;
+        for (uint32_t j = 0; j < plan->boundary_counts[1]; j++)
+            if (plan->boundaries[1][j].instance == instance - 1u
+                && plan->boundaries[1][j].event == event) admitted++;
+        if (admitted != 1) return 0;
+        noun typed[RESOURCE_MAX_PLAN_VALUES];
+        for (uint32_t j = 0; j < count_values; j++) {
+            noun vf[3];
+            uint32_t id, kind, raw, local = type->event_value_ids[event][j];
+            if (!wave_record(values[j], vf, 3) || !wave_u(vf[0], RESOURCE_MAX_PLAN_VALUES, &id)
+                || id != local || !wave_u(vf[1], 2, &kind)
+                || kind != type->value_types[local - 1u]
+                || !wave_u(vf[2], kind == 1 ? 1 : 65535, &raw)
+                || !wave_value_build(instance * 1024u + local, kind, raw, &typed[j])) return 0;
+        }
+        noun list;
+        if (!wave_build_list(typed, count_values, &list)) return 0;
+        noun fields[2] = {direct(instance * 1024u + event + 1u), list};
+        if (!wave_build_tagged(RESOURCE_EFFECT_TAG, RESOURCE_EFFECT_SCHEMA, fields, 2, &effects[i])
+            || !wave_build_tagged(RESOURCE_OBSERVATION_TAG, RESOURCE_OBSERVATION_SCHEMA,
+                                  fields, 2, &observations[i])) return 0;
+    }
+    noun list;
+    if (!wave_build_list(effects, count, &list)
+        || !wave_build_tagged(RESOURCE_EFFECTS_TAG, RESOURCE_EFFECTS_SCHEMA, &list, 1, effects_out)
+        || !wave_build_list(observations, count, &list)
+        || !wave_build_tagged(RESOURCE_OBSERVATIONS_TAG, RESOURCE_OBSERVATIONS_SCHEMA,
+                              &list, 1, observations_out)) return 0;
+    return 1;
 }
 
 static int wave_metrics_build(uint64_t ops, uint64_t cells, uint64_t stack, noun *out)
@@ -1845,37 +1937,48 @@ static int wave_handle_decode(const ResourceSession *session, noun value,
     return 1;
 }
 
-static int wave_plan_has_event(const WavePlan *plan, uint32_t event_id)
+/* Local codes are retained only for a unique external endpoint, for the
+ * historical D8 callers. Forward callers use the qualified code. */
+static int wave_ingress(const WavePlan *plan, uint32_t code, WaveEndpoint *out)
 {
-    for (uint32_t i = 0; i < plan->type_count; i++)
-        for (uint32_t j = 0; j < plan->types[i].event_count; j++)
-            if (plan->types[i].event_ids[j] == event_id) return 1;
-    return 0;
+    uint32_t matches = 0;
+    for (uint32_t i = 0; i < plan->boundary_counts[0]; i++) {
+        WaveEndpoint endpoint = plan->boundaries[0][i];
+        uint32_t local = endpoint.event + 1u;
+        if (code == (endpoint.instance + 1u) * 1024u + local
+            || (code < 1024u && code == local)) {
+            *out = endpoint;
+            matches++;
+        }
+    }
+    return matches == 1;
 }
 
 static int wave_stimulus_validate(const WavePlan *plan, noun stimulus)
 {
-    noun tag, body, fields[3], values[16];
+    noun tag, body, fields[3], values[RESOURCE_MAX_VALUES];
     uint32_t count, event;
+    WaveEndpoint endpoint;
     if (!wave_pair(stimulus, &tag, &body)
         || !wave_atom_text(tag, RESOURCE_STIMULUS_TAG)
         || !wave_record(body, fields, 3)
         || !wave_atom_text(fields[0], RESOURCE_STIMULUS_SCHEMA)
         || !wave_u(fields[1], 0xFFFF, &event) || event == 0
-        || !wave_plan_has_event(plan, event)
-        || !wave_list(fields[2], values, RESOURCE_MAX_VALUES, &count))
-        return 0;
+        || !wave_ingress(plan, event, &endpoint)
+        || !wave_list(fields[2], values, RESOURCE_MAX_VALUES, &count)) return 0;
+    const WavePlanType *type = &plan->types[plan->instance_types[endpoint.instance] - 1u];
+    if (count != type->event_value_counts[endpoint.event]) return 0;
     for (uint32_t i = 0; i < count; i++) {
         noun vf[4];
-        uint32_t id, type, raw;
+        uint32_t id, kind, raw, local = type->event_value_ids[endpoint.event][i];
+        uint32_t expected = event < 1024u ? local : (endpoint.instance + 1u) * 1024u + local;
         if (!wave_pair(values[i], &tag, &body)
             || !wave_atom_text(tag, RESOURCE_VALUE_TAG)
             || !wave_record(body, vf, 4)
             || !wave_atom_text(vf[0], RESOURCE_VALUE_SCHEMA)
-            || !wave_u(vf[1], 0xFFFF, &id) || id == 0
-            || !wave_u(vf[2], 2, &type) || (type != 1 && type != 2)
-            || !wave_u(vf[3], type == 1 ? 1 : 65535, &raw))
-            return 0;
+            || !wave_u(vf[1], 0xFFFF, &id) || id != expected
+            || !wave_u(vf[2], 2, &kind) || kind != type->value_types[local - 1u]
+            || !wave_u(vf[3], kind == 1 ? 1 : 65535, &raw)) return 0;
     }
     return 1;
 }
@@ -1891,13 +1994,12 @@ static int wave_selector_validate(const WavePlan *plan, noun selector,
         || !wave_atom_text(fields[0], RESOURCE_SELECTOR_SCHEMA)
         || !wave_u(fields[1], 0xFFFF, &target) || target == 0)
         return 0;
-    for (uint32_t i = 0; i < plan->type_count; i++)
-        for (uint32_t j = 0; j < plan->types[i].value_count; j++)
-            if (plan->types[i].value_ids[j] == target) {
-                *target_out = target;
-                return 1;
-            }
-    return 0;
+    uint32_t instance = target < 1024u ? 0u : target / 1024u - 1u;
+    uint32_t local = target < 1024u ? target : target % 1024u;
+    if (instance >= plan->instance_count || local == 0
+        || local > plan->types[plan->instance_types[instance] - 1u].value_count) return 0;
+    *target_out = target;
+    return 1;
 }
 
 typedef struct WaveRequest {
@@ -1942,12 +2044,9 @@ static int wave_core_index(ResourceRuntime *runtime, ResourceSession *session,
         || bytes == 0 || bytes > RESOURCE_MAX_CORE_JAM_BYTES)
         return 0;
     if (!wave_domain_digest(runtime, core, RESOURCE_CORE_DOMAIN, identity)) return 0;
-    const M38ResourceCoreDescriptor *descriptor =
-        m38_resource_core_descriptor(identity);
-    if (!descriptor) return 0;
     for (uint32_t i = 0; i < RESOURCE_MAX_ADMISSION_ENTRIES; i++) {
         WaveCatalogCopy *entry = &session->catalog[i];
-        if (entry->valid && entry->descriptor == descriptor && bytes == entry->core_jam_bytes
+        if (entry->valid && entry->descriptor && bytes == entry->core_jam_bytes
             && wave_bytes_equal(canonical, entry->core_jam, bytes)
             && wave_bytes_equal(identity, entry->descriptor->core_id, sizeof(identity))) {
             *index_out = i;
@@ -1957,31 +2056,20 @@ static int wave_core_index(ResourceRuntime *runtime, ResourceSession *session,
     return 0;
 }
 
-static int wave_find_value(const WavePlan *plan, uint32_t id,
-                           uint32_t *type_out, uint32_t *value_out)
+static int wave_observation_build(const WavePlan *plan, const WaveSlot *slot,
+                                  uint32_t target, noun *out)
 {
-    for (uint32_t i = 0; i < plan->type_count; i++)
-        for (uint32_t j = 0; j < plan->types[i].value_count; j++)
-            if (plan->types[i].value_ids[j] == id) {
-                if (type_out) *type_out = plan->types[i].value_types[j];
-                if (value_out) *value_out = plan->types[i].value_initials[j];
-                return 1;
-            }
-    return 0;
-}
-
-static int wave_observation_build(const WavePlan *plan, uint32_t target,
-                                  noun *out)
-{
-    uint32_t type, value;
-    if (!wave_find_value(plan, target, &type, &value)) return 0;
-    noun typed;
-    if (!wave_value_build(target, type, value, &typed)) return 0;
-    noun values;
-    if (!wave_build_list(&typed, 1, &values)) return 0;
-    noun fields[2] = {direct(1), values};
-    return wave_build_tagged(RESOURCE_OBSERVATION_TAG, RESOURCE_OBSERVATION_SCHEMA,
-                             fields, 2, out);
+    uint32_t instance = target < 1024u ? 0u : target / 1024u - 1u;
+    uint32_t local = target < 1024u ? target : target % 1024u;
+    if (instance >= plan->instance_count || local == 0) return 0;
+    const WavePlanType *type = &plan->types[plan->instance_types[instance] - 1u];
+    if (local > type->value_count) return 0;
+    noun typed, values;
+    if (!wave_value_build(target, type->value_types[local - 1u],
+                          slot->state_values[instance][local - 1u], &typed)
+        || !wave_build_list(&typed, 1, &values)) return 0;
+    noun fields[2] = {direct(target), values};
+    return wave_build_tagged(RESOURCE_OBSERVATION_TAG, RESOURCE_OBSERVATION_SCHEMA, fields, 2, out);
 }
 
 static int wave_snapshot_build(const ResourceSession *session,
@@ -2253,27 +2341,12 @@ static int wave_runtime_stimulus_build(const ResourceSession *session,
         || !wave_record(body, fields, 3)
         || !wave_u(fields[1], 0xFFFF, &event)
         || !wave_list(fields[2], values, RESOURCE_MAX_PLAN_VALUES, &value_count)) return 0;
-    uint32_t type_index = RESOURCE_MAX_PLAN_TYPES;
-    uint32_t event_index = RESOURCE_MAX_PLAN_EVENTS;
-    for (uint32_t i = 0; i < plan->type_count; i++) {
-        for (uint32_t j = 0; j < plan->types[i].event_count; j++) {
-            if (plan->types[i].event_ids[j] == event) {
-                type_index = i;
-                event_index = j;
-                break;
-            }
-        }
-        if (type_index != RESOURCE_MAX_PLAN_TYPES) break;
-    }
-    if (type_index == RESOURCE_MAX_PLAN_TYPES) return 0;
-    uint32_t instance = RESOURCE_MAX_PLAN_INSTANCES;
-    for (uint32_t i = 0; i < plan->instance_count; i++)
-        if (plan->instance_types[i] == type_index + 1u) {
-            instance = i;
-            break;
-        }
-    if (instance == RESOURCE_MAX_PLAN_INSTANCES
-        || value_count != plan->types[type_index].event_value_counts[event_index]) return 0;
+    WaveEndpoint endpoint;
+    if (!wave_ingress(plan, event, &endpoint)) return 0;
+    uint32_t instance = endpoint.instance;
+    uint32_t type_index = plan->instance_types[instance] - 1u;
+    uint32_t event_index = endpoint.event;
+    if (value_count != plan->types[type_index].event_value_counts[event_index]) return 0;
 
     noun runtime_values[RESOURCE_MAX_PLAN_VALUES];
     for (uint32_t i = 0; i < value_count; i++) {
@@ -2282,9 +2355,10 @@ static int wave_runtime_stimulus_build(const ResourceSession *session,
             || !wave_atom_text(value_tag, RESOURCE_VALUE_TAG)
             || !wave_record(value_body, value_fields, 4)) return 0;
         uint32_t value_id;
-        if (!wave_u(value_fields[1], RESOURCE_MAX_PLAN_VALUES, &value_id)
-            || value_id != plan->types[type_index].event_value_ids[event_index][i]) return 0;
-        noun runtime_fields[3] = {value_fields[1], value_fields[2], value_fields[3]};
+        uint32_t local = plan->types[type_index].event_value_ids[event_index][i];
+        uint32_t expected = event < 1024u ? local : (instance + 1u) * 1024u + local;
+        if (!wave_u(value_fields[1], 65535, &value_id) || value_id != expected) return 0;
+        noun runtime_fields[3] = {direct(local), value_fields[2], value_fields[3]};
         if (!wave_build_record(runtime_fields, 3, &runtime_values[i])) return 0;
     }
     noun runtime_value_list, identity, runtime_fields[4], runtime_body;
@@ -2294,7 +2368,7 @@ static int wave_runtime_stimulus_build(const ResourceSession *session,
         || !wave_digest_atom(session->catalog[catalog_index].descriptor->payload_id, &identity)) return 0;
     runtime_fields[0] = identity;
     runtime_fields[1] = direct(instance + 1u);
-    runtime_fields[2] = direct(event);
+    runtime_fields[2] = direct(event_index + 1u);
     runtime_fields[3] = runtime_value_list;
     if (!wave_build_record(runtime_fields, 4, &runtime_body)) return 0;
     return alloc_cell_checked(wave_cord("38-stimul"), runtime_body, out);
@@ -2351,7 +2425,7 @@ static M38Status wave_evaluate_poke(ResourceSession *session, const WavePlan *pl
 
 static int wave_runtime_product_commit(const ResourceSession *session,
                                        const WavePlan *plan, uint32_t catalog_index,
-                                       noun product, WaveSlot *slot)
+                                       noun product, WaveSlot *slot, noun *effects, noun *observations_out)
 {
     noun tag, body, fields[7];
     if (!wave_pair(product, &tag, &body)
@@ -2403,6 +2477,7 @@ static int wave_runtime_product_commit(const ResourceSession *session,
         seen[instance_index] = 1;
     }
     for (uint32_t i = 0; i < row_count; i++) if (!seen[i]) return 0;
+    if (!wave_outputs_build(plan, fields[3], effects, observations_out)) return 0;
     *slot = candidate;
     return 1;
 }
@@ -2424,10 +2499,8 @@ static int wave_poke_result(ResourceSession *session, uint32_t slot_index,
         return 0;
     }
     if (!wave_runtime_product_commit(session, plan, staged_slot->catalog_index,
-                                     product, staged_slot)
+                                     product, staged_slot, &effects, &observations)
         || !wave_state_build(session, plan, staged_slot->catalog_index, staged_slot, state_out)
-        || !wave_empty_effects(&effects)
-        || !wave_empty_observations(&observations)
         || !wave_metrics_build(ops, cells, stack, &metrics)) {
         *evaluation_status = M38_STATUS_EVALUATOR_ABORT;
         return 0;
@@ -2600,7 +2673,7 @@ static M38Status wave_dispatch_operation(ResourceRuntime *runtime,
             goto refuse;
         }
         noun observation, body;
-        if (!wave_observation_build(plan, target, &observation)
+        if (!wave_observation_build(plan, &session->slots[slot_index], target, &observation)
             || !wave_build_record((noun[2]){request->second, observation}, 2, &body)
             || !wave_result_build(RESOURCE_WIRE_PEEK, body, &result)) {
             refusal_reason = RESOURCE_REASON_CONSTRUCTION;

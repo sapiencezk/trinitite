@@ -3,8 +3,9 @@
 #include <stdint.h>
 
 /* Internal M38 numeric profile adapter.  The public ResourceRuntime API does
- * not expose labels, formulas, or admission policy.  This descriptor is the
- * sole authority for the finite Wave A core catalog. */
+ * not expose labels, formulas, or admission policy. Forward sessions derive
+ * and own these fields from the caller's checked admission record and core.
+ * The static lookup below is retained for historical witnesses only. */
 #define M38_RESOURCE_CORE_COUNT 2u
 
 typedef struct M38ResourceCoreDescriptor {

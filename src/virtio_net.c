@@ -314,7 +314,7 @@ virtio_net_status_t virtio_net_send(const uint8_t *frame, uint32_t len)
     g_last_error = 7; return VIRTIO_NET_DEVICE_FAILURE;
 }
 
-#ifdef M37_IEC_SERVICE
+#if defined(M37_IEC_SERVICE) || defined(M39_RESOURCE_WITNESS)
 virtio_net_status_t virtio_net_submit(const uint8_t *frame, uint32_t len)
 {
     if (!g_ready) return VIRTIO_NET_NOT_READY;

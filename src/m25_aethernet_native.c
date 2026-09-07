@@ -14,7 +14,7 @@
 #define MAX_PAYLOAD 1200u
 #define FRAME_BYTES (ETH_BYTES + IPV6_BYTES + UDP_BYTES + MAX_PAYLOAD)
 
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
 static uint16_t g_local_port, g_peer_port;
 static uint8_t g_local_mac[6], g_peer_mac[6], g_local_ip[16], g_peer_ip[16];
 static int g_endpoint_configured;
@@ -46,7 +46,7 @@ static uint8_t g_pending[MAX_PAYLOAD];
 static uint32_t g_pending_len;
 static int g_pending_tx;
 static int g_test_hold_tx;
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
 static int g_test_lost_completion;
 static int g_test_delay_completion;
 #endif
@@ -101,27 +101,27 @@ int m25_native_init(void)
 {
     uint8_t mac[6];
     g_pending_tx = 0; g_pending_len = 0; g_test_hold_tx = 0;
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
     g_test_lost_completion = 0;
     g_test_delay_completion = 0;
 #endif
     g_inbox = 0; g_inbox_len = 0;
     g_shared_demux = 0;
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
     if (!g_endpoint_configured) return -1;
 #endif
     return virtio_net_init() != 0 || virtio_net_config_mac(mac) != 0
         || !same(mac, LOCAL_MAC, 6) ? -1 : 0;
 }
 
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
 int m25_native_prepare_platform(void)
 {
     uint8_t mac[6];
     return virtio_net_init() != 0 || virtio_net_config_mac(mac) != 0 ? -1 : 0;
 }
 
-#ifdef M37_IEC_SERVICE
+#if defined(M37_IEC_SERVICE) || defined(M39_RESOURCE_WITNESS)
 m25_native_status_t m25_native_submit(const uint8_t *payload, uint32_t payload_len)
 {
     if (!payload || payload_len == 0 || payload_len > MAX_PAYLOAD)
@@ -231,7 +231,7 @@ m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len
     if (!payload || payload_len == 0 || payload_len > MAX_PAYLOAD) return M25_NATIVE_MALFORMED;
     if (g_test_hold_tx) return M25_NATIVE_RING_FULL;
     if (g_pending_tx) {
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
         if (g_test_lost_completion) return M25_NATIVE_RING_FULL;
 #endif
         int complete = virtio_net_tx_complete();
@@ -254,7 +254,7 @@ m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len
     for (uint32_t i = 0; i < payload_len; i++) udp[UDP_BYTES+i] = payload[i];
     put16(udp + 6, checksum(ip, udp, UDP_BYTES + payload_len));
     virtio_net_status_t status = virtio_net_send(g_tx, ETH_BYTES + IPV6_BYTES + UDP_BYTES + payload_len);
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
     if (g_test_lost_completion && status == VIRTIO_NET_OK) {
         /* The frame has crossed the native submit boundary.  Keep its exact
          * bytes for the normal completion poll, but report the completion as
@@ -295,7 +295,7 @@ void m25_native_set_shared_demux(int enabled) { g_shared_demux = enabled != 0; }
 
 void m25_native_test_hold_tx(void) { g_test_hold_tx = 1; }
 void m25_native_test_release_tx(void) { g_test_hold_tx = 0; }
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
 void m25_native_test_lost_completion(void) { g_test_lost_completion = 1; }
 void m25_native_test_release_lost_completion(void) { g_test_lost_completion = 0; }
 void m25_native_test_delayed_completion(void) { g_test_delay_completion = 1; }

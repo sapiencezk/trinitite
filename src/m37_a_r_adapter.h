@@ -53,7 +53,7 @@ int m37_a_r_adapter_init(const m37_a_r_transport_binding_t *binding);
 m37_a_r_native_status_t m37_a_r_adapter_send(
     const m37_a_r_transport_binding_t *binding, const uint8_t *payload,
     uint32_t payload_len, uint64_t sequence);
-#ifdef M37_IEC_SERVICE
+#if defined(M37_IEC_SERVICE) || defined(M39_RESOURCE_WITNESS)
 /* Service-only split seam.  submit() means the exact AET0 frame reached the
  * native descriptor; poll_completion() proves its matching used-ring entry. */
 m37_a_r_native_status_t m37_a_r_adapter_submit(

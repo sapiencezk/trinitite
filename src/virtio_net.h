@@ -16,7 +16,7 @@ int virtio_net_config_mac(uint8_t out[6]);
 virtio_net_status_t virtio_net_receive(uint8_t *out, uint32_t out_cap,
                                        uint32_t *out_len);
 virtio_net_status_t virtio_net_send(const uint8_t *frame, uint32_t len);
-#ifdef M37_IEC_SERVICE
+#if defined(M37_IEC_SERVICE) || defined(M39_RESOURCE_WITNESS)
 /* Service-only split seam: enqueue is not completion. */
 virtio_net_status_t virtio_net_submit(const uint8_t *frame, uint32_t len);
 #endif

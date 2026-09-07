@@ -5,7 +5,7 @@
 
 #include "m37_a_r_adapter.h"
 
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
 
 #include "m36_aethernet_native.h"
 #include "m25_aethernet_native.h"
@@ -50,7 +50,10 @@ static int same(const uint8_t *a, const uint8_t *b, size_t n)
 
 static int endpoints(const m37_a_r_transport_binding_t *b)
 {
-    if (!b || b->local_device != (uint64_t)M24_NODE_ID
+    if (!b || !b->local_device
+#if !defined(M39_RESOURCE_WITNESS)
+        || b->local_device != (uint64_t)M24_NODE_ID
+#endif
         || !b->peer_device || b->peer_device == b->local_device
         || (b->role != 1 && b->role != 2) || !b->channel
         || !b->local_port || b->local_port > 65535u
@@ -109,7 +112,7 @@ m37_a_r_native_status_t m37_a_r_adapter_send(
     }
 }
 
-#ifdef M37_IEC_SERVICE
+#if defined(M37_IEC_SERVICE) || defined(M39_RESOURCE_WITNESS)
 static m37_a_r_native_status_t map_native(m25_native_status_t status)
 {
     switch (status) {

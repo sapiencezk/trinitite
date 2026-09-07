@@ -21,14 +21,14 @@ int m25_native_init(void);
 m25_native_status_t m25_native_receive(m25_native_datagram_t *out);
 m25_native_status_t m25_native_send(const uint8_t *payload, uint32_t payload_len);
 int m25_native_tx_pending(void);
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
 int m25_native_prepare_platform(void);
 int m25_native_configure_endpoint(const uint8_t *local_mac,
                                    const uint8_t *peer_mac,
                                    const uint8_t *local_ip,
                                    const uint8_t *peer_ip,
                                    uint64_t local_port, uint64_t peer_port);
-#ifdef M37_IEC_SERVICE
+#if defined(M37_IEC_SERVICE) || defined(M39_RESOURCE_WITNESS)
 /* M37 Service-only native seam.  submit() records an exact frame intent;
  * poll_completion() accepts only the matching completed descriptor. */
 m25_native_status_t m25_native_submit(const uint8_t *payload, uint32_t payload_len);
@@ -44,7 +44,7 @@ void m25_native_set_shared_demux(int enabled);
  * refusal without changing the admitted application/session state. */
 void m25_native_test_hold_tx(void);
 void m25_native_test_release_tx(void);
-#ifdef M37_A_R
+#if defined(M37_A_R) || defined(M39_RESOURCE_WITNESS)
 /* Test only: submit one frame to virtio, then suppress completion.  This
  * models the real lost-completion window rather than pre-submit ring-full. */
 void m25_native_test_lost_completion(void);
