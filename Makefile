@@ -211,7 +211,25 @@ ifneq ($(filter 1,$(M38_D8_B0_OBSERVABILITY) $(M38_D8_B1_QUALIFICATION) $(M38_D8
 ifneq ($(M38_D8_WAVE_B_QUALIFICATION),0)
 $(error use either a historical Wave B lane flag or M38_D8_WAVE_B_QUALIFICATION, not both)
 endif
+ifneq ($(words $(filter 1,$(M38_D8_B0_OBSERVABILITY) $(M38_D8_B1_QUALIFICATION) $(M38_D8_B2_QUALIFICATION) $(M38_D8_B3_OBSERVABILITY))),1)
+$(error exactly one historical Wave B lane flag may be selected)
+endif
+ifneq ($(M38_D8_WAVE_B_SCENARIO),)
+$(error use either a historical Wave B lane flag or M38_D8_WAVE_B_SCENARIO, not both)
+endif
 M38_D8_WAVE_B_QUALIFICATION := 1
+ifeq ($(M38_D8_B0_OBSERVABILITY),1)
+M38_D8_WAVE_B_SCENARIO := b0
+endif
+ifeq ($(M38_D8_B1_QUALIFICATION),1)
+M38_D8_WAVE_B_SCENARIO := b1
+endif
+ifeq ($(M38_D8_B2_QUALIFICATION),1)
+M38_D8_WAVE_B_SCENARIO := b2
+endif
+ifeq ($(M38_D8_B3_OBSERVABILITY),1)
+M38_D8_WAVE_B_SCENARIO := b3
+endif
 endif
 
 ifeq ($(M38_D8_WAVE_B_QUALIFICATION),1)
@@ -249,63 +267,6 @@ $(error M38_D8_B3_CORES must be 1 or 2)
 endif
 CFLAGS += -DM38_D8_WAVE_B_B3=1 -DM38_D8_B3_SESSIONS=$(M38_D8_B3_SESSIONS) -DM38_D8_B3_CORES=$(M38_D8_B3_CORES)
 endif
-endif
-
-ifeq ($(M38_D8_B0_OBSERVABILITY),1)
-ifneq ($(PLATFORM),qemu-virt)
-$(error M38_D8_B0_OBSERVABILITY=1 requires PLATFORM=qemu-virt)
-endif
-ifneq ($(M38_D8_WAVE_A),1)
-$(error M38_D8_B0_OBSERVABILITY=1 requires M38_D8_WAVE_A=1)
-endif
-ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
-$(error M38_D8_B0_OBSERVABILITY=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
-endif
-CFLAGS += -DM38_D8_WAVE_B_QUALIFICATION=1 -DM38_D8_WAVE_B_B0=1
-endif
-ifeq ($(M38_D8_B1_QUALIFICATION),1)
-ifneq ($(PLATFORM),qemu-virt)
-$(error M38_D8_B1_QUALIFICATION=1 requires PLATFORM=qemu-virt)
-endif
-ifneq ($(M38_D8_WAVE_A),1)
-$(error M38_D8_B1_QUALIFICATION=1 requires M38_D8_WAVE_A=1)
-endif
-ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
-$(error M38_D8_B1_QUALIFICATION=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
-endif
-CFLAGS += -DM38_D8_WAVE_B_QUALIFICATION=1 -DM38_D8_WAVE_B_B1=1
-endif
-
-ifeq ($(M38_D8_B2_QUALIFICATION),1)
-ifneq ($(PLATFORM),qemu-virt)
-$(error M38_D8_B2_QUALIFICATION=1 requires PLATFORM=qemu-virt)
-endif
-ifneq ($(M38_D8_WAVE_A),1)
-$(error M38_D8_B2_QUALIFICATION=1 requires M38_D8_WAVE_A=1)
-endif
-ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
-$(error M38_D8_B2_QUALIFICATION=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
-endif
-CFLAGS += -DM38_D8_WAVE_B_QUALIFICATION=1 -DM38_D8_WAVE_B_B2=1
-endif
-
-ifeq ($(M38_D8_B3_OBSERVABILITY),1)
-ifneq ($(PLATFORM),qemu-virt)
-$(error M38_D8_B3_OBSERVABILITY=1 requires PLATFORM=qemu-virt)
-endif
-ifneq ($(M38_D8_WAVE_A),1)
-$(error M38_D8_B3_OBSERVABILITY=1 requires M38_D8_WAVE_A=1)
-endif
-ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
-$(error M38_D8_B3_OBSERVABILITY=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
-endif
-ifneq ($(filter 1 2,$(M38_D8_B3_SESSIONS)),$(M38_D8_B3_SESSIONS))
-$(error M38_D8_B3_SESSIONS must be 1 or 2)
-endif
-ifneq ($(filter 1 2,$(M38_D8_B3_CORES)),$(M38_D8_B3_CORES))
-$(error M38_D8_B3_CORES must be 1 or 2)
-endif
-CFLAGS += -DM38_D8_WAVE_B_QUALIFICATION=1 -DM38_D8_WAVE_B_B3=1 -DM38_D8_B3_SESSIONS=$(M38_D8_B3_SESSIONS) -DM38_D8_B3_CORES=$(M38_D8_B3_CORES)
 endif
 
 ifeq ($(M36_TEST_CONTROLS),1)
@@ -526,30 +487,19 @@ M38_D8_WAVE_A_OBJS =
 ifeq ($(M38_D8_WAVE_A),1)
 ifneq ($(filter b1 b2 b3,$(M38_D8_WAVE_B_SCENARIO)),)
 M38_D8_WAVE_A_OBJS = m38_resource_core_descriptor.o m38_resource_runtime.o
-else ifneq ($(filter 1,$(M38_D8_B1_QUALIFICATION) $(M38_D8_B2_QUALIFICATION) $(M38_D8_B3_OBSERVABILITY)),)
-M38_D8_WAVE_A_OBJS = m38_resource_core_descriptor.o m38_resource_runtime.o
 else
 M38_D8_WAVE_A_OBJS = m38_resource_core_descriptor.o m38_resource_runtime.o m38_resource_wave_a_witness.o
 endif
 endif
 M38_D8_B1_OBJS =
-ifeq ($(M38_D8_B1_QUALIFICATION),1)
-M38_D8_B1_OBJS = m38_resource_wave_b1_witness.o
-endif
 ifeq ($(M38_D8_WAVE_B_SCENARIO),b1)
 M38_D8_B1_OBJS = m38_resource_wave_b1_witness.o
 endif
 M38_D8_B2_OBJS =
-ifeq ($(M38_D8_B2_QUALIFICATION),1)
-M38_D8_B2_OBJS = m38_resource_b2_witness.o
-endif
 ifeq ($(M38_D8_WAVE_B_SCENARIO),b2)
 M38_D8_B2_OBJS = m38_resource_b2_witness.o
 endif
 M38_D8_B3_OBJS =
-ifeq ($(M38_D8_B3_OBSERVABILITY),1)
-M38_D8_B3_OBJS = m38_resource_b3_witness.o
-endif
 ifeq ($(M38_D8_WAVE_B_SCENARIO),b3)
 M38_D8_B3_OBJS = m38_resource_b3_witness.o
 endif
@@ -561,18 +511,6 @@ endif
 CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M25_TARGET)-$(M26_DUPLEX)-$(M27_COMMISSION)-$(M28_COMMISSION)-$(M29_COMMISSION)-$(M36_TYPED)-$(M37_A)-$(M37_A_R)-$(M38_C)-$(M38_D5_NATIVE)-$(M38_D7_NATIVE)-$(M38_D8_NATIVE)-$(M38_D8_WAVE_A)-$(M24_NODE_ID)
 ifeq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
 CONFIG_KEY := $(CONFIG_KEY)-m38wavebtest
-endif
-ifeq ($(M38_D8_B0_OBSERVABILITY),1)
-CONFIG_KEY := $(CONFIG_KEY)-m38b0
-endif
-ifeq ($(M38_D8_B1_QUALIFICATION),1)
-CONFIG_KEY := $(CONFIG_KEY)-m38b1
-endif
-ifeq ($(M38_D8_B2_QUALIFICATION),1)
-CONFIG_KEY := $(CONFIG_KEY)-m38b2
-endif
-ifeq ($(M38_D8_B3_OBSERVABILITY),1)
-CONFIG_KEY := $(CONFIG_KEY)-m38b3-$(M38_D8_B3_SESSIONS)s-$(M38_D8_B3_CORES)c
 endif
 ifeq ($(M38_D8_WAVE_B_QUALIFICATION),1)
 CONFIG_KEY := $(CONFIG_KEY)-waveb-$(M38_D8_WAVE_B_SCENARIO)
