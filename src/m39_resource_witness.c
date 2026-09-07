@@ -322,7 +322,7 @@ void m39_resource_boot(void) {
     if (!list(envelope[1], rows, MAX_COMMANDS, &command_count)) goto fail;
     for (uint32_t i = 0; i < command_count; i++) {
         Command *c = &commands[i];
-        if (!record(rows[i], fields, 3) || !scalar(fields[0], 9, &c->operation)
+        if (!record(rows[i], fields, 3) || !scalar(fields[0], 10, &c->operation)
             || !c->operation || !scalar(fields[1], 7, &c->handle)
             || !atom_copy(fields[2], c->argument, MAX_ARGUMENT, &c->bytes)) goto fail;
     }
@@ -351,7 +351,8 @@ void m39_resource_boot(void) {
     }
     for (uint32_t i = 0; i < command_count; i++) {
         Command *c = &commands[i]; noun argument, handle, args, request;
-        uint32_t operation = c->operation; uint64_t provider_token = 0;
+        uint32_t operation = c->operation, restore_slot = c->handle;
+        uint64_t provider_token = 0;
         heap_set_mode(HEAP_MODE_PERSIST);
         if (!decode(c->argument, c->bytes, &argument)) goto fail;
         if (operation == 9) {
@@ -366,6 +367,13 @@ void m39_resource_boot(void) {
             provider_fact("test-control", 0, control);
             if (!emit(i, M38_STATUS_OK, 0)) goto fail;
             continue;
+        }
+        /* Generic qualification operation 10 attempts RESTORE using another
+         * script slot's saved snapshot. It exercises capability/profile fences
+         * through the unchanged public RESTORE request, without forging handles. */
+        if (operation == 10) {
+            if (!scalar(argument, 7, &restore_slot)) goto fail;
+            operation = 5;
         }
         if (operation >= 6) {
             M38Status status = c->handle == provider_handle ? provider_input(operation, argument, &argument, &provider_token)
@@ -391,7 +399,7 @@ void m39_resource_boot(void) {
             if (operation == 4) args = handle;
             else {
                 if (operation == 5
-                    && !decode(snapshots[c->handle].jam, snapshots[c->handle].bytes, &argument)) goto fail;
+                    && !decode(snapshots[restore_slot].jam, snapshots[restore_slot].bytes, &argument)) goto fail;
                 noun pair_fields[2] = {handle, argument};
                 if (!build(pair_fields, 2, &args)) goto fail;
             }
