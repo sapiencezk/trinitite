@@ -20,3 +20,15 @@ typedef enum M38FaultPoint {
 void m38_resource_test_fail_next(ResourceRuntime *runtime,
                                  M38FaultPoint fault);
 #endif
+
+#if defined(M38_D8_WAVE_B_B2)
+/* B2-only state preparation and busy-detection controls.  These mutate no
+ * production state outside the qualification image and are not part of the
+ * public runtime header. */
+void m38_resource_test_invalidate_cache(ResourceSession *session,
+                                        uint32_t catalog_index);
+void m38_resource_test_hold_runtime_busy(ResourceRuntime *runtime);
+void m38_resource_test_hold_session_busy(ResourceSession *session);
+void m38_resource_test_release_busy(ResourceRuntime *runtime,
+                                    ResourceSession *session);
+#endif

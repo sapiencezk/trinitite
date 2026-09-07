@@ -9,8 +9,12 @@
 #if defined(M38_D8_WAVE_A)
 #include "m38_resource_runtime.h"
 #include "m38_resource_wave_a_witness.h"
-#if defined(M38_D8_B1_QUALIFICATION)
+#if defined(M38_D8_WAVE_B_B1)
 #include "m38_resource_wave_b1_witness.h"
+#elif defined(M38_D8_WAVE_B_B2)
+#include "m38_resource_b2_witness.h"
+#elif defined(M38_D8_WAVE_B_B3)
+#include "m38_resource_b3_witness.h"
 #endif
 #elif defined(M38_D8_NATIVE)
 #include "m38_resource_abi_target.h"
@@ -40,9 +44,13 @@ void main(void) {
     cold_init();
 
 #if defined(M38_D8_WAVE_A)
-#if defined(M38_D8_B1_QUALIFICATION)
+#if defined(M38_D8_WAVE_B_B1)
     m38_resource_b1_boot();
-#elif defined(M38_D8_B0_OBSERVABILITY)
+#elif defined(M38_D8_WAVE_B_B2)
+    m38_resource_b2_boot();
+#elif defined(M38_D8_WAVE_B_B3)
+    m38_resource_b3_boot();
+#elif defined(M38_D8_WAVE_B_B0)
     m38_resource_b0_boot();
 #else
     m38_resource_wave_a_boot();

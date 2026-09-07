@@ -2,8 +2,12 @@
 #include <stddef.h>
 #include "noun.h"
 #include "i2_admission_metrics.h"
-#if defined(M38_D8_B0_OBSERVABILITY)
+#include "m38_resource_wave_b_qualification.h"
+#if defined(M38_D8_WAVE_B_B0)
 #include "m38_resource_b0_observability.h"
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+#include "m38_resource_b3_observability.h"
 #endif
 #include "memory.h"
 #include "blake3.h"
@@ -30,6 +34,14 @@ static uint64_t heap_noalloc_faults;
 static int      noun_tx_live;
 static int      noun_tx_mode;
 static uint8_t *noun_tx_cell_mark;
+
+#if defined(M38_D8_WAVE_B_B3)
+static uint64_t g_b3_persistent_cells_hwm;
+static uint64_t g_b3_scratch_cells_hwm;
+static uint64_t g_b3_atom_bytes_hwm;
+static uint64_t g_b3_atom_index_occupancy_hwm;
+static uint64_t g_b3_atom_index_probe_depth_hwm;
+#endif
 
 void noun_heap_init(void);   /* forward — also inits atom store */
 
@@ -133,6 +145,14 @@ static void *heap_alloc(size_t bytes) {
             nock_crash("heap exhausted");
         persist_ptr = p + bytes;
     }
+#if defined(M38_D8_WAVE_B_B3)
+    uint64_t used = heap_cells_used(heap_mode);
+    if (heap_mode == HEAP_MODE_SCRATCH) {
+        if (used > g_b3_scratch_cells_hwm) g_b3_scratch_cells_hwm = used;
+    } else if (used > g_b3_persistent_cells_hwm) {
+        g_b3_persistent_cells_hwm = used;
+    }
+#endif
     return p;
 }
 
@@ -158,6 +178,14 @@ static void *heap_alloc_checked(size_t bytes)
             return 0;
         persist_ptr = p + bytes;
     }
+#if defined(M38_D8_WAVE_B_B3)
+    uint64_t used = heap_cells_used(heap_mode);
+    if (heap_mode == HEAP_MODE_SCRATCH) {
+        if (used > g_b3_scratch_cells_hwm) g_b3_scratch_cells_hwm = used;
+    } else if (used > g_b3_persistent_cells_hwm) {
+        g_b3_persistent_cells_hwm = used;
+    }
+#endif
     return p;
 }
 
@@ -231,13 +259,21 @@ static int64_t  g_atom_fail_after = -1;
 static uint64_t g_copy_entries;
 static uint64_t g_copy_entries_hwm;
 static uint64_t g_copy_mutations;
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 static M38B0CopyDomain g_b0_copy_domain;
 static uint64_t g_b0_copy_cells[4];
 static uint64_t g_b0_copy_passes;
 static uint64_t g_b0_copy_clear_bytes;
 static uint64_t g_b0_copy_peak_entries;
 static uint64_t g_b0_copy_peak_probe_depth;
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+static M38B3CopyDomain g_b3_copy_domain;
+static uint64_t g_b3_copy_cells[4];
+static uint64_t g_b3_copy_passes;
+static uint64_t g_b3_copy_clear_bytes;
+static uint64_t g_b3_copy_peak_entries;
+static uint64_t g_b3_copy_peak_probe_depth;
 #endif
 
 static void copy_entry_inserted(void)
@@ -248,9 +284,13 @@ static void copy_entry_inserted(void)
     i2_admission_metrics_max(
         &g_i2_admission_metrics.copy_cache_entries_hwm,
         g_copy_entries);
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
     if (g_copy_entries > g_b0_copy_peak_entries)
         g_b0_copy_peak_entries = g_copy_entries;
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+    if (g_copy_entries > g_b3_copy_peak_entries)
+        g_b3_copy_peak_entries = g_copy_entries;
 #endif
 }
 
@@ -259,9 +299,13 @@ static void copy_probe(uint32_t probe)
     i2_admission_metrics_max(
         &g_i2_admission_metrics.copy_probe_hwm,
         (uint64_t)probe + 1u);
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
     if ((uint64_t)probe + 1u > g_b0_copy_peak_probe_depth)
         g_b0_copy_peak_probe_depth = (uint64_t)probe + 1u;
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+    if ((uint64_t)probe + 1u > g_b3_copy_peak_probe_depth)
+        g_b3_copy_peak_probe_depth = (uint64_t)probe + 1u;
 #endif
 }
 
@@ -273,17 +317,28 @@ static void copy_map_clear(void)
     g_i2_admission_metrics.copy_passes++;
     g_i2_admission_metrics.copy_clear_count++;
     g_i2_admission_metrics.copy_clear_bytes += sizeof g_copy_used;
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
     g_b0_copy_passes++;
     g_b0_copy_clear_bytes += sizeof g_copy_used;
 #endif
+#if defined(M38_D8_WAVE_B_B3)
+    g_b3_copy_passes++;
+    g_b3_copy_clear_bytes += sizeof g_copy_used;
+#endif
 }
 
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 static void b0_copy_cell_allocated(void)
 {
     if (g_b0_copy_domain <= M38_B0_COPY_STAGED)
         g_b0_copy_cells[g_b0_copy_domain]++;
+}
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+static void b3_copy_cell_allocated(void)
+{
+    if (g_b3_copy_domain <= M38_B3_COPY_STAGED)
+        g_b3_copy_cells[g_b3_copy_domain]++;
 }
 #endif
 
@@ -307,8 +362,11 @@ static noun noun_copy_rec(noun n)
     noun nh  = noun_copy_rec(c->head);
     noun nt  = noun_copy_rec(c->tail);
     noun neu = alloc_cell(nh, nt);
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
     b0_copy_cell_allocated();
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+    b3_copy_cell_allocated();
 #endif
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
         copy_probe(k);
@@ -368,8 +426,11 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
         g_copy_fail_after--;
     if (!alloc_cell_checked(nh, nt, &neu))
         return 0;
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
     b0_copy_cell_allocated();
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+    b3_copy_cell_allocated();
 #endif
     g_copy_mutations++;
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
@@ -410,7 +471,7 @@ void noun_test_copy_fail_after(int64_t cells)
     g_copy_fail_after = cells;
 }
 
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 void noun_b0_copy_metrics_reset(void)
 {
     g_b0_copy_domain = M38_B0_COPY_NONE;
@@ -435,6 +496,59 @@ uint64_t noun_b0_copy_passes(void) { return g_b0_copy_passes; }
 uint64_t noun_b0_copy_clear_bytes(void) { return g_b0_copy_clear_bytes; }
 uint64_t noun_b0_copy_peak_entries(void) { return g_b0_copy_peak_entries; }
 uint64_t noun_b0_copy_peak_probe_depth(void) { return g_b0_copy_peak_probe_depth; }
+#endif
+
+#if defined(M38_D8_WAVE_B_B3)
+void noun_b3_metrics_reset(void)
+{
+    g_b3_copy_domain = M38_B3_COPY_NONE;
+    for (uint32_t i = 0; i < 4; i++) g_b3_copy_cells[i] = 0;
+    g_b3_copy_passes = 0;
+    g_b3_copy_clear_bytes = 0;
+    g_b3_copy_peak_entries = 0;
+    g_b3_copy_peak_probe_depth = 0;
+    g_b3_persistent_cells_hwm = heap_cells_used(HEAP_MODE_PERSIST);
+    g_b3_scratch_cells_hwm = heap_cells_used(HEAP_MODE_SCRATCH);
+    g_b3_atom_bytes_hwm = atom_store_bytes_used();
+    g_b3_atom_index_occupancy_hwm = atom_store_index_occupancy();
+    g_b3_atom_index_probe_depth_hwm = atom_store_probe_hwm();
+}
+
+void noun_b3_metrics_begin_row(void)
+{
+    g_b3_copy_domain = M38_B3_COPY_NONE;
+    for (uint32_t i = 0; i < 4; i++) g_b3_copy_cells[i] = 0;
+    g_b3_copy_passes = 0;
+    g_b3_copy_clear_bytes = 0;
+    g_b3_copy_peak_entries = 0;
+    g_b3_copy_peak_probe_depth = 0;
+}
+
+void noun_b3_copy_domain_set(M38B3CopyDomain domain)
+{
+    g_b3_copy_domain = domain <= M38_B3_COPY_STAGED ? domain : M38_B3_COPY_NONE;
+}
+
+void noun_b3_metrics_read(M38B3Metrics *out)
+{
+    if (!out) return;
+    out->persistent_cells_current = heap_cells_used(HEAP_MODE_PERSIST);
+    out->scratch_cells_current = heap_cells_used(HEAP_MODE_SCRATCH);
+    out->persistent_cells_hwm = g_b3_persistent_cells_hwm;
+    out->scratch_cells_hwm = g_b3_scratch_cells_hwm;
+    out->atom_bytes_current = atom_store_bytes_used();
+    out->atom_bytes_hwm = g_b3_atom_bytes_hwm;
+    out->atom_index_occupancy_current = atom_store_index_occupancy();
+    out->atom_index_occupancy_hwm = g_b3_atom_index_occupancy_hwm;
+    out->atom_index_probe_depth_hwm = g_b3_atom_index_probe_depth_hwm;
+    out->copied_session_a_cells = g_b3_copy_cells[M38_B3_COPY_SESSION_A];
+    out->copied_session_b_cells = g_b3_copy_cells[M38_B3_COPY_SESSION_B];
+    out->copied_staged_cells = g_b3_copy_cells[M38_B3_COPY_STAGED];
+    out->copy_map_passes = g_b3_copy_passes;
+    out->copy_map_clear_bytes = g_b3_copy_clear_bytes;
+    out->copy_map_peak_entries = g_b3_copy_peak_entries;
+    out->copy_map_peak_probe_depth = g_b3_copy_peak_probe_depth;
+}
 #endif
 
 #if defined(M38_D8_NATIVE)
@@ -478,10 +592,26 @@ static uint32_t atom_tx_slot_count;
 static uint64_t atom_index_occupancy;
 static uint64_t atom_probe_hwm;
 
+#if defined(M38_D8_WAVE_B_B3)
+static void b3_note_atom_hwm(void)
+{
+    uint64_t bytes = atom_store_bytes_used();
+    if (bytes > g_b3_atom_bytes_hwm) g_b3_atom_bytes_hwm = bytes;
+    if (atom_index_occupancy > g_b3_atom_index_occupancy_hwm)
+        g_b3_atom_index_occupancy_hwm = atom_index_occupancy;
+    if (atom_probe_hwm > g_b3_atom_index_probe_depth_hwm)
+        g_b3_atom_index_probe_depth_hwm = atom_probe_hwm;
+}
+#endif
+
 static void atom_note_probes(uint64_t probes)
 {
-    if (probes > atom_probe_hwm)
+    if (probes > atom_probe_hwm) {
         atom_probe_hwm = probes;
+#if defined(M38_D8_WAVE_B_B3)
+        b3_note_atom_hwm();
+#endif
+    }
 }
 
 static void atom_store_init(void) {
@@ -528,6 +658,9 @@ static atom_t *atom_store_alloc_checked(uint64_t size_limbs)
     if (p > top || (size_t)(top - p) < bytes)
         return 0;
     atom_data_ptr = p + bytes;
+#if defined(M38_D8_WAVE_B_B3)
+    b3_note_atom_hwm();
+#endif
     return (atom_t *)p;
 }
 
@@ -652,6 +785,9 @@ int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
     idx[empty].hash62 = hash62;
     idx[empty].ptr = a;
     atom_index_occupancy++;
+#if defined(M38_D8_WAVE_B_B3)
+    b3_note_atom_hwm();
+#endif
     if (noun_tx_live) {
         if (atom_tx_slot_count >= ATOM_INDEX_SLOTS) {
             idx[empty].hash62 = 0;

@@ -142,6 +142,12 @@ M38_D8_WAVE_A ?= 0
 M38_D8_WAVE_B_TEST_CONTROLS ?= 0
 M38_D8_B0_OBSERVABILITY ?= 0
 M38_D8_B1_QUALIFICATION ?= 0
+M38_D8_B2_QUALIFICATION ?= 0
+M38_D8_B3_OBSERVABILITY ?= 0
+M38_D8_B3_SESSIONS ?= 2
+M38_D8_B3_CORES ?= 2
+M38_D8_WAVE_B_QUALIFICATION ?= 0
+M38_D8_WAVE_B_SCENARIO ?=
 
 ifeq ($(M38_D5_NATIVE),1)
 ifneq ($(PLATFORM),qemu-virt)
@@ -201,6 +207,50 @@ endif
 CFLAGS += -DM38_D8_WAVE_B_TEST_CONTROLS=1
 endif
 
+ifneq ($(filter 1,$(M38_D8_B0_OBSERVABILITY) $(M38_D8_B1_QUALIFICATION) $(M38_D8_B2_QUALIFICATION) $(M38_D8_B3_OBSERVABILITY)),)
+ifneq ($(M38_D8_WAVE_B_QUALIFICATION),0)
+$(error use either a historical Wave B lane flag or M38_D8_WAVE_B_QUALIFICATION, not both)
+endif
+M38_D8_WAVE_B_QUALIFICATION := 1
+endif
+
+ifeq ($(M38_D8_WAVE_B_QUALIFICATION),1)
+ifneq ($(PLATFORM),qemu-virt)
+$(error M38_D8_WAVE_B_QUALIFICATION=1 requires PLATFORM=qemu-virt)
+endif
+ifneq ($(M38_D8_WAVE_A),1)
+$(error M38_D8_WAVE_B_QUALIFICATION=1 requires M38_D8_WAVE_A=1)
+endif
+ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
+$(error M38_D8_WAVE_B_QUALIFICATION=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
+endif
+ifneq ($(filter b0 b1 b2 b3,$(M38_D8_WAVE_B_SCENARIO)),$(M38_D8_WAVE_B_SCENARIO))
+$(error M38_D8_WAVE_B_SCENARIO must be one of b0, b1, b2, b3)
+endif
+ifeq ($(M38_D8_WAVE_B_SCENARIO),)
+$(error M38_D8_WAVE_B_SCENARIO is required by the unified Wave B seam)
+endif
+CFLAGS += -DM38_D8_WAVE_B_QUALIFICATION=1 -DM38_D8_WAVE_B_TEST_CONTROLS=1
+ifeq ($(M38_D8_WAVE_B_SCENARIO),b0)
+CFLAGS += -DM38_D8_WAVE_B_B0=1
+endif
+ifeq ($(M38_D8_WAVE_B_SCENARIO),b1)
+CFLAGS += -DM38_D8_WAVE_B_B1=1
+endif
+ifeq ($(M38_D8_WAVE_B_SCENARIO),b2)
+CFLAGS += -DM38_D8_WAVE_B_B2=1
+endif
+ifeq ($(M38_D8_WAVE_B_SCENARIO),b3)
+ifneq ($(filter 1 2,$(M38_D8_B3_SESSIONS)),$(M38_D8_B3_SESSIONS))
+$(error M38_D8_B3_SESSIONS must be 1 or 2)
+endif
+ifneq ($(filter 1 2,$(M38_D8_B3_CORES)),$(M38_D8_B3_CORES))
+$(error M38_D8_B3_CORES must be 1 or 2)
+endif
+CFLAGS += -DM38_D8_WAVE_B_B3=1 -DM38_D8_B3_SESSIONS=$(M38_D8_B3_SESSIONS) -DM38_D8_B3_CORES=$(M38_D8_B3_CORES)
+endif
+endif
+
 ifeq ($(M38_D8_B0_OBSERVABILITY),1)
 ifneq ($(PLATFORM),qemu-virt)
 $(error M38_D8_B0_OBSERVABILITY=1 requires PLATFORM=qemu-virt)
@@ -211,7 +261,7 @@ endif
 ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
 $(error M38_D8_B0_OBSERVABILITY=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
 endif
-CFLAGS += -DM38_D8_B0_OBSERVABILITY=1
+CFLAGS += -DM38_D8_WAVE_B_QUALIFICATION=1 -DM38_D8_WAVE_B_B0=1
 endif
 ifeq ($(M38_D8_B1_QUALIFICATION),1)
 ifneq ($(PLATFORM),qemu-virt)
@@ -223,7 +273,39 @@ endif
 ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
 $(error M38_D8_B1_QUALIFICATION=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
 endif
-CFLAGS += -DM38_D8_B1_QUALIFICATION=1
+CFLAGS += -DM38_D8_WAVE_B_QUALIFICATION=1 -DM38_D8_WAVE_B_B1=1
+endif
+
+ifeq ($(M38_D8_B2_QUALIFICATION),1)
+ifneq ($(PLATFORM),qemu-virt)
+$(error M38_D8_B2_QUALIFICATION=1 requires PLATFORM=qemu-virt)
+endif
+ifneq ($(M38_D8_WAVE_A),1)
+$(error M38_D8_B2_QUALIFICATION=1 requires M38_D8_WAVE_A=1)
+endif
+ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
+$(error M38_D8_B2_QUALIFICATION=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
+endif
+CFLAGS += -DM38_D8_WAVE_B_QUALIFICATION=1 -DM38_D8_WAVE_B_B2=1
+endif
+
+ifeq ($(M38_D8_B3_OBSERVABILITY),1)
+ifneq ($(PLATFORM),qemu-virt)
+$(error M38_D8_B3_OBSERVABILITY=1 requires PLATFORM=qemu-virt)
+endif
+ifneq ($(M38_D8_WAVE_A),1)
+$(error M38_D8_B3_OBSERVABILITY=1 requires M38_D8_WAVE_A=1)
+endif
+ifneq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
+$(error M38_D8_B3_OBSERVABILITY=1 requires M38_D8_WAVE_B_TEST_CONTROLS=1)
+endif
+ifneq ($(filter 1 2,$(M38_D8_B3_SESSIONS)),$(M38_D8_B3_SESSIONS))
+$(error M38_D8_B3_SESSIONS must be 1 or 2)
+endif
+ifneq ($(filter 1 2,$(M38_D8_B3_CORES)),$(M38_D8_B3_CORES))
+$(error M38_D8_B3_CORES must be 1 or 2)
+endif
+CFLAGS += -DM38_D8_WAVE_B_QUALIFICATION=1 -DM38_D8_WAVE_B_B3=1 -DM38_D8_B3_SESSIONS=$(M38_D8_B3_SESSIONS) -DM38_D8_B3_CORES=$(M38_D8_B3_CORES)
 endif
 
 ifeq ($(M36_TEST_CONTROLS),1)
@@ -442,7 +524,9 @@ M38_D8_NATIVE_OBJS = m38_resource_abi_target.o
 endif
 M38_D8_WAVE_A_OBJS =
 ifeq ($(M38_D8_WAVE_A),1)
-ifeq ($(M38_D8_B1_QUALIFICATION),1)
+ifneq ($(filter b1 b2 b3,$(M38_D8_WAVE_B_SCENARIO)),)
+M38_D8_WAVE_A_OBJS = m38_resource_core_descriptor.o m38_resource_runtime.o
+else ifneq ($(filter 1,$(M38_D8_B1_QUALIFICATION) $(M38_D8_B2_QUALIFICATION) $(M38_D8_B3_OBSERVABILITY)),)
 M38_D8_WAVE_A_OBJS = m38_resource_core_descriptor.o m38_resource_runtime.o
 else
 M38_D8_WAVE_A_OBJS = m38_resource_core_descriptor.o m38_resource_runtime.o m38_resource_wave_a_witness.o
@@ -452,8 +536,25 @@ M38_D8_B1_OBJS =
 ifeq ($(M38_D8_B1_QUALIFICATION),1)
 M38_D8_B1_OBJS = m38_resource_wave_b1_witness.o
 endif
-OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) $(M38_D8_B1_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
-OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) $(M38_D8_B1_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+ifeq ($(M38_D8_WAVE_B_SCENARIO),b1)
+M38_D8_B1_OBJS = m38_resource_wave_b1_witness.o
+endif
+M38_D8_B2_OBJS =
+ifeq ($(M38_D8_B2_QUALIFICATION),1)
+M38_D8_B2_OBJS = m38_resource_b2_witness.o
+endif
+ifeq ($(M38_D8_WAVE_B_SCENARIO),b2)
+M38_D8_B2_OBJS = m38_resource_b2_witness.o
+endif
+M38_D8_B3_OBJS =
+ifeq ($(M38_D8_B3_OBSERVABILITY),1)
+M38_D8_B3_OBJS = m38_resource_b3_witness.o
+endif
+ifeq ($(M38_D8_WAVE_B_SCENARIO),b3)
+M38_D8_B3_OBJS = m38_resource_b3_witness.o
+endif
+OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) $(M38_D8_B1_OBJS) $(M38_D8_B2_OBJS) $(M38_D8_B3_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) $(M38_D8_B1_OBJS) $(M38_D8_B2_OBJS) $(M38_D8_B3_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
 ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)
 OBJ_NAMES := $(filter-out m25_plan_record.o m25_target_core.o,$(OBJ_NAMES))
 endif
@@ -466,6 +567,18 @@ CONFIG_KEY := $(CONFIG_KEY)-m38b0
 endif
 ifeq ($(M38_D8_B1_QUALIFICATION),1)
 CONFIG_KEY := $(CONFIG_KEY)-m38b1
+endif
+ifeq ($(M38_D8_B2_QUALIFICATION),1)
+CONFIG_KEY := $(CONFIG_KEY)-m38b2
+endif
+ifeq ($(M38_D8_B3_OBSERVABILITY),1)
+CONFIG_KEY := $(CONFIG_KEY)-m38b3-$(M38_D8_B3_SESSIONS)s-$(M38_D8_B3_CORES)c
+endif
+ifeq ($(M38_D8_WAVE_B_QUALIFICATION),1)
+CONFIG_KEY := $(CONFIG_KEY)-waveb-$(M38_D8_WAVE_B_SCENARIO)
+ifeq ($(M38_D8_WAVE_B_SCENARIO),b3)
+CONFIG_KEY := $(CONFIG_KEY)-$(M38_D8_B3_SESSIONS)s-$(M38_D8_B3_CORES)c
+endif
 endif
 ifeq ($(M38_D5_NATIVE_WITNESS),1)
 CONFIG_KEY := $(CONFIG_KEY)-d5witness
@@ -539,7 +652,7 @@ $(OBJDIR)/i2_admission_policy.o: $(SRCDIR)/i2_admission_policy.c \
 
 # Configuration-specific directories prevent preprocessor/backend object reuse.
 $(CONFIG_ELF): $(OBJS) | $(BUILD_DIR)
-	$(LD) $(LDFLAGS) $(if $(filter 1,$(M38_D8_B0_OBSERVABILITY)),-Map=$@.map,) -o $@ $^
+	$(LD) $(LDFLAGS) $(if $(filter 1,$(M38_D8_B0_OBSERVABILITY) $(M38_D8_B3_OBSERVABILITY) $(M38_D8_WAVE_B_QUALIFICATION)),-Map=$@.map,) -o $@ $^
 
 # Create an empty stub pill if none exists (so the build doesn't fail).
 # Replace with a real pill using: python3 tools/mkpill.py <jam> <arvo|shrine> pill.bin

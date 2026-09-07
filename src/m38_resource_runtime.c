@@ -10,12 +10,19 @@
 #include "nock.h"
 #include "sha256.h"
 #include "setjmp.h"
+#include "m38_resource_wave_b_qualification.h"
 
 #if defined(M38_D8_WAVE_B_TEST_CONTROLS)
 #include "m38_resource_test_controls.h"
 #endif
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 #include "m38_resource_b0_observability.h"
+#endif
+#if defined(M38_D8_WAVE_B_B2)
+#include "m38_resource_b2_observability.h"
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+#include "m38_resource_b3_observability.h"
 #endif
 
 /*
@@ -272,7 +279,41 @@ struct ResourceRuntime {
 /* The singleton lease is runtime ownership, not session/catalog/slot state. */
 static ResourceRuntime *g_wave_runtime_lease;
 
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B2)
+static uint64_t b2_live_roots(const ResourceRuntime *runtime)
+{
+    uint64_t count = 0;
+    if (!runtime) return 0;
+    for (uint32_t i = 0; i < RESOURCE_MAX_REGISTERED_SESSIONS; i++) {
+        const ResourceSession *session = runtime->sessions[i];
+        if (!session || session->state != 1) continue;
+        for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++) {
+            if (session->catalog[j].core != NOUN_ZERO) count++;
+            if (session->cache[j].valid) {
+                if (session->cache[j].core != NOUN_ZERO) count++;
+                if (session->cache[j].plan.formula != NOUN_ZERO) count++;
+                if (session->cache[j].plan.payload != NOUN_ZERO) count++;
+            }
+        }
+        for (uint32_t j = 0; j < RESOURCE_MAX_LIVE_HANDLES; j++) {
+            if (session->slots[j].handle_root != NOUN_ZERO) count++;
+            if (session->slots[j].state_root != NOUN_ZERO) count++;
+            if (session->slots[j].snapshot_root != NOUN_ZERO) count++;
+        }
+        if (session->primary_root != NOUN_ZERO) count++;
+        if (session->refusal_root != NOUN_ZERO) count++;
+    }
+    return count;
+}
+
+static void b2_zero(void *pointer, size_t bytes)
+{
+    uint8_t *raw = (uint8_t *)pointer;
+    for (size_t i = 0; i < bytes; i++) raw[i] = 0;
+}
+#endif
+
+#if defined(M38_D8_WAVE_B_B0)
 static M38B0Record g_b0_work_record;
 static M38B0Record g_b0_last_record;
 static uint32_t g_b0_sequence;
@@ -650,7 +691,7 @@ static int wave_safe_noun(ResourceRuntime *runtime, noun root)
         uint32_t index = top - 1u;
         noun n = stack[index];
         uint32_t depth = depths[index];
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
         if (g_b0_active) b0_note_safety_traversal();
 #endif
         if (!noun_is_cell(n)) {
@@ -940,7 +981,7 @@ static int wave_session_valid(ResourceSession *session)
         && session->state != 0;
 }
 
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 static void b0_begin(ResourceSession *session)
 {
     b0_zero(&g_b0_work_record, sizeof(g_b0_work_record));
@@ -1108,8 +1149,11 @@ static int wave_copy_registered_roots(ResourceRuntime *runtime,
     for (uint32_t i = 0; i < RESOURCE_MAX_REGISTERED_SESSIONS; i++) {
         ResourceSession *session = runtime->sessions[i];
         if (!session || session->state != 1) continue;
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
         noun_b0_copy_domain_set((M38B0CopyDomain)(i + 1u));
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+        noun_b3_copy_domain_set((M38B3CopyDomain)(i + 1u));
 #endif
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
             if (!wave_copy_root(session->catalog[j].core, &copies[i].catalog[j])) goto fail;
@@ -1571,6 +1615,104 @@ void m38_resource_test_fail_next(ResourceRuntime *runtime, M38FaultPoint fault)
 }
 #endif
 
+#if defined(M38_D8_WAVE_B_B2)
+void m38_resource_b2_snapshot(M38B2Snapshot *out)
+{
+    if (!out) return;
+    b2_zero(out, sizeof(*out));
+    ResourceRuntime *runtime = g_wave_runtime_lease;
+    out->persist_selector = heap_persist_selector();
+    out->persistent_cells = heap_cells_used(HEAP_MODE_PERSIST);
+    out->scratch_cells = heap_cells_used(HEAP_MODE_SCRATCH);
+    out->atom_bytes = atom_store_bytes_used();
+    out->atom_index_occupancy = atom_store_index_occupancy();
+    out->atom_index_probe_depth = atom_store_probe_hwm();
+    out->scratch_mark = heap_scratch_mark();
+    out->noun_transaction_active = noun_tx_active();
+    out->evaluator_ops = nock_ops_used();
+    out->evaluator_cells = nock_cells_used();
+    out->evaluator_peak_depth = nock_eval_stack_peak();
+    out->evaluator_abort_reason = nock_budget_abort_reason();
+    if (!wave_runtime_valid(runtime)) return;
+    out->runtime_state = runtime->state;
+    out->broker_owner = runtime->broker_owner;
+    out->session_count = runtime->session_count;
+    out->next_capability = runtime->next_capability;
+    out->broker_transaction_id = runtime->broker_transaction_id;
+    out->promoted_root_count = runtime->promoted_root_count;
+    out->next_fault = runtime->next_fault;
+    out->live_roots = b2_live_roots(runtime);
+    for (uint32_t i = 0; i < RESOURCE_MAX_REGISTERED_SESSIONS; i++) {
+        const ResourceSession *session = runtime->sessions[i];
+        M38B2SessionSnapshot *copy = &out->sessions[i];
+        if (!session) continue;
+        copy->state = session->state;
+        copy->in_flight = session->in_flight;
+        copy->registry_index = session->registry_index;
+        copy->capability = session->capability;
+        copy->primary_root = session->primary_root;
+        copy->refusal_root = session->refusal_root;
+        copy->primary_view_root_slot = (uint64_t)(uintptr_t)session->primary_view.root_slot;
+        copy->refusal_view_root_slot = (uint64_t)(uintptr_t)session->refusal_view.root_slot;
+        copy->primary_view_generation = session->primary_view.generation;
+        copy->refusal_view_generation = session->refusal_view.generation;
+        copy->primary_view_wire = session->primary_view.wire_status;
+        copy->refusal_view_wire = session->refusal_view.wire_status;
+        copy->primary_view_owner = session->primary_view.owner;
+        copy->refusal_view_owner = session->refusal_view.owner;
+        copy->parse_count = session->parse_count;
+        for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++) {
+            if (session->catalog[j].valid) copy->catalog_valid_mask |= UINT64_C(1) << j;
+            if (session->cache[j].valid) copy->cache_valid_mask |= UINT64_C(1) << j;
+            copy->catalog_roots[j] = session->catalog[j].core;
+            copy->cache_roots[j] = session->cache[j].core;
+            copy->cache_formula_roots[j] = session->cache[j].plan.formula;
+            copy->cache_payload_roots[j] = session->cache[j].plan.payload;
+        }
+        for (uint32_t j = 0; j < RESOURCE_MAX_LIVE_HANDLES; j++) {
+            const WaveSlot *slot = &session->slots[j];
+            if (slot->used) copy->slot_used_mask |= UINT64_C(1) << j;
+            copy->slot_catalog[j] = slot->catalog_index;
+            copy->slot_generation[j] = slot->generation;
+            copy->slot_snapshot_nonce[j] = slot->snapshot_nonce;
+            copy->slot_handle_roots[j] = slot->handle_root;
+            copy->slot_state_roots[j] = slot->state_root;
+            copy->slot_snapshot_roots[j] = slot->snapshot_root;
+        }
+    }
+}
+
+void m38_resource_test_invalidate_cache(ResourceSession *session,
+                                        uint32_t catalog_index)
+{
+    if (wave_session_valid(session)
+        && catalog_index < RESOURCE_MAX_ADMISSION_ENTRIES)
+        session->cache[catalog_index].valid = 0;
+}
+
+void m38_resource_test_hold_runtime_busy(ResourceRuntime *runtime)
+{
+    if (!wave_runtime_valid(runtime)) return;
+    runtime->broker_owner = 3;
+    runtime->state = 3;
+}
+
+void m38_resource_test_hold_session_busy(ResourceSession *session)
+{
+    if (wave_session_valid(session)) session->in_flight = 1;
+}
+
+void m38_resource_test_release_busy(ResourceRuntime *runtime,
+                                    ResourceSession *session)
+{
+    if (wave_runtime_valid(runtime)) {
+        runtime->broker_owner = 0;
+        runtime->state = 2;
+    }
+    if (wave_session_valid(session)) session->in_flight = 0;
+}
+#endif
+
 static int wave_handle_build(const ResourceSession *session, uint32_t slot,
                              uint64_t generation, uint32_t catalog_index,
                              noun *out)
@@ -1766,7 +1908,7 @@ typedef struct WaveRequest {
 
 static int wave_request_decode(noun request, WaveRequest *out)
 {
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
     if (g_b0_active) b0_note_request_decode();
 #endif
     noun tag, body, fields[3], args[2];
@@ -1955,8 +2097,11 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
     for (uint32_t i = 0; i < RESOURCE_MAX_REGISTERED_SESSIONS; i++) {
         ResourceSession *other = runtime->sessions[i];
         if (!other || other->state != 1) continue;
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
         noun_b0_copy_domain_set((M38B0CopyDomain)(i + 1u));
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+        noun_b3_copy_domain_set((M38B3CopyDomain)(i + 1u));
 #endif
         for (uint32_t j = 0; j < RESOURCE_MAX_ADMISSION_ENTRIES; j++)
             if (!wave_copy_root(other->catalog[j].core, &copies[i].catalog[j])) goto collective_fail;
@@ -1976,15 +2121,18 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
         if (!wave_copy_root(other->primary_root, &copies[i].primary)) goto collective_fail;
         if (!wave_copy_root(other->refusal_root, &copies[i].refusal)) goto collective_fail;
     }
- #if defined(M38_D8_B0_OBSERVABILITY)
+ #if defined(M38_D8_WAVE_B_B0)
     noun_b0_copy_domain_set(M38_B0_COPY_STAGED);
+#endif
+#if defined(M38_D8_WAVE_B_B3)
+    noun_b3_copy_domain_set(M38_B3_COPY_STAGED);
 #endif
     if (!wave_copy_root(staged_handle, &handle_copy)
         || !wave_copy_root(staged_state, &state_copy)
         || !wave_copy_root(staged_snapshot, &snapshot_copy)
         || !wave_copy_root(staged_result, &result_copy))
         goto collective_fail;
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
     b0_peak_sample();
 #endif
     heap_persist_commit_tx();
@@ -2521,7 +2669,7 @@ refuse:
 M38Status m38_resource_session_dispatch(ResourceSession *session, noun request,
                                         const ResourceResultView **out_view)
 {
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 #define B0_DISPATCH_RETURN(value) do { \
         M38Status b0_status = (value); \
         b0_finish(b0_status, out_view); \
@@ -2544,7 +2692,7 @@ M38Status m38_resource_session_dispatch(ResourceSession *session, noun request,
     /* Safety failure is a C-boundary error.  A safely traversable noun that
      * merely misses the ResourceABI grammar is an ordinary wire refusal. */
     if (!wave_request_decode(request, &decoded)) decoded.operation = 0;
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
     b0_set_operation(decoded.operation);
 #endif
     M38Status broker_fault = wave_take_fault(runtime, WAVE_FAULT_BROKER_BEGIN);

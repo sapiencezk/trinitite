@@ -3,7 +3,7 @@
 
 #include "bounded_cue.h"
 #include "jam.h"
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 #include "m38_resource_b0_observability.h"
 #include "m38_resource_test_controls.h"
 #endif
@@ -11,7 +11,7 @@
 #include "memory.h"
 #include "noun.h"
 #include "nock.h"
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 #include "sha256.h"
 #endif
 #include "uart.h"
@@ -688,7 +688,7 @@ void m38_resource_wave_a_boot(void)
     witness_terminal("pass");
 }
 
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 
 typedef struct WitnessStateExternal {
     uint32_t state_ids[WITNESS_MAX_PLAN_INSTANCES];

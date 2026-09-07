@@ -5,7 +5,7 @@
 #include "uart.h"
 #include "setjmp.h"
 #include "forth.h"
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 #include "m38_resource_b0_observability.h"
 #endif
 
@@ -61,7 +61,7 @@ void nock_budget_finish(void)
     g_eval_stack_limit = NOCK_EVALUATOR_STACK_LIMIT;
 }
 
-#if defined(M38_D8_B0_OBSERVABILITY)
+#if defined(M38_D8_WAVE_B_B0)
 void nock_b0_metrics_reset(void)
 {
     g_ops_used = 0;
