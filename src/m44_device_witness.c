@@ -14,13 +14,21 @@
 #define MAX_JAM (128u * 1024u)
 #define MAX_COMMANDS 256u
 #define DESCRIPTOR_BYTES (64u * 1024u)
-typedef struct { uint32_t op, slot, argument; M44Row row; } Command;
+typedef struct { uint32_t op, slot, argument; M44Row row;
+#if defined(M47_MANAGED_SERVICES)
+ uint32_t epoch; uint64_t provider_token;
+#endif
+ } Command;
 static Command commands[MAX_COMMANDS];
 static M44Descriptor descriptor;
 static M44Saved handles[2];
 static uint32_t catalog_bytes[2][2];
 static ResourceRuntime *runtime;
 static ResourceSession *session;
+#if defined(M47_MANAGED_SERVICES)
+static uint32_t managed_services;
+static M47ProviderBinding m47_bindings[2];
+#endif
 #if defined(M46_LIVE_REPLACEMENT)
 static int m46_device_try_boot(noun input);
 static uint32_t live_replacement, active_package, staged_package;
@@ -298,6 +306,22 @@ static int emit(uint32_t index, uint32_t status, uint32_t token) {
         uart_puts(",\"epoch\":"); number(state->epoch);
     }
 #endif
+#if defined(M47_MANAGED_SERVICES)
+    if (managed_services) {
+        uart_puts(",\"receive_holds\":"); number(m47_provider_receive_holds());
+        uart_puts(",\"providers\":[");
+        for (uint32_t i=0;i<2;i++) {
+            const M47ProviderLedger *p=&state->providers[i];
+            if (i) uart_putc(',');
+            uart_putc('['); number(p->phase); uart_putc(','); number(p->tx_state);
+            uart_putc(','); number(p->tx_token); uart_putc(','); number(p->tx_value);
+            uart_putc(','); number(p->rx_highwater); uart_putc(','); number(p->rx_token);
+            uart_putc(','); number(p->rx_state); uart_putc(','); number(p->release_queued);
+            uart_putc(']');
+        }
+        uart_putc(']');
+    }
+#endif
     uart_puts(",\"fenced\":"); number(state->fenced); uart_puts(",\"queues\":[");
     for (uint32_t slot = 0; slot < 2; slot++) {
         if (slot) uart_putc(',');
@@ -343,20 +367,39 @@ static void finish(void) {
     for (;;) __asm__ volatile("wfe");
 }
 
+#include "m47_device_witness.inc"
+
 int m44_device_try_boot(noun input) {
 #if defined(M46_LIVE_REPLACEMENT)
     if (m46_device_try_boot(input)) return 1;
 #endif
+#if defined(M47_MANAGED_SERVICES)
+    noun tag, body, envelope[6], catalog[2], entry[2], rows[MAX_COMMANDS], command[6];
+#else
     noun tag, body, envelope[5], catalog[2], entry[2], rows[MAX_COMMANDS], command[4];
+#endif
     uint32_t count, boot_failure;
 #if defined(M45_MANAGED_LIFECYCLE)
     if (!pair(input, &tag, &body)) return 0;
     uint32_t managed = text_is(tag, "m45-device-boot-v1");
+#if defined(M47_MANAGED_SERVICES)
+    managed_services = text_is(tag,"m47-device-boot-v1");
+    managed |= managed_services;
+#endif
     if (!managed && !text_is(tag, "m44-device-boot-v1")) return 0;
 #else
     if (!pair(input, &tag, &body) || !text_is(tag, "m44-device-boot-v1")) return 0;
 #endif
+    #if defined(M47_MANAGED_SERVICES)
+    if (managed_services) {
+        if (!record(body,envelope,6) || !m47_descriptor_read(envelope[0],envelope[1]) ||
+            !m47_transport_config(envelope[5])) goto invalid;
+    } else
+    if (!record(body, envelope, 5) || !descriptor_read(envelope[0], envelope[1])) goto invalid;
+    if (0
+#else
     if (!record(body, envelope, 5) || !descriptor_read(envelope[0], envelope[1])
+#endif
         || !record(envelope[2], catalog, 2) || !list(envelope[3], rows, MAX_COMMANDS, &count)
         || !scalar(envelope[4], 5, &boot_failure)) goto invalid;
 #if !defined(M44_G0_TEST_CONTROLS)
@@ -370,8 +413,15 @@ int m44_device_try_boot(noun input) {
     }
     for (uint32_t i = 0; i < count; i++) {
         Command *c = &commands[i];
-        if (!record(rows[i], command, 4) || !scalar(command[0],
+        if (!record(rows[i], command,
+#if defined(M47_MANAGED_SERVICES)
+            managed_services ? 6 :
+#endif
+            4) || !scalar(command[0],
 #if defined(M45_MANAGED_LIFECYCLE)
+            #if defined(M47_MANAGED_SERVICES)
+            managed_services ? 39 :
+#endif
             managed ? 21 : 16,
 #else
             16,
@@ -379,10 +429,22 @@ int m44_device_try_boot(noun input) {
             &c->op) || !c->op
             || !scalar(command[1], 2, &c->slot) || !typed_row(command[2], &c->row)
             || !scalar(command[3], UINT32_MAX, &c->argument)) goto invalid;
+#if defined(M47_MANAGED_SERVICES)
+        if (managed_services) {
+            uint8_t token[8];
+            if (!scalar(command[4],UINT32_MAX,&c->epoch) ||
+                !noun_atom_read_fixed(command[5],token,8) || token[7]>127) goto invalid;
+            c->provider_token=0;
+            for (uint32_t j=0;j<8;j++) c->provider_token |= (uint64_t)token[j]<<(8*j);
+        }
+#endif
 #if !defined(M44_G0_TEST_CONTROLS)
         if (c->op == 5 || c->op == 6 || (c->op >= 14
 #if defined(M45_MANAGED_LIFECYCLE)
             && c->op != 17
+#if defined(M47_MANAGED_SERVICES)
+            && !(managed_services && ((c->op>=22 && c->op<=24) || (c->op>=32 && c->op<=36)))
+#endif
 #endif
             )) goto invalid;
 #endif
@@ -457,7 +519,11 @@ int m44_device_try_boot(noun input) {
     }
 #endif
 #if defined(M45_MANAGED_LIFECYCLE)
-    if ((managed ? m45_supervisor_init(session, &descriptor, handles)
+    if ((
+#if defined(M47_MANAGED_SERVICES)
+         managed_services ? m47_supervisor_init(session,&descriptor,handles,m47_bindings) :
+#endif
+         managed ? m45_supervisor_init(session, &descriptor, handles)
                  : m44_supervisor_init(session, &descriptor, handles)) != M44_OK) goto invalid;
 #else
     if (m44_supervisor_init(session, &descriptor, handles) != M44_OK) goto invalid;
@@ -475,6 +541,9 @@ int m44_device_try_boot(noun input) {
     uart_puts("M44 storage=");
     number(storage);
     uart_puts("\r\n");
+    #if defined(M47_MANAGED_SERVICES)
+    if (managed_services && !m47_transport_start()) goto failed;
+#endif
     uint32_t tokens[2] = {0, 0};
     if (!emit(0, M44_OK, 0)) goto failed;
     for (uint32_t i = 0; i < count; i++) {
@@ -518,6 +587,9 @@ int m44_device_try_boot(noun input) {
 #endif
 #if defined(M45_MANAGED_LIFECYCLE)
         else if (c->op == 17) result = m45_supervisor_manage(c->argument, c->slot);
+#if defined(M47_MANAGED_SERVICES)
+        else if (managed_services && c->op>=22) result = m47_command(c);
+#endif
 #endif
         else if (c->op == 7 || c->op == 13) {
             const ResourceResultView *view = 0;

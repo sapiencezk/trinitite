@@ -299,6 +299,8 @@ static M38Status provider_input(uint32_t operation, noun argument, noun *out, ui
     if (!provider_stimulus(cause_code, cause_ids, raw, 6, out)) return M38_STATUS_INTERNAL;
     *token_out = token; return M38_STATUS_OK;
 }
+#include "m47_transport_witness.inc"
+
 static int emit(uint32_t row, M38Status status, const ResourceResultView *view) {
     uart_puts("M39 row="); number(row); uart_puts(" status="); number(status);
     uart_puts(" wire="); number(view ? view->wire_status : 0); uart_puts(" jam=");

@@ -29,12 +29,26 @@ typedef struct {
   uint32_t bytes;
   uint8_t jam[M44_SAVED_BYTES];
 } M44Saved;
+#if defined(M47_MANAGED_SERVICES)
+typedef struct { uint32_t slot, kind, instance_id; } M47ProviderBinding;
+enum { M47_SERVICE_NEW=0, M47_SERVICE_OPEN=1, M47_SERVICE_RELEASED=2 };
+enum { M47_TX_NONE=0, M47_TX_COMMITTED=1, M47_TX_CLAIMED=2, M47_TX_COMPLETION_QUEUED=3 };
+enum { M47_RX_NONE=0, M47_RX_DELIVERY_QUEUED=1, M47_RX_INDICATED=2, M47_RX_RESPONSE_QUEUED=3 };
+/* phase, tx_state and rx_state use the three separate enums above. */
+typedef struct {
+  uint32_t phase, tx_state, tx_value, rx_state, release_queued;
+  uint64_t tx_token, rx_highwater, rx_token;
+} M47ProviderLedger;
+#endif
 typedef struct {
   uint32_t cursor, sequence, fault, fenced, counts[2], output_count;
   M44Row queues[2][16], outputs[32];
   uint32_t output_slots[32];
 #if defined(M45_MANAGED_LIFECYCLE)
   uint32_t lifecycle, epoch;
+#endif
+#if defined(M47_MANAGED_SERVICES)
+  M47ProviderLedger providers[2];
 #endif
 } M44State;
 typedef enum {
@@ -59,6 +73,21 @@ typedef enum {
  * Slots are one-based. Storage is singleton, cold-boot-owned. */
 M44Status m44_supervisor_init(ResourceSession *, const M44Descriptor *,
                               const M44Saved handles[2]);
+#if defined(M47_MANAGED_SERVICES)
+/* Boot authenticates the full source wrapper; init checks retained signatures.
+ * Claim commits before transport submission. Refusal/uncertainty after claim
+ * does not permit another claim or automatic submission retry. */
+M44Status m47_supervisor_init(ResourceSession *, const M44Descriptor *,
+                             const M44Saved handles[2],
+                             const M47ProviderBinding bindings[2]);
+/* Adapter-owned external observation, deliberately outside IEC rollback.
+ * A captured, not-yet-admitted receive blocks release and reset. The trusted
+ * adapter clears the hold only after successful queue publication. */
+M44Status m47_provider_receive_hold(uint32_t slot,uint32_t epoch,uint32_t pending);
+uint32_t m47_provider_receive_holds(void);
+M44Status m47_provider_claim(uint32_t slot, uint32_t epoch, uint64_t token);
+M44Status m47_provider_enqueue(uint32_t slot, uint32_t epoch, const M44Row *row);
+#endif
 M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *);
 M44Status m44_supervisor_dispatch(void);
 M44Status m44_supervisor_capture(uint32_t *token);

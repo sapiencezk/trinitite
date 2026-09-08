@@ -142,6 +142,13 @@ M38_D8_WAVE_A ?= 0
 M39_RESOURCE_WITNESS ?= 0
 M44_TWO_RESOURCE ?= 0
 M44_G0_TEST_CONTROLS ?= 0
+M47_MANAGED_SERVICES ?= 0
+ifeq ($(M47_MANAGED_SERVICES),1)
+ifneq ($(M46_LIVE_REPLACEMENT),1)
+$(error M47_MANAGED_SERVICES=1 requires M46_LIVE_REPLACEMENT=1)
+endif
+CFLAGS += -DM47_MANAGED_SERVICES=1
+endif
 M46_LIVE_REPLACEMENT ?= 0
 ifeq ($(M46_LIVE_REPLACEMENT),1)
 ifneq ($(M45_MANAGED_LIFECYCLE),1)
@@ -578,6 +585,9 @@ endif
 ifeq ($(M46_LIVE_REPLACEMENT),1)
 CONFIG_KEY := $(CONFIG_KEY)-m46
 endif
+ifeq ($(M47_MANAGED_SERVICES),1)
+CONFIG_KEY := $(CONFIG_KEY)-m47
+endif
 ifeq ($(M44_G0_TEST_CONTROLS),1)
 CONFIG_KEY := $(CONFIG_KEY)-g0test
 endif
@@ -656,9 +666,9 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 
 ifeq ($(M44_TWO_RESOURCE),1)
 $(OBJDIR)/m44_two_resource_supervisor.o $(OBJDIR)/m44_device_witness.o: \
-	$(SRCDIR)/m44_two_resource_supervisor.h $(SRCDIR)/m44_resource_transaction.h
+	$(SRCDIR)/m44_two_resource_supervisor.h $(SRCDIR)/m44_resource_transaction.h $(SRCDIR)/m47_device_witness.inc
 $(OBJDIR)/m38_resource_runtime.o $(OBJDIR)/m44_g0_witness.o: $(SRCDIR)/m44_resource_transaction.h
-$(OBJDIR)/m39_resource_witness.o $(OBJDIR)/m44_device_witness.o $(OBJDIR)/m44_g0_witness.o: $(SRCDIR)/m39_resource_witness.h
+$(OBJDIR)/m39_resource_witness.o $(OBJDIR)/m44_device_witness.o $(OBJDIR)/m44_g0_witness.o: $(SRCDIR)/m39_resource_witness.h $(SRCDIR)/m47_transport_witness.inc
 endif
 
 # Generated admission data is a semantic target input.  The explicit edge

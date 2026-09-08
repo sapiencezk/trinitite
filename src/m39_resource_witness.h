@@ -10,3 +10,11 @@ void *m44_boot_workspace(void);
 void *m44_boot_session_storage(void);
 void *m44_boot_catalog_storage(uint32_t slot, uint32_t part);
 #endif
+
+#if defined(M47_MANAGED_SERVICES)
+#include "noun.h"
+int m47_transport_config(noun);
+int m47_transport_start(void);
+uint32_t m47_transport_action(uint32_t operation,uint32_t slot,uint32_t instance_id,
+                              uint32_t kind,uint32_t epoch,uint64_t token,uint32_t argument);
+#endif

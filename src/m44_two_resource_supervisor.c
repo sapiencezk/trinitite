@@ -34,6 +34,11 @@ static struct {
   uint32_t replacement_fault, replacement_busy_mask;
 #endif
 #endif
+#if defined(M47_MANAGED_SERVICES)
+  uint32_t services;
+  M47ProviderBinding bindings[2];
+  uint32_t receive_holds;
+#endif
   M44Descriptor descriptor;
   M44Saved handles[2], snapshots[2][2];
   M44State roots[2], checkpoints[2];
@@ -174,6 +179,75 @@ static int valid_row(uint32_t slot, const M44Row *row, int output) {
       return 0;
   return 1;
 }
+#if defined(M47_MANAGED_SERVICES)
+static uint32_t m47_event(uint32_t slot, uint32_t ordinal) {
+  return authority.bindings[slot].instance_id * 1024u + ordinal;
+}
+static int m47_private(uint32_t slot, uint32_t event) {
+  return authority.services &&
+      (event == m47_event(slot, 3) || event == m47_event(slot, 4) ||
+       (authority.bindings[slot].kind == 2 && event == m47_event(slot, 2)));
+}
+static int m47_public_release(uint32_t slot,const M44Row *row) {
+  return authority.services && row->event==m47_event(slot,1) &&
+      row->count==2 && row->values[0].raw==0;
+}
+static uint32_t m47_capacity(uint32_t slot,int consuming) {
+  if (!authority.services || slot+1!=authority.descriptor.target_slot) return 16;
+  uint32_t source=authority.descriptor.source_slot-1;
+  if (live()->providers[source].rx_state!=1) return 16;
+  if (consuming && authority.selected==source && live()->counts[source] &&
+      live()->queues[source][0].event==m47_event(source,3)) return 16;
+  return 16-authority.descriptor.batch_bound;
+}
+static uint64_t m47_token(const M44Row *row, uint32_t offset) {
+  return (uint64_t)row->values[offset].raw |
+      ((uint64_t)row->values[offset+1].raw << 16) |
+      ((uint64_t)row->values[offset+2].raw << 32) |
+      ((uint64_t)row->values[offset+3].raw << 48);
+}
+static int m47_output(uint32_t slot, const M44Row *row) {
+  if (!authority.services) return 1;
+  M47ProviderLedger *p = &stage()->providers[slot];
+  if (row->event == m47_event(slot, 5)) {
+    if ((row->values[0].raw && p->phase != 0) ||
+        (!row->values[0].raw && (p->tx_state || p->rx_state))) return 0;
+    p->phase = row->values[0].raw ? 1u : 2u;
+  } else if (authority.bindings[slot].kind == 1 &&
+             row->event == m47_event(slot, 7)) {
+    uint64_t token = m47_token(row, 0);
+    if (p->phase != 1 || p->tx_state || !token || token >> 63 ||
+        p->release_queued || row->values[5].raw != 0) return 0;
+    p->tx_state = 1; p->tx_token = token; p->tx_value = row->values[4].raw;
+  }
+  return 1;
+}
+static int m47_consumed(uint32_t slot) {
+  if (!authority.services) return 1;
+  const M44Row *row = &live()->queues[slot][0];
+  M47ProviderLedger *p = &stage()->providers[slot];
+  if (row->event == m47_event(slot, 3)) {
+    if (authority.bindings[slot].kind == 1) {
+      uint32_t cnf = 0;
+      for (uint32_t i=0;i<stage()->output_count;i++)
+        if (stage()->output_slots[i] == slot+1 &&
+            stage()->outputs[i].event == m47_event(slot,6)) cnf++;
+      if (p->tx_state != 3 || cnf != 1) return 0;
+      p->tx_state=0; p->tx_token=0; p->tx_value=0;
+    } else {
+      if (p->rx_state != 1) return 0;
+      p->rx_state=2;
+    }
+  } else if (authority.bindings[slot].kind == 2 && row->event == m47_event(slot,2)) {
+    if (p->rx_state != 3) return 0;
+    p->rx_state=0; p->rx_token=0;
+  } else if (row->event == m47_event(slot,4) || m47_public_release(slot,row)) {
+    if (!p->release_queued || p->phase != 2) return 0;
+    p->release_queued=0;
+  }
+  return 1;
+}
+#endif
 static void retire(M44State *s, uint32_t slot) {
   for (uint32_t i = 1; i < s->counts[slot]; i++)
     s->queues[slot][i - 1] = s->queues[slot][i];
@@ -213,9 +287,18 @@ static int parse_outputs(noun result) {
     }
     if (!valid_row(slot, &row, 1))
       return 0;
+#if defined(M47_MANAGED_SERVICES)
+    if (!m47_output(slot, &row)) return 0;
+#endif
     if (slot + 1 == d->source_slot && row.event == d->source_event) {
       uint32_t dest = d->target_slot - 1;
-      if (++internal > d->batch_bound || s->counts[dest] >= 16 ||
+      if (++internal > d->batch_bound || s->counts[dest] >=
+#if defined(M47_MANAGED_SERVICES)
+          m47_capacity(dest,1)
+#else
+          16
+#endif
+          ||
           s->sequence == UINT32_MAX) {
         authority.turn_fault = M44_FAULT_DELIVERY_RESERVATION;
         return 0;
@@ -274,6 +357,9 @@ static int prepare(void *context, noun result) {
     authority.turn_fault = M44_FAULT_PRODUCT;
     if (!parse_outputs(result))
       return 0;
+#if defined(M47_MANAGED_SERVICES)
+    if (!m47_consumed(authority.selected)) return 0;
+#endif
     authority.turn_fault = M44_FAULT_PUBLICATION;
   }
   if (authority.operation == OP_CAPTURE) {
@@ -390,6 +476,132 @@ M44Status m44_supervisor_init(ResourceSession *session, const M44Descriptor *d,
   authority.initialized = 1;
   return M44_OK;
 }
+#if defined(M47_MANAGED_SERVICES)
+static int m47_signature(const M44Descriptor *d, uint32_t slot, uint32_t iid,
+                         uint32_t event, int output, const uint32_t *ids,
+                         const uint32_t *types, uint32_t count) {
+  const M44Boundary *rows=output ? d->outputs[slot] : d->ingress[slot];
+  uint32_t n=output ? d->output_count[slot] : d->ingress_count[slot];
+  if (n>128) return 0;
+  uint32_t matches=0, base=iid*1024u;
+  for (uint32_t i=0;i<n;i++) if (rows[i].event==base+event) {
+    if (rows[i].count!=count) return 0;
+    for (uint32_t j=0;j<count;j++)
+      if (rows[i].values[j].id!=base+ids[j] || rows[i].values[j].type!=types[j]) return 0;
+    matches++;
+  }
+  return matches==1;
+}
+M44Status m47_supervisor_init(ResourceSession *session, const M44Descriptor *d,
+                             const M44Saved handles[2],
+                             const M47ProviderBinding bindings[2]) {
+  if (authority.initialized || !d || !bindings ||
+      bindings[0].slot!=1 || bindings[1].slot!=2 ||
+      bindings[0].kind+bindings[1].kind!=3 ||
+      bindings[0].kind<1 || bindings[0].kind>2 ||
+      bindings[1].kind<1 || bindings[1].kind>2) return M44_INVALID;
+  const uint32_t init_ids[]={1,2}, init_types[]={1,2};
+  const uint32_t cause_ids[]={11,12,13,14,3,5}, uint_types[]={2,2,2,2,2,2};
+  const uint32_t release_ids[]={5}, rsp_ids[]={1,11,12,13,14}, rsp_types[]={1,2,2,2,2};
+  const uint32_t intent_ids[]={7,8,9,10,3,5};
+  const uint32_t inito_ids[]={4,5}, inito_types[]={1,2};
+  const uint32_t cnf_ids[]={4,5,6}, cnf_types[]={1,2,2};
+  const uint32_t req_ids[]={1,3}, req_types[]={1,2};
+  for (uint32_t slot=0;slot<2;slot++) {
+    uint32_t iid=bindings[slot].instance_id;
+    if (!iid || iid>63 || d->signed_values[slot] ||
+        (bindings[slot].kind==1 && d->target_slot!=slot+1) ||
+        !m47_signature(d,slot,iid,1,0,init_ids,init_types,2) ||
+        !m47_signature(d,slot,iid,3,0,cause_ids,uint_types,6) ||
+        !m47_signature(d,slot,iid,4,0,release_ids,uint_types,1) ||
+        !m47_signature(d,slot,iid,5,1,inito_ids,inito_types,2)) return M44_INVALID;
+    if (bindings[slot].kind==1) {
+      if (d->target_event != iid*1024+2 ||
+          !m47_signature(d,slot,iid,2,0,req_ids,req_types,2) ||
+          !m47_signature(d,slot,iid,7,1,intent_ids,uint_types,6) ||
+          !m47_signature(d,slot,iid,6,1,cnf_ids,cnf_types,3)) return M44_INVALID;
+    } else if (!m47_signature(d,slot,iid,2,0,rsp_ids,rsp_types,5)) return M44_INVALID;
+  }
+  M44Status status=m45_supervisor_init(session,d,handles);
+  if (!status) {
+    authority.bindings[0]=bindings[0]; authority.bindings[1]=bindings[1];
+    authority.services=1;
+  }
+  return status;
+}
+static M44Status m47_ready(uint32_t slot, uint32_t epoch) {
+  M44Status status=ready();
+  if (status) return status;
+  if (!authority.services || slot<1 || slot>2 || epoch!=live()->epoch ||
+      (live()->lifecycle!=1 && live()->lifecycle!=2)) return M44_INVALID;
+  return M44_OK;
+}
+static M44Status m47_publish(void) {
+  authority.operation=OP_ENQUEUE;
+  M44PublicationHooks h=hooks();
+  M38Status result=m44_resource_publish(authority.session,&authority,&h);
+  authority.busy=0;
+  return result ? M44_PUBLICATION : M44_OK;
+}
+uint32_t m47_provider_receive_holds(void) { return authority.receive_holds; }
+M44Status m47_provider_receive_hold(uint32_t slot,uint32_t epoch,uint32_t pending) {
+  M44Status status=m47_ready(slot,epoch);
+  if (status) return status;
+  if (pending>1 || authority.bindings[slot-1].kind!=2 ||
+      live()->providers[slot-1].phase!=1 ||
+      (pending && (live()->providers[slot-1].rx_state || live()->providers[slot-1].release_queued)) ||
+      (!pending && live()->providers[slot-1].rx_state!=1)) return M44_INVALID;
+  uint32_t bit=1u<<(slot-1);
+  if (pending) authority.receive_holds|=bit;
+  else authority.receive_holds&=~bit;
+  return M44_OK;
+}
+M44Status m47_provider_claim(uint32_t slot, uint32_t epoch, uint64_t token) {
+  M44Status status=m47_ready(slot,epoch);
+  if (status) return status;
+  const M47ProviderLedger *p=&live()->providers[slot-1];
+  if (authority.bindings[slot-1].kind!=1 || p->phase!=1 || p->tx_state!=1 ||
+      !token || p->tx_token!=token) return M44_INVALID;
+  authority.busy=1; *stage()=*live();
+  stage()->providers[slot-1].tx_state=2;
+  return m47_publish();
+}
+M44Status m47_provider_enqueue(uint32_t slot, uint32_t epoch, const M44Row *row) {
+  M44Status status=m47_ready(slot,epoch);
+  if (status) return status;
+  uint32_t index=slot-1;
+  if (!row || row->sequence || !m47_private(index,row->event) ||
+      !valid_row(index,row,0)) return M44_INVALID;
+  const M47ProviderLedger *p=&live()->providers[index];
+  if (p->phase!=1 || p->release_queued) return M44_INVALID;
+  uint32_t kind=authority.bindings[index].kind;
+  uint64_t token=0;
+  if (row->event==m47_event(index,3)) {
+    token=m47_token(row,0);
+    if (!token || token>>63 || row->values[5].raw>2) return M44_INVALID;
+    if (kind==1) {
+      if (p->tx_state!=2 || token!=p->tx_token || row->values[4].raw!=p->tx_value) return M44_INVALID;
+    } else {
+      if (p->rx_state || token<=p->rx_highwater) return M44_INVALID;
+      if (live()->counts[authority.descriptor.target_slot-1]+authority.descriptor.batch_bound>16) return M44_FULL;
+    }
+  } else if (row->event==m47_event(index,2)) {
+    token=m47_token(row,1);
+    if (kind!=2 || p->rx_state!=2 || token!=p->rx_token || row->values[0].raw!=1) return M44_INVALID;
+  } else if ((authority.receive_holds & (1u<<index)) || p->tx_state || p->rx_state || live()->counts[index] ||
+             row->values[0].raw>2) return M44_INVALID;
+  if (live()->counts[index]>=m47_capacity(index,0)) return M44_FULL;
+  authority.busy=1; *stage()=*live();
+  M47ProviderLedger *next=&stage()->providers[index];
+  if (row->event==m47_event(index,3)) {
+    if (kind==1) next->tx_state=3;
+    else { next->rx_state=1; next->rx_token=token; next->rx_highwater=token; }
+  } else if (row->event==m47_event(index,2)) next->rx_state=3;
+  else next->release_queued=1;
+  stage()->queues[index][stage()->counts[index]++]=*row;
+  return m47_publish();
+}
+#endif
 M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *row) {
   M44Status status = ready();
   if (status)
@@ -403,11 +615,29 @@ M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *row) {
       (slot == authority.descriptor.target_slot &&
        row->event == authority.descriptor.target_event))
     return M44_INVALID;
+#if defined(M47_MANAGED_SERVICES)
+  if (m47_private(slot-1,row->event) ||
+      (authority.services && row->event == m47_event(slot-1,1) &&
+       live()->providers[slot-1].release_queued)) return M44_INVALID;
+#endif
+#if defined(M47_MANAGED_SERVICES)
+  if (m47_public_release(slot-1,row)) {
+    const M47ProviderLedger *p=&live()->providers[slot-1];
+    if ((authority.receive_holds & (1u<<(slot-1))) || p->phase!=1 || p->tx_state || p->rx_state || live()->counts[slot-1]) return M44_INVALID;
+  }
+#endif
+#if defined(M47_MANAGED_SERVICES)
+  if (live()->counts[slot - 1] >= m47_capacity(slot-1,0))
+#else
   if (live()->counts[slot - 1] == 16)
+#endif
     return M44_FULL;
   authority.busy = 1;
   *stage() = *live();
   stage()->queues[slot - 1][stage()->counts[slot - 1]++] = *row;
+#if defined(M47_MANAGED_SERVICES)
+  if (m47_public_release(slot-1,row)) stage()->providers[slot-1].release_queued=1;
+#endif
   authority.operation = OP_ENQUEUE;
   M44PublicationHooks h = hooks();
   M38Status r = m44_resource_publish(authority.session, &authority, &h);
@@ -470,6 +700,9 @@ M44Status m44_supervisor_dispatch(void) {
   }
   *stage() = *live();
   retire(stage(), slot);
+#if defined(M47_MANAGED_SERVICES)
+  if (m47_private(slot,row->event) || m47_public_release(slot,row)) stage()->fenced=1;
+#endif
   stage()->fault = authority.turn_fault
                        ? authority.turn_fault
                        : (!built ? M44_FAULT_PUBLICATION
@@ -484,9 +717,16 @@ M44Status m44_supervisor_dispatch(void) {
   if (r)
     live()->fenced = 1;
   authority.busy = 0;
+#if defined(M47_MANAGED_SERVICES)
+  return r || live()->fenced ? M44_FENCED : M44_RETIRED;
+#else
   return r ? M44_FENCED : M44_RETIRED;
+#endif
 }
 M44Status m44_supervisor_capture(uint32_t *token) {
+#if defined(M47_MANAGED_SERVICES)
+  if (authority.services) return M44_INVALID;
+#endif
   M44Status status = ready();
   if (status)
     return status;
@@ -514,6 +754,9 @@ M44Status m44_supervisor_capture(uint32_t *token) {
   return M44_OK;
 }
 M44Status m44_supervisor_restore(uint32_t token) {
+#if defined(M47_MANAGED_SERVICES)
+  if (authority.services) return M44_INVALID;
+#endif
   M44Status status = ready();
   if (status)
     return status;
@@ -583,6 +826,16 @@ M45Status m45_supervisor_manage(uint32_t command, uint32_t target) {
       (command == 3 && live()->lifecycle != 1) ||
       (command == 8 && live()->lifecycle != 2))
     return M45_INVALID_STATE;
+#if defined(M47_MANAGED_SERVICES)
+  if (authority.services && command == 8) {
+    if (authority.receive_holds) return M45_NOT_READY;
+    for (uint32_t i=0;i<2;i++) {
+      const M47ProviderLedger *p=&live()->providers[i];
+      if (live()->counts[i] || p->phase!=2 || p->tx_state || p->rx_state ||
+          p->release_queued) return M45_NOT_READY;
+    }
+  }
+#endif
   if (command == 8 && live()->epoch == UINT32_MAX)
     return M45_NOT_READY;
   authority.busy = 1;
@@ -626,6 +879,9 @@ M44Status m44_supervisor_inspect(M44ResourceInspection *out) {
 M44Status m44_supervisor_restore_checked(uint32_t token,
                                          const uint8_t identity[32],
                                          uint64_t capability) {
+#if defined(M47_MANAGED_SERVICES)
+  if (authority.services) return M44_INVALID;
+#endif
   if (!identity || byte_compare(identity, authority.descriptor.identity, 32))
     return M44_INVALID;
   M44ResourceInspection inspection;
@@ -712,6 +968,9 @@ M44Status m46_supervisor_stage(ResourceSession *candidate,
                                const M44Saved handles[2],
                                const uint8_t compatibility[32],
                                uint32_t expected_generation, uint32_t *token) {
+#if defined(M47_MANAGED_SERVICES)
+  if (authority.services) return M44_INVALID;
+#endif
   if (token)
     *token = 0;
   M44Status status = ready();
@@ -800,6 +1059,9 @@ static void m46_commit(void *context) {
 }
 M44Status m46_supervisor_activate(uint32_t token,
                                   uint32_t expected_generation) {
+#if defined(M47_MANAGED_SERVICES)
+  if (authority.services) return M44_INVALID;
+#endif
   M44Status s = ready();
   if (s)
     return s;
@@ -824,6 +1086,9 @@ M44Status m46_supervisor_activate(uint32_t token,
   return r ? M44_PUBLICATION : M44_OK;
 }
 M44Status m46_supervisor_cancel(uint32_t token, uint32_t expected_generation) {
+#if defined(M47_MANAGED_SERVICES)
+  if (authority.services) return M44_INVALID;
+#endif
   M44Status s = ready();
   if (s)
     return s;
