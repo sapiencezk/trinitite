@@ -16,7 +16,9 @@ typedef struct M44PublicationHooks {
     int (*prepare)(void *context, noun staged_result);
     /* Only an infallible fixed-store/root flip: no allocation, serialization,
      * runtime calls, callbacks, failure or longjmp. Runs after all resource
-     * roots are installed, before broker release/any external observation. */
+     * roots are installed, before broker release/any external observation.
+     * M46 additionally copies its fixed-capacity, already-staged descriptor
+     * and handle arrays; this bounded byte copy is not a selection-only flip. */
     void (*commit)(void *context);
     void *context;
 } M44PublicationHooks;
@@ -82,4 +84,29 @@ M38Status m45_resource_test_control(ResourceSession *session, const void *owner,
     uint32_t point);
 #endif
 #endif
+#endif
+
+#if defined(M46_LIVE_REPLACEMENT)
+/* Private claimed-session replacement. Compatibility checks the complete
+ * numeric payload except algorithm assignment bodies. Rebind retires old inside
+ * the infallible publication seam; neither session is ever released to raw D8.
+ */
+typedef struct {
+  uint32_t registered_sessions;
+  uint64_t issued_capability;
+  size_t session_storage_bytes, session_actual_bytes;
+} M46ResourceDiagnostics;
+M38Status m46_resource_diagnostics(ResourceSession *, const void *owner,
+                                   M46ResourceDiagnostics *out);
+M38Status m46_validate_replacement_pair(ResourceSession *, ResourceSession *,
+                                  const void *owner);
+M38Status m46_resource_cancel(ResourceSession *, const void *owner);
+/* Loader-only abandonment before a supervisor claim. Closed is idempotent;
+ * a claimed session always refuses. No allocation, copying or fallible cleanup
+ * follows registry validation. The next ordinary promotion reclaims its cells. */
+M38Status m46_resource_discard_unclaimed(ResourceSession *);
+M38Status m46_resource_rebind(ResourceSession *, ResourceSession *,
+                              const void *owner, const noun handles[2],
+                              const M44PublicationHooks *,
+                              const ResourceResultView **);
 #endif

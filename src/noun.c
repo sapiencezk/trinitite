@@ -34,6 +34,20 @@ static uint64_t heap_noalloc_faults;
 static int      noun_tx_live;
 static int      noun_tx_mode;
 static uint8_t *noun_tx_cell_mark;
+#if defined(M46_LIVE_REPLACEMENT)
+static uint64_t m46_heap_peak[2], m46_atom_peak, m46_atom_index_peak;
+static void m46_note_heap_peak(void)
+{
+    uint64_t bytes = heap_cells_used(heap_mode) * sizeof(cell_t);
+    if (bytes > m46_heap_peak[heap_mode]) m46_heap_peak[heap_mode] = bytes;
+}
+uint64_t noun_m46_heap_peak_bytes(int mode)
+{
+    return mode == HEAP_MODE_SCRATCH || mode == HEAP_MODE_PERSIST ? m46_heap_peak[mode] : 0;
+}
+uint64_t noun_m46_atom_peak_bytes(void) { return m46_atom_peak; }
+uint64_t noun_m46_atom_index_peak(void) { return m46_atom_index_peak; }
+#endif
 
 #if defined(M38_D8_WAVE_B_B3)
 static uint64_t g_b3_persistent_cells_hwm;
@@ -153,6 +167,9 @@ static void *heap_alloc(size_t bytes) {
         g_b3_persistent_cells_hwm = used;
     }
 #endif
+#if defined(M46_LIVE_REPLACEMENT)
+    m46_note_heap_peak();
+#endif
     return p;
 }
 
@@ -185,6 +202,9 @@ static void *heap_alloc_checked(size_t bytes)
     } else if (used > g_b3_persistent_cells_hwm) {
         g_b3_persistent_cells_hwm = used;
     }
+#endif
+#if defined(M46_LIVE_REPLACEMENT)
+    m46_note_heap_peak();
 #endif
     return p;
 }
@@ -658,6 +678,10 @@ static atom_t *atom_store_alloc_checked(uint64_t size_limbs)
     if (p > top || (size_t)(top - p) < bytes)
         return 0;
     atom_data_ptr = p + bytes;
+#if defined(M46_LIVE_REPLACEMENT)
+    uint64_t used = atom_store_bytes_used();
+    if (used > m46_atom_peak) m46_atom_peak = used;
+#endif
 #if defined(M38_D8_WAVE_B_B3)
     b3_note_atom_hwm();
 #endif
@@ -785,6 +809,9 @@ int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
     idx[empty].hash62 = hash62;
     idx[empty].ptr = a;
     atom_index_occupancy++;
+#if defined(M46_LIVE_REPLACEMENT)
+    if (atom_index_occupancy > m46_atom_index_peak) m46_atom_index_peak = atom_index_occupancy;
+#endif
 #if defined(M38_D8_WAVE_B_B3)
     b3_note_atom_hwm();
 #endif

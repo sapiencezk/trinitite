@@ -24,6 +24,16 @@ static int byte_compare(const void *left, const void *right, size_t count) {
 /* All durable objects are C copies. No noun survives a public call. */
 static struct {
   ResourceSession *session;
+#if defined(M46_LIVE_REPLACEMENT)
+  ResourceSession *candidate;
+  M44Descriptor candidate_descriptor;
+  M44Saved candidate_handles[2];
+  uint8_t compatibility[32], candidate_old_identity[32];
+  uint32_t deployment_generation, candidate_generation, candidate_token, candidate_serial;
+#if defined(M44_G0_TEST_CONTROLS)
+  uint32_t replacement_fault, replacement_busy_mask;
+#endif
+#endif
   M44Descriptor descriptor;
   M44Saved handles[2], snapshots[2][2];
   M44State roots[2], checkpoints[2];
@@ -663,4 +673,185 @@ void m44_supervisor_test_sequence(uint32_t sequence) {
     live()->sequence = sequence;
 }
 #endif
+#if defined(M46_LIVE_REPLACEMENT)
+M44Status m46_supervisor_init(ResourceSession *s, const M44Descriptor *d,
+                              const M44Saved handles[2],
+                              const uint8_t compatibility[32]) {
+  if (!compatibility)
+    return M44_INVALID;
+  M44Status status = m45_supervisor_init(s, d, handles);
+  if (!status) {
+    byte_copy(authority.compatibility, compatibility, 32);
+    authority.deployment_generation = 1;
+  }
+  return status;
+}
+ResourceSession *m46_supervisor_active_session(void) {
+  return authority.session;
+}
+const M44Descriptor *m46_supervisor_active_descriptor(void) {
+  return &authority.descriptor;
+}
+M44Status m46_supervisor_diagnostics(M46ResourceDiagnostics *out) {
+  M44Status status = ready();
+  if (status != M44_OK)
+    return status;
+  return m46_resource_diagnostics(authority.session, &authority, out) ==
+                 M38_STATUS_OK
+             ? M44_OK
+             : M44_INVALID;
+}
+uint32_t m46_supervisor_generation(void) {
+  return authority.deployment_generation;
+}
+uint32_t m46_supervisor_candidate_token(void) {
+  return authority.candidate ? authority.candidate_token : 0;
+}
+M44Status m46_supervisor_stage(ResourceSession *candidate,
+                               const M44Descriptor *d,
+                               const M44Saved handles[2],
+                               const uint8_t compatibility[32],
+                               uint32_t expected_generation, uint32_t *token) {
+  if (token)
+    *token = 0;
+  M44Status status = ready();
+  if (status)
+    return status;
+  if (!token || !candidate || !d || !handles || !compatibility ||
+      !authority.managed || live()->lifecycle != 1 || authority.candidate ||
+      candidate == authority.session ||
+      expected_generation != authority.deployment_generation ||
+      expected_generation == UINT32_MAX ||
+      !byte_compare(d->identity, authority.descriptor.identity, 32) ||
+      authority.candidate_serial == UINT32_MAX)
+    return M44_INVALID;
+  noun decoded[2];
+  authority.busy = 1;
+  for (uint32_t i = 0; i < 2; i++)
+    if (!decode(&handles[i], &decoded[i])) {
+      authority.busy = 0;
+      return M44_INVALID;
+    }
+  M38Status r = m44_resource_claim(candidate, &authority, decoded);
+  if (r) {
+    authority.busy = 0;
+    return M44_INVALID;
+  }
+  size_t offset = offsetof(M44Descriptor, source_slot);
+  if (byte_compare(compatibility, authority.compatibility, 32) ||
+      byte_compare((const uint8_t *)d + offset,
+                   (const uint8_t *)&authority.descriptor + offset,
+                   sizeof(*d) - offset) ||
+      m46_validate_replacement_pair(authority.session, candidate, &authority)) {
+    M38Status cleanup = m46_resource_cancel(candidate, &authority);
+    authority.busy = 0;
+    return cleanup == M38_STATUS_OK ? M44_INVALID : M44_PUBLICATION;
+  }
+  authority.candidate = candidate;
+  authority.candidate_descriptor = *d;
+  authority.candidate_handles[0] = handles[0];
+  authority.candidate_handles[1] = handles[1];
+  authority.candidate_token = ++authority.candidate_serial;
+  authority.candidate_generation = expected_generation;
+  byte_copy(authority.candidate_old_identity, authority.descriptor.identity,
+            32);
+  *token = authority.candidate_token;
+  authority.busy = 0;
+  return M44_OK;
+}
+static int m46_prepare(void *context, noun result) {
+  (void)context;
+  (void)result;
+#if defined(M44_G0_TEST_CONTROLS)
+  uint32_t point = authority.replacement_fault;
+  authority.replacement_fault = 0;
+  if (point == 1)
+    return 0;
+  if (point == 5) {
+    uint32_t token = 0;
+    authority.replacement_busy_mask =
+        (m46_supervisor_activate(authority.candidate_token,
+                                 authority.deployment_generation) == M44_BUSY
+             ? 1u
+             : 0u) |
+        (m46_supervisor_cancel(authority.candidate_token,
+                               authority.deployment_generation) == M44_BUSY
+             ? 2u
+             : 0u) |
+        (m44_supervisor_dispatch() == M44_BUSY ? 4u : 0u) |
+        (m46_supervisor_stage(0, 0, 0, 0, 0, &token) == M44_BUSY ? 8u : 0u) |
+        (m45_supervisor_manage(3, 0) == M45_OVERFLOW ? 16u : 0u);
+    return 0;
+  }
+  if (point == 2 || point == 3)
+    m44_resource_test_fail_publication(authority.candidate, point == 2 ? 2 : 1);
+#endif
+  return 1;
+}
+static void m46_commit(void *context) {
+  (void)context;
+  authority.session = authority.candidate;
+  authority.descriptor = authority.candidate_descriptor;
+  authority.handles[0] = authority.candidate_handles[0];
+  authority.handles[1] = authority.candidate_handles[1];
+  authority.deployment_generation++;
+  authority.candidate = 0;
+  authority.checkpoint_valid = 0;
+}
+M44Status m46_supervisor_activate(uint32_t token,
+                                  uint32_t expected_generation) {
+  M44Status s = ready();
+  if (s)
+    return s;
+  if (!authority.managed || live()->lifecycle != 1 || !authority.candidate ||
+      !token || token != authority.candidate_token ||
+      expected_generation != authority.deployment_generation ||
+      expected_generation != authority.candidate_generation ||
+      expected_generation == UINT32_MAX ||
+      byte_compare(authority.candidate_old_identity,
+                   authority.descriptor.identity, 32))
+    return M44_INVALID;
+  authority.busy = 1;
+  noun handles[2];
+  int ok = decode(&authority.candidate_handles[0], &handles[0]) &&
+           decode(&authority.candidate_handles[1], &handles[1]);
+  const ResourceResultView *view;
+  M44PublicationHooks h = {m46_prepare, m46_commit, 0};
+  M38Status r = ok ? m46_resource_rebind(authority.session, authority.candidate,
+                                         &authority, handles, &h, &view)
+                   : M38_STATUS_REQUEST_INVALID;
+  authority.busy = 0;
+  return r ? M44_PUBLICATION : M44_OK;
+}
+M44Status m46_supervisor_cancel(uint32_t token, uint32_t expected_generation) {
+  M44Status s = ready();
+  if (s)
+    return s;
+  if (!authority.candidate || !token || token != authority.candidate_token ||
+      expected_generation != authority.deployment_generation)
+    return M44_INVALID;
+  M38Status r = m46_resource_cancel(authority.candidate, &authority);
+  if (!r)
+    authority.candidate = 0;
+  return r ? M44_PUBLICATION : M44_OK;
+}
+#if defined(M44_G0_TEST_CONTROLS)
+void m46_supervisor_test_fault(uint32_t point) {
+  if (!authority.busy && (point <= 3 || point == 5))
+    authority.replacement_fault = point;
+}
+uint32_t m46_supervisor_test_busy_mask(void) {
+  return authority.replacement_busy_mask;
+}
+void m46_supervisor_test_generation(uint32_t generation) {
+  if (!authority.busy)
+    authority.deployment_generation = generation;
+}
+void m46_supervisor_test_ticket_serial(uint32_t serial) {
+  if (!authority.busy)
+    authority.candidate_serial = serial;
+}
+#endif
+#endif
+
 #endif

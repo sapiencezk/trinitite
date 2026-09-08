@@ -42,7 +42,11 @@
 #define RESOURCE_RUNTIME_CONTROL_BYTES       (64u * 1024u)
 #define RESOURCE_RUNTIME_WORKSPACE_BYTES     (4u * 1024u * 1024u)
 #define RESOURCE_RUNTIME_BYTES               (RESOURCE_RUNTIME_CONTROL_BYTES + RESOURCE_RUNTIME_WORKSPACE_BYTES)
-#define RESOURCE_SESSION_BYTES               (2u * 1024u * 1024u)
+#if defined(M46_LIVE_REPLACEMENT)
+#define RESOURCE_SESSION_BYTES (1024u * 1024u)
+#else
+#define RESOURCE_SESSION_BYTES (2u * 1024u * 1024u)
+#endif
 #define RESOURCE_STORAGE_ALIGNMENT           64u
 #define RESOURCE_MAX_ADMISSION_ENTRIES       2u
 #define RESOURCE_MAX_LIVE_HANDLES            8u
@@ -292,6 +296,9 @@ struct ResourceSession {
     const void *m44_owner;
     const M44PublicationHooks *m44_hooks;
     const WaveM44Group *m44_group;
+#if defined(M46_LIVE_REPLACEMENT)
+    ResourceSession *m46_source;
+#endif
     uint8_t m44_call_active;
 #if defined(M44_G0_TEST_CONTROLS)
     uint8_t m44_test_fault;
@@ -2199,6 +2206,9 @@ static int wave_snapshot_apply(const ResourceSession *session, const WavePlan *p
     return 1;
 }
 
+#if defined(M46_LIVE_REPLACEMENT)
+static void m46_close_fixed(ResourceSession *session);
+#endif
 static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *session,
                                   uint32_t slot_index, const WaveSlot *staged_slot,
                                   noun staged_handle, noun staged_state,
@@ -2349,6 +2359,9 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
             session->slots[group->index[i]].snapshot_root = group_snapshots[i];
         }
     }
+#if defined(M46_LIVE_REPLACEMENT)
+    if (session->m46_source) m46_close_fixed(session->m46_source);
+#endif
     if (participant) hooks->commit(hooks->context);
 #endif
     runtime->promoted_root_count++;
@@ -2958,6 +2971,9 @@ typedef enum {
     M44_GROUP_RESTORE_SNAPSHOT = 1,
 #if defined(M45_MANAGED_LIFECYCLE)
     M45_GROUP_INITIALIZE_ADMITTED = 2,
+#if defined(M46_LIVE_REPLACEMENT)
+    M46_GROUP_REBIND = 3,
+#endif
 #endif
 } M44GroupOperation;
 
@@ -2984,6 +3000,24 @@ static M38Status m44_group_staged(ResourceSession *session, M44GroupOperation gr
                 return M38_STATUS_ATOM_RESULT_STAGING;
         } else {
 #if defined(M45_MANAGED_LIFECYCLE)
+#if defined(M46_LIVE_REPLACEMENT)
+            if (group_operation == M46_GROUP_REBIND) {
+                WaveSlot *old = &session->m46_source->slots[i];
+                wave_copy(slot->state_ids, old->state_ids, sizeof(slot->state_ids));
+                wave_copy(slot->state_values, old->state_values, sizeof(slot->state_values));
+                slot->snapshot_root = NOUN_ZERO;
+                slot->snapshot_nonce = 0;
+                /* Validate the latest logical image, not a staging-time copy. */
+                for (uint32_t j=0;j<plan->instance_count;j++) {
+                    const WavePlanType *type=&plan->types[plan->instance_types[j]-1u];
+                    if (!slot->state_ids[j] || slot->state_ids[j]>type->state_count)
+                        return M38_STATUS_REQUEST_INVALID;
+                    for (uint32_t k=0;k<type->value_count;k++)
+                        if (slot->state_values[j][k]>(type->value_types[k]==1 ? 1u : 65535u))
+                            return M38_STATUS_REQUEST_INVALID;
+                }
+            } else
+#endif
             if (group_operation == M45_GROUP_INITIALIZE_ADMITTED) {
                 if (slot->snapshot_nonce == RESOURCE_MAX_SNAPSHOT_NONCE)
                     return M38_STATUS_REQUEST_INVALID;
@@ -3038,7 +3072,9 @@ static M38Status m44_group_operation(ResourceSession *session, const void *owner
     M38Status status = m44_access(session, owner);
     if (status != M38_STATUS_OK) return status;
     if (!m44_hooks_valid(hooks) || group_operation < M44_GROUP_METADATA || group_operation >
-#if defined(M45_MANAGED_LIFECYCLE)
+#if defined(M46_LIVE_REPLACEMENT)
+        3
+#elif defined(M45_MANAGED_LIFECYCLE)
         2
 #else
         1
@@ -3113,6 +3149,143 @@ M38Status m45_resource_reinitialize(ResourceSession *session, const void *owner,
     const ResourceResultView **out_view)
 {
     return m44_group_operation(session, owner, M45_GROUP_INITIALIZE_ADMITTED, handles, 0, hooks, out_view);
+}
+#endif
+
+#if defined(M46_LIVE_REPLACEMENT)
+/* No allocation and no release-to-public interval. Retired storage is reusable
+ * only after this closed session has left the registry. Its unreachable noun
+ * cells are reclaimed by the next ordinary collective promotion. */
+static void m46_close_fixed(ResourceSession *session) {
+  ResourceRuntime *runtime = session->runtime;
+  runtime->sessions[session->registry_index] = 0;
+  runtime->session_count--;
+  session->state = 2;
+  session->capability = 0;
+  /* Closed/unregistered storage contributes no roots. Clearing the bounded
+   * catalog and slot arrays belongs to the next session initialization. */
+  session->primary_root = session->refusal_root = NOUN_ZERO;
+  session->primary_view.owner = session->refusal_view.owner =
+      M38_RESULT_OWNER_NONE;
+}
+
+static int m46_payload_compatible(noun a, noun b) {
+  noun at, ab, bt, bb, af[2], bf[2], as[5], bs[5];
+  noun ats[8], bts[8];
+  uint32_t ac, bc;
+  if (!wave_pair(a, &at, &ab) || !wave_pair(b, &bt, &bb) || !noun_eq(at, bt) ||
+      !wave_record(ab, af, 2) || !wave_record(bb, bf, 2) ||
+      !noun_eq(af[0], bf[0]) || !wave_record(af[1], as, 5) ||
+      !wave_record(bf[1], bs, 5) || !wave_list(as[0], ats, 8, &ac) ||
+      !wave_list(bs[0], bts, 8, &bc) || ac != bc)
+    return 0;
+  for (uint32_t i = 1; i < 5; i++)
+    if (!noun_eq(as[i], bs[i]))
+      return 0;
+  for (uint32_t i = 0; i < ac; i++) {
+    noun ax[6], bx[6];
+    if (!wave_record(ats[i], ax, 6) || !wave_record(bts[i], bx, 6))
+      return 0;
+    for (uint32_t j = 0; j < 5; j++)
+      if (!noun_eq(ax[j], bx[j]))
+        return 0;
+    noun al = ax[5], bl = bx[5], ah, bh, ar[2], br[2];
+    while (al != NOUN_ZERO && bl != NOUN_ZERO) {
+      if (!wave_pair(al, &ah, &al) || !wave_pair(bl, &bh, &bl) ||
+          !wave_record(ah, ar, 2) || !wave_record(bh, br, 2) ||
+          !noun_eq(ar[0], br[0]))
+        return 0;
+    }
+    if (al != bl)
+      return 0;
+  }
+  return 1;
+}
+
+M38Status m46_resource_diagnostics(ResourceSession *session, const void *owner,
+                                   M46ResourceDiagnostics *out) {
+  if (!out)
+    return M38_STATUS_INVALID_ARGUMENT;
+  M38Status status = m44_access(session, owner);
+  if (status != M38_STATUS_OK)
+    return status;
+  *out = (M46ResourceDiagnostics){
+      session->runtime->session_count, session->runtime->next_capability,
+      RESOURCE_SESSION_BYTES, sizeof(ResourceSession)};
+  return M38_STATUS_OK;
+}
+
+M38Status m46_validate_replacement_pair(ResourceSession *old,
+                                  ResourceSession *candidate,
+                                  const void *owner) {
+  M38Status s = m44_access(old, owner);
+  if (s)
+    return s;
+  s = m44_access(candidate, owner);
+  if (s)
+    return s;
+  if (old == candidate || old->runtime != candidate->runtime)
+    return M38_STATUS_INVALID_ARGUMENT;
+  /* Retirement is infallible only after both registry memberships and the
+   * two-session ownership bound have been checked before any copying. */
+  ResourceRuntime *runtime = old->runtime;
+  if (runtime->session_count != 2 ||
+      old->registry_index >= RESOURCE_MAX_REGISTERED_SESSIONS ||
+      candidate->registry_index >= RESOURCE_MAX_REGISTERED_SESSIONS ||
+      runtime->sessions[old->registry_index] != old ||
+      runtime->sessions[candidate->registry_index] != candidate)
+    return M38_STATUS_INTERNAL;
+  for (uint32_t i = 0; i < 2; i++) {
+    WavePlan *a, *b;
+    if (!wave_plan_for_slot(old, i, &a) ||
+        !wave_plan_for_slot(candidate, i, &b) ||
+        !m46_payload_compatible(a->payload, b->payload))
+      return M38_STATUS_REQUEST_INVALID;
+  }
+  return M38_STATUS_OK;
+}
+M38Status m46_resource_cancel(ResourceSession *session, const void *owner) {
+  M38Status status = m44_access(session, owner);
+  if (status != M38_STATUS_OK)
+    return status;
+  ResourceRuntime *runtime = session->runtime;
+  if (!runtime->session_count ||
+      session->registry_index >= RESOURCE_MAX_REGISTERED_SESSIONS ||
+      runtime->sessions[session->registry_index] != session)
+    return M38_STATUS_INTERNAL;
+  m46_close_fixed(session);
+  return M38_STATUS_OK;
+}
+M38Status m46_resource_discard_unclaimed(ResourceSession *session) {
+  if (!wave_session_valid(session))
+    return M38_STATUS_INVALID_ARGUMENT;
+  if (session->state == 2)
+    return M38_STATUS_OK;
+  if (session->m44_owner || session->in_flight)
+    return M38_STATUS_SESSION_BUSY;
+  ResourceRuntime *runtime = session->runtime;
+  if (!wave_runtime_valid(runtime) || runtime->state != 2 || runtime->broker_owner || noun_tx_active())
+    return M38_STATUS_RUNTIME_BUSY;
+  if (!runtime->session_count || session->registry_index >= RESOURCE_MAX_REGISTERED_SESSIONS ||
+      runtime->sessions[session->registry_index] != session)
+    return M38_STATUS_INTERNAL;
+  m46_close_fixed(session);
+  return M38_STATUS_OK;
+}
+M38Status m46_resource_rebind(ResourceSession *old, ResourceSession *candidate,
+                              const void *owner, const noun handles[2],
+                              const M44PublicationHooks *hooks,
+                              const ResourceResultView **out_view) {
+  if (out_view)
+    *out_view = 0;
+  M38Status s = m46_validate_replacement_pair(old, candidate, owner);
+  if (s)
+    return s;
+  candidate->m46_source = old;
+  s = m44_group_operation(candidate, owner, M46_GROUP_REBIND, handles, 0, hooks,
+                          out_view);
+  candidate->m46_source = 0;
+  return s;
 }
 #endif
 

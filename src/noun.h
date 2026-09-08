@@ -103,6 +103,12 @@ void  noun_tx_commit(void);
 void  noun_tx_abort(void);
 int   noun_tx_active(void);
 uint64_t heap_cells_used(int mode);
+#if defined(M46_LIVE_REPLACEMENT)
+/* Same-boot allocation high-water marks include aborted candidate work. */
+uint64_t noun_m46_heap_peak_bytes(int mode);
+uint64_t noun_m46_atom_peak_bytes(void);
+uint64_t noun_m46_atom_index_peak(void);
+#endif
 uint64_t atom_store_bytes_used(void);
 uint64_t atom_store_capacity_bytes(void);
 uint64_t atom_store_index_occupancy(void);

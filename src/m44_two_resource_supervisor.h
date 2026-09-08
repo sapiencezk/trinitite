@@ -95,3 +95,43 @@ void m44_supervisor_test_busy(void);
 uint32_t m44_supervisor_test_busy_mask(void);
 #endif
 #endif
+
+#if defined(M46_LIVE_REPLACEMENT)
+/* Boot-only managed initialization with the trusted-boot-authorized source-shape digest.
+ * Deployment generations start at one; tickets never repeat within a boot. */
+M44Status m46_supervisor_init(ResourceSession *session,
+                              const M44Descriptor *descriptor,
+                              const M44Saved handles[2],
+                              const uint8_t compatibility[32]);
+/* Stage requires RUNNING at the exact deployment generation. It copies the
+ * descriptor and handles, claims the candidate, and compares source shape,
+ * topology, interfaces, and the complete numeric payload except algorithm
+ * bodies. A post-claim incompatibility privately closes the candidate;
+ * pre-claim refusal retains caller ownership. Staging never copies live state.
+ */
+M44Status m46_supervisor_stage(ResourceSession *candidate,
+                               const M44Descriptor *descriptor,
+                               const M44Saved handles[2],
+                               const uint8_t compatibility[32],
+                               uint32_t expected_generation,
+                               uint32_t *out_token);
+/* At a complete dispatch boundary copy latest logical state to the candidate,
+ * preserving all supervisor state. Commit replaces the entire authority and
+ * retires the old session without failure or allocation. On refusal the
+ * active deployment and staged candidate remain available. */
+M44Status m46_supervisor_activate(uint32_t token, uint32_t expected_generation);
+M44Status m46_supervisor_cancel(uint32_t token, uint32_t expected_generation);
+ResourceSession *m46_supervisor_active_session(void);
+const M44Descriptor *m46_supervisor_active_descriptor(void);
+M44Status m46_supervisor_diagnostics(M46ResourceDiagnostics *out);
+uint32_t m46_supervisor_generation(void);
+uint32_t m46_supervisor_candidate_token(void);
+#if defined(M44_G0_TEST_CONTROLS)
+/* 1: prepare refusal, 2: copy-one, 3: copy-all, 5: actual prepare
+ * reentry probe then prepare refusal. Other values are ignored. */
+void m46_supervisor_test_fault(uint32_t point);
+uint32_t m46_supervisor_test_busy_mask(void);
+void m46_supervisor_test_generation(uint32_t generation);
+void m46_supervisor_test_ticket_serial(uint32_t serial);
+#endif
+#endif

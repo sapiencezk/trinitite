@@ -21,6 +21,11 @@ static M44Saved handles[2];
 static uint32_t catalog_bytes[2][2];
 static ResourceRuntime *runtime;
 static ResourceSession *session;
+#if defined(M46_LIVE_REPLACEMENT)
+static int m46_device_try_boot(noun input);
+static uint32_t live_replacement, active_package, staged_package;
+static uint32_t expected_generation[MAX_COMMANDS], expected_package[MAX_COMMANDS];
+#endif
 static size_t length(const char *s) { size_t n = 0; while (s[n]) n++; return n; }
 static noun cord(const char *s) { return cord_from_bytes(s, length(s)); }
 static int pair(noun n, noun *a, noun *b) {
@@ -279,6 +284,13 @@ static int emit(uint32_t index, uint32_t status, uint32_t token) {
     uart_puts("M44 {\"row\":"); number(index); uart_puts(",\"status\":"); number(status);
     uart_puts(",\"token\":"); number(token); uart_puts(",\"cursor\":"); number(state->cursor);
     uart_puts(",\"sequence\":"); number(state->sequence); uart_puts(",\"fault\":"); number(state->fault);
+#if defined(M46_LIVE_REPLACEMENT)
+    if (live_replacement) {
+        uart_puts(",\"deployment_generation\":"); number(m46_supervisor_generation());
+        uart_puts(",\"active_package\":"); number(active_package);
+        uart_puts(",\"candidate_token\":"); number(m46_supervisor_candidate_token());
+    }
+#endif
 #if defined(M45_MANAGED_LIFECYCLE)
     if (m45_supervisor_is_managed()) {
         uart_puts(",\"managed\":"); number(1);
@@ -332,6 +344,9 @@ static void finish(void) {
 }
 
 int m44_device_try_boot(noun input) {
+#if defined(M46_LIVE_REPLACEMENT)
+    if (m46_device_try_boot(input)) return 1;
+#endif
     noun tag, body, envelope[5], catalog[2], entry[2], rows[MAX_COMMANDS], command[4];
     uint32_t count, boot_failure;
 #if defined(M45_MANAGED_LIFECYCLE)
@@ -449,7 +464,13 @@ int m44_device_try_boot(noun input) {
 #endif
     size_t storage = m44_supervisor_storage_bytes() + sizeof(commands) + sizeof(descriptor)
         + sizeof(handles) + sizeof(catalog_bytes) + sizeof(runtime) + sizeof(session);
-    if (storage > 512u * 1024u) goto invalid;
+    if (storage >
+#if defined(M46_LIVE_REPLACEMENT)
+        768u * 1024u
+#else
+        512u * 1024u
+#endif
+        ) goto invalid;
     uart_puts("M44 setup=0\r\n");
     uart_puts("M44 storage=");
     number(storage);
@@ -520,3 +541,272 @@ invalid:
 failed:
     uart_puts("M44 terminal=refuse\r\n"); finish(); return 1;
 }
+
+#if defined(M46_LIVE_REPLACEMENT)
+/* The immutable boot pill is the local package allowlist. Re-decode it while
+ * staging, then copy the selected bytes into the existing admission workspace.
+ * No borrowed cell or package pointer survives a runtime promotion. */
+static uint32_t package_count, stage_fault;
+static uint8_t package_identity[4][32];
+/* Explicit loader result. Descriptor/handle views borrow the existing fixed C
+ * decode buffers until the next load. Init/stage copies them synchronously;
+ * no moving noun pointer is exposed by this result. */
+typedef struct {
+    ResourceSession *session;
+    const M44Descriptor *descriptor;
+    const M44Saved *handles;
+    uint8_t compatibility[32];
+} M46LoadedPackage;
+
+static int m46_envelope(noun input, noun packages[4], noun *script, uint32_t *count) {
+    noun tag, body, fields[2];
+    return pair(input, &tag, &body) && text_is(tag, "m46-device-boot-v1")
+        && record(body, fields, 2) && list(fields[0], packages, 4, count)
+        && *count && ((*script = fields[1]), 1);
+}
+
+static int m46_package_read(uint32_t index, uint8_t compatibility[32]) {
+    noun input, packages[4], script, entry[3], tag, body, fields[3], catalog[2], parts[2];
+    uint32_t count, version;
+    uint8_t identity[32], supplied[32];
+    const uint8_t *base = (const uint8_t *)(uintptr_t)PILL_BASE;
+    uint64_t bytes = 0;
+    for (uint32_t i = 0; i < 8; i++) bytes |= (uint64_t)base[i] << (i * 8u);
+    if (!bytes || bytes > 1024u * 1024u || !index || index > package_count) return 0;
+    int ok = cue_bounded_bytes(base + 16, bytes, &cue_i2_limits,
+                              HEAP_MODE_SCRATCH, &input) == CUE_BOUNDED_OK;
+    if (ok) ok = m46_envelope(input, packages, &script, &count) && count == package_count
+        && record(packages[index - 1], entry, 3)
+        && pair(entry[0], &tag, &body) && text_is(tag, "m46-compatible-package-v1")
+        && record(body, fields, 3) && scalar(fields[0], 1, &version) && version == 1
+        && digest(fields[2], compatibility)
+        && hash_noun(entry[0], "1499kernel-m46-package-v1", 1, identity)
+        && digest(entry[1], supplied) && same(identity, supplied, 32)
+        && same(identity, package_identity[index - 1], 32)
+        && hash_noun(fields[1], "1499kernel-m44-deployment-v1", 1, supplied);
+    if (ok) {
+        /* Descriptor read independently recomputes its canonical identity. */
+        noun expected = cord_from_bytes((const char *)supplied, 32);
+        for (uint32_t i = 0; i < sizeof(descriptor); i++) ((uint8_t *)&descriptor)[i] = 0;
+        ok = descriptor_read(fields[1], expected) && record(entry[2], catalog, 2);
+    }
+    for (uint32_t i = 0; ok && i < 2; i++) {
+        ok = record(catalog[i], parts, 2);
+        for (uint32_t part = 0; ok && part < 2; part++)
+            ok = atom_copy(parts[part], m44_boot_catalog_storage(i, part), MAX_JAM,
+                           &catalog_bytes[i][part]);
+    }
+    noun_tx_abort();
+    heap_scratch_reset();
+    return ok;
+}
+
+static M44Status m46_load(uint32_t index, uint32_t bank, M46LoadedPackage *loaded) {
+    ResourceSession **loaded_session = &loaded->session;
+    *loaded_session = 0;
+    loaded->descriptor = &descriptor;
+    loaded->handles = handles;
+    if (!m46_package_read(index, loaded->compatibility)) return M44_INVALID;
+    for (uint32_t i = 0; i < 2; i++) {
+        noun core, admission;
+        if (!decode(m44_boot_catalog_storage(i, 1), catalog_bytes[i][1], &core)
+            || !payload_matches(core, i)
+            || !decode(m44_boot_catalog_storage(i, 0), catalog_bytes[i][0], &admission)
+            || !admission_matches(admission, i)) return M44_INVALID;
+    }
+    SupervisorAdmissionEntry entries[2];
+    SupervisorAdmissionCatalog admitted;
+    SessionCapability capability;
+    for (uint32_t i = 0; i < 2; i++)
+        entries[i] = (SupervisorAdmissionEntry){m44_boot_catalog_storage(i, 0), catalog_bytes[i][0],
+                                               m44_boot_catalog_storage(i, 1), catalog_bytes[i][1]};
+    uint32_t count = 2;
+    if (catalog_bytes[0][0] == catalog_bytes[1][0] && catalog_bytes[0][1] == catalog_bytes[1][1]
+        && same(entries[0].record_jam, entries[1].record_jam, catalog_bytes[0][0])
+        && same(entries[0].resource_core_jam, entries[1].resource_core_jam, catalog_bytes[0][1])) count = 1;
+    M38Status status = m38_supervisor_admission_catalog_make(&admitted, entries, count);
+    if (!status) status = m38_resource_session_init(runtime,
+        (uint8_t *)m44_boot_session_storage() + bank * 1024u * 1024u,
+        1024u * 1024u, &admitted, loaded_session, &capability);
+    if (status) return M44_INVALID;
+    for (uint32_t i = 0; i < 2; i++) {
+        noun core, request, result[2], loaded[2], hf[4];
+        uint8_t identity[32];
+        const ResourceResultView *view;
+        if (!decode(m44_boot_catalog_storage(i, 1), catalog_bytes[i][1], &core)
+            || !tagged("m38-resource-abi-v1-request", "m38-resource-abi-v1-request-schema-v1",
+                       (noun[2]){direct(1), core}, 2, &request)
+            || m38_resource_session_dispatch(*loaded_session, request, &view) != M38_STATUS_OK
+            || !view || view->wire_status != 1
+            || !tagged_fields(*view->root_slot, "m38-resource-abi-v1-result",
+                              "m38-resource-abi-v1-result-schema-v1", result, 2)
+            || !record(result[1], loaded, 2) || !record(loaded[0], hf, 4)
+            || !digest(hf[3], identity) || !same(identity, descriptor.admission_identity[i], 32)
+            || !save(loaded[0], &handles[i])) goto failure;
+#if defined(M44_G0_TEST_CONTROLS)
+        if (stage_fault == 10u + i) { stage_fault = 0; goto failure; }
+        if (stage_fault == 12 && i == 0) goto failure;
+#endif
+    }
+    return M44_OK;
+failure:
+#if defined(M44_G0_TEST_CONTROLS)
+    /* An allocating public dispose could fail here and strand a registry slot.
+     * Prove private abandonment succeeds even when the next copy must fail. */
+    if (stage_fault == 12) noun_test_copy_fail_after(0);
+#endif
+    status = m46_resource_discard_unclaimed(*loaded_session);
+#if defined(M44_G0_TEST_CONTROLS)
+    if (stage_fault == 12) { noun_test_copy_fail_after(-1); stage_fault = 0; }
+#endif
+    if (status) return M44_FENCED; /* Unexpected ownership corruption is terminal to the loader. */
+    *loaded_session = 0;
+    return M44_INVALID;
+}
+
+static uint64_t m46_ticks(void) {
+    uint64_t ticks;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ticks));
+    return ticks;
+}
+
+static void m46_measure(uint32_t row, uint32_t operation, uint64_t elapsed) {
+    M46ResourceDiagnostics diagnostics = {0};
+    uint64_t frequency;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+    (void)m46_supervisor_diagnostics(&diagnostics);
+    uart_puts("M46 measure={\"row\":"); number(row);
+    uart_puts(",\"operation\":"); number(operation);
+    uart_puts(",\"ticks\":"); number(elapsed);
+    uart_puts(",\"counter_frequency_hz\":"); number(frequency);
+    uart_puts(",\"persistent_cells\":"); number(heap_cells_used(HEAP_MODE_PERSIST));
+    uart_puts(",\"scratch_cells\":"); number(heap_cells_used(HEAP_MODE_SCRATCH));
+    uart_puts(",\"atom_bytes\":"); number(atom_store_bytes_used());
+    uart_puts(",\"cell_bytes\":"); number(sizeof(cell_t));
+    uart_puts(",\"persistent_peak_bytes\":"); number(noun_m46_heap_peak_bytes(HEAP_MODE_PERSIST));
+    uart_puts(",\"scratch_peak_bytes\":"); number(noun_m46_heap_peak_bytes(HEAP_MODE_SCRATCH));
+    uart_puts(",\"atom_peak_bytes\":"); number(noun_m46_atom_peak_bytes());
+    uart_puts(",\"atom_index_occupancy\":"); number(atom_store_index_occupancy());
+    uart_puts(",\"atom_index_peak\":"); number(noun_m46_atom_index_peak());
+    uart_puts(",\"atom_index_capacity\":"); number(atom_store_index_capacity());
+    uart_puts(",\"copy_map_peak\":"); number(noun_copy_map_hwm());
+    uart_puts(",\"copy_map_capacity\":"); number(noun_copy_map_capacity());
+    uart_puts(",\"commit_metadata_bytes\":"); number(sizeof(M44Descriptor) + 2 * sizeof(M44Saved));
+    uart_puts(",\"registered_sessions\":"); number(diagnostics.registered_sessions);
+    uart_puts(",\"issued_capability\":"); number(diagnostics.issued_capability);
+    uart_puts(",\"session_storage_bytes\":"); number(diagnostics.session_storage_bytes);
+    uart_puts(",\"session_actual_bytes\":"); number(diagnostics.session_actual_bytes);
+    uart_puts("}\r\n");
+}
+
+static int m46_device_try_boot(noun input) {
+    noun tag, body, packages[4], script, rows[MAX_COMMANDS], fields[6], entry[3];
+    uint32_t count;
+    if (!pair(input, &tag, &body) || !text_is(tag, "m46-device-boot-v1")) return 0;
+    if (!m46_envelope(input, packages, &script, &package_count)
+        || !list(script, rows, MAX_COMMANDS, &count)) goto invalid;
+    for (uint32_t i = 0; i < package_count; i++)
+        if (!record(packages[i], entry, 3) || !digest(entry[1], package_identity[i])) goto invalid;
+    for (uint32_t i = 0; i < count; i++) {
+        Command *c = &commands[i];
+        if (!record(rows[i], fields, 6) || !scalar(fields[0], 28, &c->op) || !c->op
+            || !scalar(fields[1], 4, &c->slot) || !typed_row(fields[2], &c->row)
+            || !scalar(fields[3], UINT32_MAX, &c->argument)
+            || !scalar(fields[4], UINT32_MAX, &expected_generation[i])
+            || !scalar(fields[5], 4, &expected_package[i])) goto invalid;
+#if !defined(M44_G0_TEST_CONTROLS)
+        if (c->op == 5 || c->op == 6 || (c->op >= 14 && c->op != 17 &&
+            c->op != 22 && c->op != 23 && c->op != 24)) goto invalid;
+#endif
+    }
+    noun_tx_abort(); heap_scratch_reset();
+    if (m38_resource_runtime_init(m44_boot_control(), 65536, m44_boot_workspace(),
+                                 4u * 1024u * 1024u, &runtime)) goto invalid;
+    M46LoadedPackage initial;
+    if (m46_load(1, 0, &initial)
+        || m46_supervisor_init(initial.session, initial.descriptor, initial.handles,
+                               initial.compatibility)) goto invalid;
+    session = initial.session;
+    active_package = 1; live_replacement = 1;
+    size_t storage = m44_supervisor_storage_bytes() + sizeof(commands) + sizeof(descriptor)
+        + sizeof(handles) + sizeof(catalog_bytes) + sizeof(runtime) + sizeof(session)
+        + sizeof(expected_generation) + sizeof(expected_package) + sizeof(package_identity) + 24;
+    if (storage > 768u * 1024u) goto invalid;
+    uart_puts("M44 setup=0\r\nM44 storage="); number(storage); uart_puts("\r\n");
+    uint32_t checkpoints[2] = {0, 0}, tickets[2] = {0, 0};
+    if (!emit(0, M44_OK, 0)) goto failed;
+    m46_measure(0, 0, 0);
+    for (uint32_t i = 0; i < count; i++) {
+        const Command *c = &commands[i];
+        uint32_t result = M44_INVALID, token = 0;
+        uint64_t start = m46_ticks();
+        session = m46_supervisor_active_session();
+        if (expected_generation[i] != m46_supervisor_generation()
+            || expected_package[i] != active_package) goto observed;
+        if (c->op == 1) result = m44_supervisor_enqueue(c->slot, &c->row);
+        else if (c->op == 2) result = m44_supervisor_dispatch();
+        else if (c->op == 3 && c->argument < 2) {
+            result = m44_supervisor_capture(&token);
+            if (!result) checkpoints[c->argument] = token;
+        } else if (c->op == 4 && c->argument < 2)
+            result = m44_supervisor_restore(checkpoints[c->argument]);
+        else if (c->op == 17) result = m45_supervisor_manage(c->argument, c->slot);
+        else if (c->op == 22 && c->argument < 2 && c->slot && c->slot <= package_count) {
+            const M44State *state = m44_supervisor_state();
+            if (state->fenced) { result = M44_FENCED; goto observed; }
+            if (state->lifecycle != 1 || m46_supervisor_candidate_token()
+                || m46_supervisor_generation() == UINT32_MAX
+                || same(package_identity[c->slot - 1], package_identity[active_package - 1], 32)) goto observed;
+            M46LoadedPackage candidate;
+            uint32_t bank = session == m44_boot_session_storage() ? 1 : 0;
+            result = m46_load(c->slot, bank, &candidate);
+            if (!result) result = m46_supervisor_stage(candidate.session, candidate.descriptor,
+                candidate.handles, candidate.compatibility, expected_generation[i], &token);
+            if (!result) { tickets[c->argument] = token; staged_package = c->slot; }
+            else if (candidate.session && m46_resource_discard_unclaimed(candidate.session)) goto failed;
+            if (result == M44_FENCED) goto failed;
+        } else if (c->op == 23 && c->argument < 2) {
+            result = m46_supervisor_activate(tickets[c->argument], expected_generation[i]);
+            if (!result) { active_package = staged_package; staged_package = 0; }
+        } else if (c->op == 24 && c->argument < 2) {
+            result = m46_supervisor_cancel(tickets[c->argument], expected_generation[i]);
+            if (!result) staged_package = 0;
+        } else if (c->op == 7 || c->op == 13) {
+            const ResourceResultView *view = 0;
+            result = m38_resource_session_dispatch(session, NOUN_ZERO, &view);
+        } else if (c->op == 8) result = m38_resource_session_reset(runtime, session);
+        else if (c->op == 9) result = m38_resource_session_dispose(runtime, session);
+        else if ((c->op == 11 || c->op == 12) && c->argument < 2) {
+            M44ResourceInspection inspection;
+            uint8_t identity[32];
+            if (m44_supervisor_inspect(&inspection)) goto observed;
+            for (uint32_t j = 0; j < 32; j++) identity[j] = m46_supervisor_active_descriptor()->identity[j];
+            if (c->op == 11) identity[0] ^= 1;
+            result = m44_supervisor_restore_checked(checkpoints[c->argument], identity,
+                inspection.capability + (c->op == 12 ? 1 : 0));
+        }
+#if defined(M44_G0_TEST_CONTROLS)
+        else if (c->op == 5) { m44_supervisor_test_fault(c->slot, c->argument); result = M44_OK; }
+        else if (c->op == 6) { m44_supervisor_test_sequence(c->argument); result = M44_OK; }
+        else if (c->op == 20) result = m45_supervisor_test_resource_control(c->argument);
+        else if (c->op == 21) { m45_supervisor_test_epoch(c->argument); result = M44_OK; }
+        else if (c->op == 25) {
+            if (c->argument >= 10 && c->argument <= 12) stage_fault = c->argument;
+            else m46_supervisor_test_fault(c->argument);
+            result = M44_OK;
+        } else if (c->op == 26) result = m46_supervisor_test_busy_mask();
+        else if (c->op == 27) { m46_supervisor_test_generation(c->argument); result = M44_OK; }
+        else if (c->op == 28) { m46_supervisor_test_ticket_serial(c->argument); result = M44_OK; }
+#endif
+observed:
+        start = m46_ticks() - start;
+        if (!emit(i + 1, result, token)) goto failed;
+        m46_measure(i + 1, c->op, start);
+    }
+    uart_puts("M44 terminal=complete\r\n"); finish(); return 1;
+invalid:
+    uart_puts("M44 setup=1\r\n");
+failed:
+    uart_puts("M44 terminal=refuse\r\n"); finish(); return 1;
+}
+#endif
