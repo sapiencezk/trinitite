@@ -97,6 +97,14 @@ M48TurnResult m48_resident_turn(M48ResidentDriver *d,const M48LocalRequest *r) {
     out.response_admit=m47_provider_enqueue(sub+1,epoch,&row);
   }
   s=m44_supervisor_state();
+#if defined(M49_MANAGED_DELAY)
+  if (d->before_dispatch) {
+    d->before_dispatch_status=d->before_dispatch(d->before_dispatch_context);
+    if (d->before_dispatch_status!=M44_OK && d->before_dispatch_status!=M44_NO_WORK && d->before_dispatch_status!=M44_FULL) {
+      out.dispatch=d->before_dispatch_status; return out;
+    }
+  }
+#endif
   if (s->lifecycle==1) out.dispatch=m44_supervisor_dispatch();
   s=m44_supervisor_state(); p=s->providers[pub];
   if (!s->fenced && p.phase==M47_SERVICE_OPEN && p.tx_state==M47_TX_COMMITTED) {

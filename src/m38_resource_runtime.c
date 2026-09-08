@@ -148,6 +148,28 @@ static const char M41_ADMISSION_DOMAIN[] = "1499kernel:i2:m41:session-admission-
 static const char M41_VALUE_SCHEMA[] = "m41-numeric-value-schema-v1";
 static const char M41_PAYLOAD_SCHEMA[] = "m41-resource-payload-schema-v1";
 
+#if defined(M49_MANAGED_DELAY)
+static const char M49_PROFILE[] = "1499kernel-i2-m49-numeric-execution-profile-v1-time";
+static const char M49_RECORD_TAG[] = "m49-resource-session-admission-record";
+static const char M49_RECORD_SCHEMA[] = "m49-resource-session-admission-record-schema-v1";
+static const char M49_ADMISSION_DOMAIN[] = "1499kernel:i2:m49:session-admission-record:v1";
+static const char M49_VALUE_SCHEMA[] = "m49-numeric-value-schema-v1";
+static const char M49_PAYLOAD_SCHEMA[] = "m49-resource-payload-schema-v1";
+static uint32_t wave_scalar_max(uint32_t type,uint32_t count) {
+    if (count==4 && type==4) return UINT32_MAX;
+    return type==1 ? 1u : 65535u;
+}
+/* Scalar profile 0=frozen, 1=M41, 2=M49. The M49 branch is absent from M48. */
+static const char *wave_profile_value_schema(uint32_t profile) {
+    if (profile==2) return M49_VALUE_SCHEMA;
+    return profile ? M41_VALUE_SCHEMA : RESOURCE_VALUE_SCHEMA;
+}
+static const char *wave_profile_name(uint32_t profile) {
+    if (profile==2) return M49_PROFILE;
+    return profile ? M41_PROFILE : RESOURCE_PROFILE;
+}
+#endif
+
 /* Private fault vocabulary.  The public runtime header has no fault setter;
  * Wave B test builds translate their test-only enum at the boundary below. */
 typedef enum WaveFaultPoint {
@@ -801,7 +823,11 @@ static int wave_forward_binding(noun value, uint32_t expected, int signed_profil
         && wave_atom_text(fields[0], RESOURCE_BINDING_NAMES[expected])
         && wave_atom_text(fields[1], RESOURCE_BINDING_TAGS[expected])
         && wave_atom_text(fields[2], signed_profile && expected == 2
+#if defined(M49_MANAGED_DELAY)
+                          ? wave_profile_value_schema(signed_profile) : RESOURCE_BINDING_SCHEMAS[expected]);
+#else
                           ? M41_VALUE_SCHEMA : RESOURCE_BINDING_SCHEMAS[expected]);
+#endif
 }
 
 static int wave_record_validate(ResourceRuntime *runtime,
@@ -812,16 +838,28 @@ static int wave_record_validate(ResourceRuntime *runtime,
     noun tag, body, fields[11];
     if (!wave_pair(record, &tag, &body)) return 0;
     int signed_profile = wave_atom_text(tag, M41_RECORD_TAG);
+#if defined(M49_MANAGED_DELAY)
+    const char *record_schema=signed_profile ? M41_RECORD_SCHEMA : RESOURCE_RECORD_SCHEMA;
+    if (wave_atom_text(tag,M49_RECORD_TAG)) { signed_profile=2; record_schema=M49_RECORD_SCHEMA; }
+#endif
     if ((!signed_profile && !wave_atom_text(tag, RESOURCE_RECORD_TAG))
         || !wave_record(body, fields, 11)
+#if defined(M49_MANAGED_DELAY)
+        || !wave_atom_text(fields[0], record_schema)) {
+#else
         || !wave_atom_text(fields[0], signed_profile ? M41_RECORD_SCHEMA : RESOURCE_RECORD_SCHEMA)) {
+#endif
         return 0;
     }
     M38ResourceCoreDescriptor descriptor = {0};
     if (!wave_atom_bytes(fields[1], descriptor.core_id, 32)
         || !wave_atom_bytes(fields[4], descriptor.battery_id, 32)
         || !wave_atom_bytes(fields[5], descriptor.payload_id, 32)) return 0;
+#if defined(M49_MANAGED_DELAY)
+    descriptor.profile_id = wave_profile_name(signed_profile);
+#else
     descriptor.profile_id = signed_profile ? M41_PROFILE : RESOURCE_PROFILE;
+#endif
     uint32_t core_bytes;
     if (!wave_u(fields[2], RESOURCE_MAX_CORE_JAM_BYTES, &core_bytes)
         || core_bytes != entry->resource_core_jam_bytes
@@ -830,28 +868,49 @@ static int wave_record_validate(ResourceRuntime *runtime,
     uint8_t sha[32];
     sha256_hash(entry->resource_core_jam, entry->resource_core_jam_bytes, sha);
     if (!wave_identity(fields[3], sha)) return 0;
+#if defined(M49_MANAGED_DELAY)
+    noun bindings[15], supported[4], nested[13], limits[3];
+#else
     noun bindings[15], supported[3], nested[13], limits[3];
+#endif
     uint32_t count;
     if (!wave_list(fields[6], bindings, 15, &count) || count != 15) return 0;
     for (uint32_t i = 0; i < count; i++)
         if (!wave_forward_binding(bindings[i], i, signed_profile)) return 0;
+#if defined(M49_MANAGED_DELAY)
+    uint32_t scalar_count = 2u + (uint32_t)signed_profile;
+#else
     uint32_t scalar_count = signed_profile ? 3u : 2u;
+#endif
     if (!wave_atom_text(fields[7], descriptor.profile_id)
         || !wave_list(fields[8], supported, scalar_count, &count) || count != scalar_count)
         return 0;
     for (uint32_t i = 0; i < scalar_count; i++) {
         noun sf[3];
         if (!wave_record(supported[i], sf, 3)
+#if defined(M49_MANAGED_DELAY)
+            || !wave_atom_text(sf[0], i == 0 ? "BOOL" : i == 1 ? "UINT16" : i == 2 ? "INT16" : "TIME")
+#else
             || !wave_atom_text(sf[0], i == 0 ? "BOOL" : i == 1 ? "UINT16" : "INT16")
+#endif
             || !wave_u(sf[1], scalar_count, &core_bytes) || core_bytes != i + 1u
+#if defined(M49_MANAGED_DELAY)
+            || !wave_u(sf[2], wave_scalar_max(i+1,scalar_count), &core_bytes)
+            || core_bytes != wave_scalar_max(i+1,scalar_count))
+#else
             || !wave_u(sf[2], i == 0 ? 1 : 65535, &core_bytes)
             || core_bytes != (i == 0 ? 1u : 65535u))
+#endif
             return 0;
     }
     if (!wave_list(fields[9], nested, 13, &count) || count != 13) return 0;
     for (uint32_t i = 0; i < 13; i++)
         if (!wave_atom_text(nested[i], signed_profile && i == 0
+#if defined(M49_MANAGED_DELAY)
+                            ? wave_profile_value_schema(signed_profile) : RESOURCE_NESTED_SCHEMAS[i])) return 0;
+#else
                             ? M41_VALUE_SCHEMA : RESOURCE_NESTED_SCHEMAS[i])) return 0;
+#endif
     if (!wave_list(fields[10], limits, 3, &count) || count != 3
         || !wave_u(limits[0], 2000000, &core_bytes) || core_bytes != 2000000u
         || !wave_u(limits[1], 128000, &core_bytes) || core_bytes != 128000u
@@ -867,6 +926,9 @@ static int wave_record_validate(ResourceRuntime *runtime,
         || canonical_bytes > RESOURCE_MAX_RECORD_JAM_BYTES)
         return 0;
     const char *admission_domain = signed_profile ? M41_ADMISSION_DOMAIN : RESOURCE_ADMISSION_DOMAIN;
+#if defined(M49_MANAGED_DELAY)
+    if (signed_profile==2) admission_domain=M49_ADMISSION_DOMAIN;
+#endif
     size_t domain_bytes = wave_strlen(admission_domain);
     if (domain_bytes + canonical_bytes > RESOURCE_SAFETY_WORK_BYTES) return 0;
     uint8_t *preimage = (uint8_t *)runtime->workspace + RESOURCE_SAFETY_WORK_OFFSET;
@@ -893,7 +955,11 @@ static int wave_parse_plan(noun core, WavePlan *out)
         || !wave_atom_text(payload_tag, "m38-d0-r2-resource-payload")
         || !wave_record(payload_body, pf, 2)
         || (!wave_atom_text(pf[0], "m38-d0-r2-resource-payload-schema-v2")
-            && !wave_atom_text(pf[0], M41_PAYLOAD_SCHEMA))
+            && !wave_atom_text(pf[0], M41_PAYLOAD_SCHEMA)
+#if defined(M49_MANAGED_DELAY)
+            && !wave_atom_text(pf[0], M49_PAYLOAD_SCHEMA)
+#endif
+            )
         || !wave_record(pf[1], semantic, 5)
         || !wave_list(semantic[0], types, RESOURCE_MAX_PLAN_TYPES, &type_count)
         || !wave_list(semantic[1], instances, RESOURCE_MAX_PLAN_INSTANCES, &instance_count)
@@ -901,6 +967,9 @@ static int wave_parse_plan(noun core, WavePlan *out)
         return 0;
     WavePlan plan = {0};
     plan.scalar_count = wave_atom_text(pf[0], M41_PAYLOAD_SCHEMA) ? 3u : 2u;
+#if defined(M49_MANAGED_DELAY)
+    if (wave_atom_text(pf[0],M49_PAYLOAD_SCHEMA)) plan.scalar_count=4;
+#endif
     plan.type_count = type_count;
     plan.instance_count = instance_count;
     plan.formula = formula;
@@ -946,7 +1015,11 @@ static int wave_parse_plan(noun core, WavePlan *out)
                 || type->value_ids[j] != j + 1u
                 || !wave_u(vf[2], plan.scalar_count, &type->value_types[j])
                 || type->value_types[j] == 0
+#if defined(M49_MANAGED_DELAY)
+                || !wave_u(vf[3], wave_scalar_max(type->value_types[j],plan.scalar_count),
+#else
                 || !wave_u(vf[3], type->value_types[j] == 1 ? 1 : 65535,
+#endif
                            &type->value_initials[j]))
                 return 0;
         }
@@ -1026,7 +1099,11 @@ static int wave_core_validate(ResourceRuntime *runtime, noun core,
 {
     noun formula, payload;
     if (!wave_pair(core, &formula, &payload) || !wave_parse_plan(core, plan)) return 0;
+#if defined(M49_MANAGED_DELAY)
+    if (descriptor->profile_id != wave_profile_name(plan->scalar_count-2))
+#else
     if (descriptor->profile_id != (plan->scalar_count == 3 ? M41_PROFILE : RESOURCE_PROFILE))
+#endif
         return 0;
     uint8_t digest[32];
     if (!wave_domain_digest(runtime, formula, RESOURCE_FORMULA_DOMAIN, digest)
@@ -1830,7 +1907,11 @@ static int wave_handle_build(const ResourceSession *session, uint32_t slot,
 
 static const char *wave_value_schema(const WavePlan *plan)
 {
+#if defined(M49_MANAGED_DELAY)
+    return wave_profile_value_schema(plan->scalar_count-2);
+#else
     return plan->scalar_count == 3 ? M41_VALUE_SCHEMA : RESOURCE_VALUE_SCHEMA;
+#endif
 }
 
 static int wave_value_build(const WavePlan *plan, uint32_t id, uint32_t type, uint32_t value, noun *out)
@@ -1930,7 +2011,11 @@ static int wave_outputs_build(const WavePlan *plan, noun source,
             if (!wave_record(values[j], vf, 3) || !wave_u(vf[0], RESOURCE_MAX_PLAN_VALUES, &id)
                 || id != local || !wave_u(vf[1], plan->scalar_count, &kind)
                 || kind != type->value_types[local - 1u]
+#if defined(M49_MANAGED_DELAY)
+                || !wave_u(vf[2], wave_scalar_max(kind,plan->scalar_count), &raw)
+#else
                 || !wave_u(vf[2], kind == 1 ? 1 : 65535, &raw)
+#endif
                 || !wave_value_build(plan, instance * 1024u + local, kind, raw, &typed[j])) return 0;
         }
         noun list;
@@ -2027,7 +2112,11 @@ static int wave_stimulus_validate(const WavePlan *plan, noun stimulus)
             || !wave_atom_text(vf[0], wave_value_schema(plan))
             || !wave_u(vf[1], 0xFFFF, &id) || id != expected
             || !wave_u(vf[2], plan->scalar_count, &kind) || kind != type->value_types[local - 1u]
+#if defined(M49_MANAGED_DELAY)
+            || !wave_u(vf[3], wave_scalar_max(kind,plan->scalar_count), &raw)) return 0;
+#else
             || !wave_u(vf[3], kind == 1 ? 1 : 65535, &raw)) return 0;
+#endif
     }
     return 1;
 }
@@ -2195,7 +2284,11 @@ static int wave_snapshot_apply(const ResourceSession *session, const WavePlan *p
                 || value_id != type->value_ids[j]
                 || !wave_u(value_fields[2], plan->scalar_count, &value_type)
                 || value_type != type->value_types[j]
+#if defined(M49_MANAGED_DELAY)
+                || !wave_u(value_fields[3], wave_scalar_max(value_type,plan->scalar_count), &raw)) return 0;
+#else
                 || !wave_u(value_fields[3], value_type == 1 ? 1 : 65535, &raw)) return 0;
+#endif
             candidate.state_values[instance_index][j] = raw;
         }
         candidate.state_ids[instance_index] = state_id;
@@ -2577,7 +2670,11 @@ static int wave_runtime_product_commit(const ResourceSession *session,
                 || value_id != type->value_ids[j]
                 || !wave_u(value_fields[1], plan->scalar_count, &value_type)
                 || value_type != type->value_types[j]
+#if defined(M49_MANAGED_DELAY)
+                || !wave_u(value_fields[2], wave_scalar_max(value_type,plan->scalar_count), &raw)) return 0;
+#else
                 || !wave_u(value_fields[2], value_type == 1 ? 1 : 65535, &raw)) return 0;
+#endif
             candidate.state_values[instance_index][j] = raw;
         }
         candidate.state_ids[instance_index] = state_id;
@@ -3013,7 +3110,11 @@ static M38Status m44_group_staged(ResourceSession *session, M44GroupOperation gr
                     if (!slot->state_ids[j] || slot->state_ids[j]>type->state_count)
                         return M38_STATUS_REQUEST_INVALID;
                     for (uint32_t k=0;k<type->value_count;k++)
+#if defined(M49_MANAGED_DELAY)
+                        if (slot->state_values[j][k]>wave_scalar_max(type->value_types[k],plan->scalar_count))
+#else
                         if (slot->state_values[j][k]>(type->value_types[k]==1 ? 1u : 65535u))
+#endif
                             return M38_STATUS_REQUEST_INVALID;
                 }
             } else

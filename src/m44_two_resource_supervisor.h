@@ -23,6 +23,9 @@ typedef struct {
       batch_bound;
   uint32_t source_ids[16], target_ids[16], types[16];
   uint32_t ingress_count[2], output_count[2], signed_values[2];
+#if defined(M49_MANAGED_DELAY)
+  uint32_t time_values[2];
+#endif
   M44Boundary ingress[2][128], outputs[2][128];
 } M44Descriptor;
 typedef struct {
@@ -40,6 +43,14 @@ typedef struct {
   uint64_t tx_token, rx_highwater, rx_token;
 } M47ProviderLedger;
 #endif
+#if defined(M49_MANAGED_DELAY)
+typedef struct { uint32_t slot, instance_id; } M49TimerBinding;
+enum { M49_TIMER_FREE=0, M49_TIMER_ARMED=1, M49_TIMER_QUEUED=2 };
+typedef struct {
+  uint32_t phase, duration_ms;
+  uint64_t generation, highwater, deadline_ms, not_before_turn;
+} M49TimerLedger;
+#endif
 typedef struct {
   uint32_t cursor, sequence, fault, fenced, counts[2], output_count;
   M44Row queues[2][16], outputs[32];
@@ -49,6 +60,9 @@ typedef struct {
 #endif
 #if defined(M47_MANAGED_SERVICES)
   M47ProviderLedger providers[2];
+#endif
+#if defined(M49_MANAGED_DELAY)
+  M49TimerLedger timer;
 #endif
 } M44State;
 typedef enum {
@@ -87,6 +101,14 @@ M44Status m47_provider_receive_hold(uint32_t slot,uint32_t epoch,uint32_t pendin
 uint32_t m47_provider_receive_holds(void);
 M44Status m47_provider_claim(uint32_t slot, uint32_t epoch, uint64_t token);
 M44Status m47_provider_enqueue(uint32_t slot, uint32_t epoch, const M44Row *row);
+#endif
+#if defined(M49_MANAGED_DELAY)
+/* Boot only, validates private timer boundary signatures before claiming. */
+M44Status m49_supervisor_init(ResourceSession *, const M44Descriptor *,
+    const M44Saved handles[2], const M47ProviderBinding bindings[2], M49TimerBinding timer);
+/* Trusted monotonic sample, once before dispatch per resident turn. Expiry
+ * admission is allowed while STOPPED; queue refusal retains timer ownership. */
+M44Status m49_supervisor_clock(uint32_t epoch, uint64_t now_ms, uint64_t turn);
 #endif
 M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *);
 M44Status m44_supervisor_dispatch(void);

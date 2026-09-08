@@ -143,6 +143,13 @@ M39_RESOURCE_WITNESS ?= 0
 M44_TWO_RESOURCE ?= 0
 M44_G0_TEST_CONTROLS ?= 0
 M47_MANAGED_SERVICES ?= 0
+M49_MANAGED_DELAY ?= 0
+ifeq ($(M49_MANAGED_DELAY),1)
+ifneq ($(M48_RESIDENT),1)
+$(error M49_MANAGED_DELAY=1 requires M48_RESIDENT=1)
+endif
+CFLAGS += -DM49_MANAGED_DELAY=1
+endif
 M48_RESIDENT ?= 0
 ifeq ($(M48_RESIDENT),1)
 ifneq ($(M47_MANAGED_SERVICES),1)
@@ -560,6 +567,9 @@ ifeq ($(M44_TWO_RESOURCE),1)
 M38_D8_WAVE_A_OBJS += m44_two_resource_supervisor.o m44_device_witness.o
 ifeq ($(M48_RESIDENT),1)
 M38_D8_WAVE_A_OBJS += m48_resident_driver.o m48_report.o
+ifeq ($(M49_MANAGED_DELAY),1)
+M38_D8_WAVE_A_OBJS += m49_clock_adapter.o
+endif
 endif
 endif
 ifeq ($(M44_G0_TEST_CONTROLS),1)
@@ -600,6 +610,9 @@ CONFIG_KEY := $(CONFIG_KEY)-m47
 endif
 ifeq ($(M48_RESIDENT),1)
 CONFIG_KEY := $(CONFIG_KEY)-m48
+endif
+ifeq ($(M49_MANAGED_DELAY),1)
+CONFIG_KEY := $(CONFIG_KEY)-m49
 endif
 ifeq ($(M44_G0_TEST_CONTROLS),1)
 CONFIG_KEY := $(CONFIG_KEY)-g0test
@@ -820,3 +833,8 @@ FORCE:
 	run run-pill run-kernel debug deploy test test-media-fake \
 	test-media-rpi4-build test-digital-out-fake test-digital-in-fake \
 	test-digital-in-production-source test-build-config clean locked-clean FORCE
+
+ifeq ($(M49_MANAGED_DELAY),1)
+$(OBJDIR)/m44_device_witness.o: $(SRCDIR)/m49_device_resident.inc
+$(OBJDIR)/m44_two_resource_supervisor.o $(OBJDIR)/m49_clock_adapter.o: $(SRCDIR)/m49_clock_adapter.h
+endif

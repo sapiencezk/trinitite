@@ -38,6 +38,14 @@ typedef struct {
   uint64_t rx_token;
   uint32_t tx_valid,tx_observed,tx_epoch,tx_value;
   uint64_t tx_token;
+#if defined(M49_MANAGED_DELAY)
+  /* Optional M49 boot hook, once after admissions and before dispatch.
+   * It may publish one trusted expiry through the supervisor. Null retains
+   * M48 behavior. The hook must be nonblocking and must not reenter driver. */
+  M44Status (*before_dispatch)(void *);
+  void *before_dispatch_context;
+  uint32_t before_dispatch_status;
+#endif
 } M48ResidentDriver;
 /* Cold boot only, after successful supervisor initialization; no IEC execution.
  * No allocation, singleton authority remains owned by the supervisor. */

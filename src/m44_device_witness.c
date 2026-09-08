@@ -43,6 +43,10 @@ static ResourceSession *session;
 #if defined(M47_MANAGED_SERVICES)
 static uint32_t managed_services;
 static M47ProviderBinding m47_bindings[2];
+#if defined(M49_MANAGED_DELAY)
+static uint32_t managed_delay;
+static M49TimerBinding m49_timer_binding;
+#endif
 #endif
 #if defined(M48_RESIDENT)
 static uint32_t resident_mode;
@@ -161,6 +165,15 @@ static int hash_noun(noun n, const char *domain, int separator, uint8_t out[32])
     sha256_final(&context, out);
     return 1;
 }
+#if defined(M49_MANAGED_DELAY)
+static uint32_t descriptor_timed_profile;
+#endif
+static uint32_t descriptor_type_max(void) {
+#if defined(M49_MANAGED_DELAY)
+    if (descriptor_timed_profile) return 4;
+#endif
+    return 3;
+}
 static int boundaries(noun n, M44Boundary *out, uint32_t *count) {
     noun rows[M44_MAX_BOUNDARIES], fields[2], values[16], value[2];
     if (!list(n, rows, M44_MAX_BOUNDARIES, count)) return 0;
@@ -172,7 +185,7 @@ static int boundaries(noun n, M44Boundary *out, uint32_t *count) {
         for (uint32_t j = 0; j < row->count; j++) {
             if (!record(values[j], value, 2)
                 || !scalar(value[0], 65535, &row->values[j].id) || !row->values[j].id
-                || !scalar(value[1], 3, &row->values[j].type) || !row->values[j].type) return 0;
+                || !scalar(value[1], descriptor_type_max(), &row->values[j].type) || !row->values[j].type) return 0;
             for (uint32_t k = 0; k < j; k++)
                 if (row->values[k].id == row->values[j].id) return 0;
         }
@@ -197,8 +210,14 @@ static int descriptor_read(noun value, noun expected) {
     uint32_t version, capacity;
     uint8_t supplied[32], source[32], provenance[32], paths[2][132];
     uint32_t dots[2];
-    if (!pair(value, &tag, &body) || !text_is(tag, "m44-two-resource-deployment-v1")
-        || !record(body, fields, 7) || !scalar(fields[0], 1, &version) || version != 1
+    if (!pair(value, &tag, &body)) return 0;
+#if defined(M49_MANAGED_DELAY)
+    descriptor_timed_profile=text_is(tag,"m49-two-resource-deployment-v1");
+    if (!descriptor_timed_profile && !text_is(tag,"m44-two-resource-deployment-v1")) return 0;
+#else
+    if (!text_is(tag,"m44-two-resource-deployment-v1")) return 0;
+#endif
+    if (!record(body, fields, 7) || !scalar(fields[0], 1, &version) || version != 1
         || !digest(fields[1], source) || !digest(fields[2], provenance)
         || !record(fields[3], resources, 2) || !record(fields[4], link, 5)
         || !scalar(fields[5], 16, &descriptor.batch_bound) || !descriptor.batch_bound
@@ -229,7 +248,7 @@ static int descriptor_read(noun value, noun expected) {
         if (!record(values[i], binding, 3)
             || !scalar(binding[0], 65535, &descriptor.source_ids[i]) || !descriptor.source_ids[i]
             || !scalar(binding[1], 65535, &descriptor.target_ids[i]) || !descriptor.target_ids[i]
-            || !scalar(binding[2], 3, &descriptor.types[i]) || !descriptor.types[i]) return 0;
+            || !scalar(binding[2], descriptor_type_max(), &descriptor.types[i]) || !descriptor.types[i]) return 0;
     }
     return 1;
 }
@@ -242,7 +261,12 @@ static int payload_matches(noun core, uint32_t slot) {
         || !text_is(tag, "m38-d0-r2-resource-payload") || !record(body, pf, 2)
         || !record(pf[1], fields, 5)) return 0;
     descriptor.signed_values[slot] = text_is(pf[0], "m41-resource-payload-schema-v1");
+#if defined(M49_MANAGED_DELAY)
+    descriptor.time_values[slot]=descriptor_timed_profile && text_is(pf[0],"m49-resource-payload-schema-v1");
+    if (!descriptor.time_values[slot] && !descriptor.signed_values[slot] && !text_is(pf[0],"m38-d0-r2-resource-payload-schema-v2")) return 0;
+#else
     if (!descriptor.signed_values[slot] && !text_is(pf[0], "m38-d0-r2-resource-payload-schema-v2")) return 0;
+#endif
     for (uint32_t direction = 0; direction < 2; direction++) {
         uint32_t count;
         const M44Boundary *expected = direction ? descriptor.outputs[slot] : descriptor.ingress[slot];
@@ -257,7 +281,7 @@ static int payload_matches(noun core, uint32_t slot) {
             for (uint32_t j = 0; j < n; j++) {
                 uint32_t id, type;
                 if (!record(values[j], value, 2) || !scalar(value[0], 65535, &id)
-                    || !scalar(value[1], 3, &type)
+                    || !scalar(value[1], descriptor_type_max(), &type)
                     || id != expected[i].values[j].id || type != expected[i].values[j].type) return 0;
             }
         }
@@ -274,6 +298,9 @@ static int admission_matches(noun admission, uint32_t slot) {
     const char *domain = descriptor.signed_values[slot]
         ? "1499kernel:i2:m41:session-admission-record:v1"
         : "1499kernel:i2:m38:resource-abi-v1:session-admission-record:v1";
+#if defined(M49_MANAGED_DELAY)
+    if (descriptor.time_values[slot]) domain="1499kernel:i2:m49:session-admission-record:v1";
+#endif
     return hash_noun(admission, domain, 0, identity)
         && same(identity, descriptor.admission_identity[slot], 32);
 }
@@ -286,7 +313,7 @@ static int typed_row(noun value, M44Row *out) {
     for (uint32_t i = 0; i < out->count; i++) {
         M44Value *v = &out->values[i];
         if (!record(values[i], row, 3) || !scalar(row[0], 65535, &v->id)
-            || !scalar(row[1], 3, &v->type) || !scalar(row[2], 65535, &v->raw)) return 0;
+            || !scalar(row[1], descriptor_type_max(), &v->type) || !scalar(row[2], descriptor_type_max()==4 && v->type==4 ? UINT32_MAX : 65535, &v->raw)) return 0;
     }
     return 1;
 }
@@ -340,6 +367,14 @@ static int emit(uint32_t index, uint32_t status, uint32_t token) {
         uart_putc(']');
     }
 #endif
+#if defined(M49_MANAGED_DELAY)
+    if (managed_delay) {
+        const M49TimerLedger *timer=&state->timer;
+        uart_puts(",\"timer\":["); number(timer->phase);uart_putc(',');number(timer->generation);
+        uart_putc(',');number(timer->highwater);uart_putc(',');number(timer->duration_ms);
+        uart_putc(',');number(timer->deadline_ms);uart_putc(',');number(timer->not_before_turn);uart_putc(']');
+    }
+#endif
     uart_puts(",\"fenced\":"); number(state->fenced); uart_puts(",\"queues\":[");
     for (uint32_t slot = 0; slot < 2; slot++) {
         if (slot) uart_putc(',');
@@ -386,6 +421,7 @@ static void finish(void) {
 }
 
 #include "m47_device_witness.inc"
+#include "m49_device_resident.inc"
 #include "m48_device_resident.inc"
 
 int m44_device_try_boot(noun input) {
@@ -405,7 +441,14 @@ int m44_device_try_boot(noun input) {
     managed_services = text_is(tag,"m47-device-boot-v1");
 #if defined(M48_RESIDENT)
     resident_mode=text_is(tag,"m48-resident-boot-v1");
+#if defined(M49_MANAGED_DELAY)
+    managed_delay=text_is(tag,"m49-resident-boot-v1");
+    if (managed_delay) resident_mode=1;
+#endif
 #if defined(M44_G0_TEST_CONTROLS)
+#if defined(M49_MANAGED_DELAY)
+    if (text_is(tag,"m49-driver-test-v1")) { managed_delay=1; resident_mode=2; }
+#endif
     if (text_is(tag,"m48-driver-test-v1")) resident_mode=2;
     if (text_is(tag,"m48-backpressure-test-v1")) resident_mode=3;
 #endif
@@ -419,7 +462,12 @@ int m44_device_try_boot(noun input) {
 #endif
     #if defined(M47_MANAGED_SERVICES)
     if (managed_services) {
-        if (!record(body,envelope,6) || !m47_descriptor_read(envelope[0],envelope[1]) ||
+        if (!record(body,envelope,6) ||
+#if defined(M49_MANAGED_DELAY)
+            !(managed_delay ? m49_descriptor_read(envelope[0],envelope[1]) : m47_descriptor_read(envelope[0],envelope[1])) ||
+#else
+            !m47_descriptor_read(envelope[0],envelope[1]) ||
+#endif
             !m47_transport_config(envelope[5])) goto invalid;
     } else
     if (!record(body, envelope, 5) || !descriptor_read(envelope[0], envelope[1])) goto invalid;
@@ -450,6 +498,9 @@ int m44_device_try_boot(noun input) {
             4) || !scalar(command[0],
 #if defined(M45_MANAGED_LIFECYCLE)
             #if defined(M47_MANAGED_SERVICES)
+#if defined(M49_MANAGED_DELAY) && defined(M44_G0_TEST_CONTROLS)
+            managed_delay ? 43 :
+#endif
             managed_services ? 39 :
 #endif
             managed ? 21 : 16,
@@ -463,7 +514,13 @@ int m44_device_try_boot(noun input) {
         if (managed_services) {
             uint8_t token[8];
             if (!scalar(command[4],UINT32_MAX,&c->epoch) ||
-                !noun_atom_read_fixed(command[5],token,8) || token[7]>127) goto invalid;
+                !noun_atom_read_fixed(command[5],token,8) ||
+#if defined(M49_MANAGED_DELAY) && defined(M44_G0_TEST_CONTROLS)
+                (!(managed_delay && (c->op==40 || c->op==42 || c->op==43)) && token[7]>127)
+#else
+                token[7]>127
+#endif
+                ) goto invalid;
             c->provider_token=0;
             for (uint32_t j=0;j<8;j++) c->provider_token |= (uint64_t)token[j]<<(8*j);
         }
@@ -551,6 +608,9 @@ int m44_device_try_boot(noun input) {
 #if defined(M45_MANAGED_LIFECYCLE)
     if ((
 #if defined(M47_MANAGED_SERVICES)
+#if defined(M49_MANAGED_DELAY)
+         managed_delay ? m49_supervisor_init(session,&descriptor,handles,m47_bindings,m49_timer_binding) :
+#endif
          managed_services ? m47_supervisor_init(session,&descriptor,handles,m47_bindings) :
 #endif
          managed ? m45_supervisor_init(session, &descriptor, handles)
@@ -562,6 +622,9 @@ int m44_device_try_boot(noun input) {
         + sizeof(handles) + sizeof(catalog_bytes) + sizeof(runtime) + sizeof(session);
 #if defined(M48_RESIDENT)
     storage += m48_storage_bytes()+sizeof(resident_mode);
+#if defined(M49_MANAGED_DELAY)
+    storage += sizeof(managed_delay)+sizeof(m49_timer_binding);
+#endif
 #endif
     if (storage >
 #if defined(M46_LIVE_REPLACEMENT)

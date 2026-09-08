@@ -11,6 +11,38 @@ static uint32_t m48_input_refusals;
 static uint64_t m48_counter(void) {
     uint64_t value; __asm__ volatile("mrs %0, cntvct_el0":"=r"(value)); return value;
 }
+#if defined(M49_MANAGED_DELAY)
+#include "m49_clock_adapter.h"
+static uint64_t m49_clock_turn;
+#if defined(M44_G0_TEST_CONTROLS)
+static uint64_t m49_fixture_ms;
+static uint32_t m49_fixture_dispatch_fault;
+static M44Status m49_fake_before_dispatch(void *unused) {
+    (void)unused;
+    const M44State *state=m44_supervisor_state();
+    M44Status status=state ? m49_supervisor_clock(state->epoch,m49_fixture_ms,m48_turns) : M44_INVALID;
+    state=m44_supervisor_state();
+    /* G0 only: fail publication after local/provider/clock admission so the
+     * probe reaches the actual IEC ARM/CANCEL transaction. */
+    if (m49_fixture_dispatch_fault && state && state->lifecycle==1 &&
+        (state->counts[0] || state->counts[1]) &&
+        (status==M44_OK || status==M44_NO_WORK || status==M44_FULL)) {
+        m44_supervisor_test_fault(m49_fixture_dispatch_fault,0);
+        m49_fixture_dispatch_fault=0;
+    }
+    return status;
+}
+#endif
+static M44Status m49_before_dispatch(void *unused) {
+    (void)unused;
+    uint64_t ticks=m48_counter();
+    uint64_t now;
+    if (!m49_clock_milliseconds(ticks,m48_frequency,&now)) return M44_INVALID;
+    const M44State *state=m44_supervisor_state();
+    if (!state || m49_clock_turn==UINT64_MAX) return M44_INVALID;
+    return m49_supervisor_clock(state->epoch,now,++m49_clock_turn);
+}
+#endif
 static uint32_t m48_word(uint32_t offset) {
     uint32_t value=0;
     for (uint32_t i=0;i<4;i++) value|=(uint32_t)m48_input[offset+i]<<(8*i);
@@ -74,7 +106,13 @@ static int m48_emit(uint32_t index,uint32_t request,const M48TurnResult *r) {
     for (uint32_t i=0;i<9;i++) { if (i) uart_putc(','); number(held[i]); }
     uart_puts("],\"memory\":["); number(heap_cells_used(HEAP_MODE_PERSIST)); uart_putc(',');
     number(heap_cells_used(HEAP_MODE_SCRATCH)); uart_putc(','); number(atom_store_bytes_used());
-    uart_puts("],\"input_refusals\":"); number(m48_input_refusals); uart_puts("}\r\n");
+
+#if defined(M49_MANAGED_DELAY)
+    if (managed_delay) { uart_puts("],\"clock\":"); number(m48_driver.before_dispatch_status); uart_puts(",\"input_refusals\":"); }
+    else
+#endif
+    { uart_puts("],\"input_refusals\":"); }
+    number(m48_input_refusals); uart_puts("}\r\n");
     return emit(index,r->local==M48_SKIPPED?0:r->local,0);
 }
 #if defined(M44_G0_TEST_CONTROLS)
@@ -106,6 +144,9 @@ static int m48_qualified_run(uint32_t count,uint32_t blocked) {
     M48Adapter adapter={.context=&m48_fixture,.receive=m48_fake_rx,.completion=m48_fake_completion,
         .submit=m48_fake_submit,.release_ready=m48_fake_release};
     if (m48_resident_init(&m48_driver,m47_bindings,&adapter)!=M44_OK) return 0;
+#if defined(M49_MANAGED_DELAY)
+    if (managed_delay) m48_driver.before_dispatch=m49_fake_before_dispatch;
+#endif
     M48TurnResult empty={M48_SKIPPED,M48_SKIPPED,M48_SKIPPED,M48_SKIPPED,M48_SKIPPED,
         M48_SKIPPED,M48_SKIPPED,M48_SKIPPED,M48_SKIPPED};
     if (blocked && !m48_report_begin()) return 0;
@@ -138,7 +179,21 @@ static int m48_qualified_run(uint32_t count,uint32_t blocked) {
         else if (c->op==5) m44_supervisor_test_fault(c->slot,c->argument);
         else if (c->op==6 && c->argument<=16) {
             for (uint32_t j=0;j<c->argument;j++) if (m44_supervisor_enqueue(c->slot,&c->row)!=M44_OK) return 0;
-        } else if (c->op!=2) return 0;
+        }
+#if defined(M49_MANAGED_DELAY)
+        else if (managed_delay && c->op==40) m49_fixture_ms=c->provider_token;
+        else if (managed_delay && c->op==41 && c->argument>=1 && c->argument<=2) m49_fixture_dispatch_fault=c->argument;
+        /* G0 external facts sharing one boundary: a local request or bounded
+         * queue prefill arrives with this turn's clock sample. */
+        else if (managed_delay && c->op==42 && c->argument==0) {
+            m49_fixture_ms=c->provider_token; request.kind=M48_LOCAL_INGRESS;
+        } else if (managed_delay && c->op==43 && c->argument<=16) {
+            for (uint32_t j=0;j<c->argument;j++)
+                if (m44_supervisor_enqueue(c->slot,&c->row)!=M44_OK) return 0;
+            m49_fixture_ms=c->provider_token;
+        }
+#endif
+        else if (c->op!=2) return 0;
         m48_turns++;
         M48TurnResult result=m48_resident_turn(&m48_driver,request.kind?&request:0);
         if (blocked) {
@@ -160,6 +215,12 @@ static size_t m48_storage_bytes(void) {
         +sizeof(m48_input_last)+sizeof(m48_frequency)+sizeof(m48_input_refusals)+M48_REPORT_CAPACITY+32
 #if defined(M44_G0_TEST_CONTROLS)
         +sizeof(m48_fixture)
+#if defined(M49_MANAGED_DELAY)
+        +sizeof(m49_fixture_ms)+sizeof(m49_fixture_dispatch_fault)
+#endif
+#endif
+#if defined(M49_MANAGED_DELAY)
+        +sizeof(m49_clock_turn)
 #endif
         ;
 }
@@ -173,6 +234,16 @@ static int m48_run(uint32_t mode,uint32_t count) {
     if (!m48_transport_init(&adapter) || m48_resident_init(&m48_driver,m47_bindings,&adapter)!=M44_OK) return 0;
     __asm__ volatile("mrs %0, cntfrq_el0":"=r"(m48_frequency));
     if (!m48_frequency || !m48_report_begin()) return 0;
+#if defined(M49_MANAGED_DELAY)
+    if (managed_delay) {
+        if (m48_frequency>UINT64_MAX/1000u) return 0;
+        m48_driver.before_dispatch=m49_before_dispatch;
+    }
+#endif
+#if defined(M49_MANAGED_DELAY)
+    if (managed_delay) uart_puts("M49 resident=ready\r\n");
+    else
+#endif
     uart_puts("M48 resident=ready\r\n");
     uint32_t index=0,dirty=0;
     if (!emit(index,0,0)) return 0;
@@ -188,6 +259,9 @@ static int m48_run(uint32_t mode,uint32_t count) {
         int progress=input || result.dispatch==M44_OK || result.dispatch==M44_RETIRED ||
             result.completion_admit==M44_OK || result.receive_admit==M44_OK ||
             result.response_admit==M44_OK || result.claim==M44_OK;
+#if defined(M49_MANAGED_DELAY)
+        progress |= managed_delay && m48_driver.before_dispatch_status==M44_OK;
+#endif
         dirty |= progress;
         if (dirty && m48_report_idle()) {
             if (index!=UINT32_MAX) index++;
