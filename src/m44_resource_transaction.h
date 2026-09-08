@@ -38,6 +38,17 @@ M38Status m44_resource_group(ResourceSession *session, const void *owner,
     int restore, const noun handles[2], const noun snapshots[2],
     const M44PublicationHooks *hooks, const ResourceResultView **out_view);
 
+#if defined(M45_MANAGED_LIFECYCLE)
+/* Private atomic aggregate initialize. Copy the immutable, admitted compiler
+ * initializer image (explicit ECC IDs and typed raw values), without executing
+ * an algorithm or interpreting IEC defaults. Preserve handle identities; advance
+ * both snapshot nonces and revoke snapshots only on successful publication.
+ * Result has the same two RESTORE receipts as the private M44 group operation. */
+M38Status m45_resource_reinitialize(ResourceSession *session, const void *owner,
+    const noun handles[2], const M44PublicationHooks *hooks,
+    const ResourceResultView **out_view);
+#endif
+
 /* Zero-slot publication for enqueue or terminal queue-head retirement. Preserves D8
  * result owners/generations; all persistent copying precedes the fixed-store
  * supervisor commit. A failed enqueue preserves the usable prior root; failed
@@ -64,5 +75,11 @@ M38Status m44_resource_inspect(ResourceSession *session, const void *owner,
 /* Qualification-only copy faults: 1 after all copies, 2 after first group
  * candidate copy. Called from prepare, consumed by the corresponding stage. */
 void m44_resource_test_fail_publication(ResourceSession *session, uint32_t point);
+#if defined(M45_MANAGED_LIFECYCLE)
+/* Qualification only: 1 arms one broker-begin refusal; 2 exhausts both snapshot
+ * nonces to exercise reset's boundary. No production fault/counter setters. */
+M38Status m45_resource_test_control(ResourceSession *session, const void *owner,
+    uint32_t point);
+#endif
 #endif
 #endif

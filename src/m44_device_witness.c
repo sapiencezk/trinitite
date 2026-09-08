@@ -279,6 +279,13 @@ static int emit(uint32_t index, uint32_t status, uint32_t token) {
     uart_puts("M44 {\"row\":"); number(index); uart_puts(",\"status\":"); number(status);
     uart_puts(",\"token\":"); number(token); uart_puts(",\"cursor\":"); number(state->cursor);
     uart_puts(",\"sequence\":"); number(state->sequence); uart_puts(",\"fault\":"); number(state->fault);
+#if defined(M45_MANAGED_LIFECYCLE)
+    if (m45_supervisor_is_managed()) {
+        uart_puts(",\"managed\":"); number(1);
+        uart_puts(",\"lifecycle\":"); number(state->lifecycle);
+        uart_puts(",\"epoch\":"); number(state->epoch);
+    }
+#endif
     uart_puts(",\"fenced\":"); number(state->fenced); uart_puts(",\"queues\":[");
     for (uint32_t slot = 0; slot < 2; slot++) {
         if (slot) uart_putc(',');
@@ -327,7 +334,13 @@ static void finish(void) {
 int m44_device_try_boot(noun input) {
     noun tag, body, envelope[5], catalog[2], entry[2], rows[MAX_COMMANDS], command[4];
     uint32_t count, boot_failure;
+#if defined(M45_MANAGED_LIFECYCLE)
+    if (!pair(input, &tag, &body)) return 0;
+    uint32_t managed = text_is(tag, "m45-device-boot-v1");
+    if (!managed && !text_is(tag, "m44-device-boot-v1")) return 0;
+#else
     if (!pair(input, &tag, &body) || !text_is(tag, "m44-device-boot-v1")) return 0;
+#endif
     if (!record(body, envelope, 5) || !descriptor_read(envelope[0], envelope[1])
         || !record(envelope[2], catalog, 2) || !list(envelope[3], rows, MAX_COMMANDS, &count)
         || !scalar(envelope[4], 5, &boot_failure)) goto invalid;
@@ -342,11 +355,21 @@ int m44_device_try_boot(noun input) {
     }
     for (uint32_t i = 0; i < count; i++) {
         Command *c = &commands[i];
-        if (!record(rows[i], command, 4) || !scalar(command[0], 16, &c->op) || !c->op
+        if (!record(rows[i], command, 4) || !scalar(command[0],
+#if defined(M45_MANAGED_LIFECYCLE)
+            managed ? 21 : 16,
+#else
+            16,
+#endif
+            &c->op) || !c->op
             || !scalar(command[1], 2, &c->slot) || !typed_row(command[2], &c->row)
             || !scalar(command[3], UINT32_MAX, &c->argument)) goto invalid;
 #if !defined(M44_G0_TEST_CONTROLS)
-        if (c->op == 5 || c->op == 6 || c->op >= 14) goto invalid;
+        if (c->op == 5 || c->op == 6 || (c->op >= 14
+#if defined(M45_MANAGED_LIFECYCLE)
+            && c->op != 17
+#endif
+            )) goto invalid;
 #endif
     }
     /* All long-lived boot material is now fixed C storage. */
@@ -418,7 +441,12 @@ int m44_device_try_boot(noun input) {
         goto invalid;
     }
 #endif
+#if defined(M45_MANAGED_LIFECYCLE)
+    if ((managed ? m45_supervisor_init(session, &descriptor, handles)
+                 : m44_supervisor_init(session, &descriptor, handles)) != M44_OK) goto invalid;
+#else
     if (m44_supervisor_init(session, &descriptor, handles) != M44_OK) goto invalid;
+#endif
     size_t storage = m44_supervisor_storage_bytes() + sizeof(commands) + sizeof(descriptor)
         + sizeof(handles) + sizeof(catalog_bytes) + sizeof(runtime) + sizeof(session);
     if (storage > 512u * 1024u) goto invalid;
@@ -452,6 +480,23 @@ int m44_device_try_boot(noun input) {
             if (persist != heap_cells_used(HEAP_MODE_PERSIST) || scratch != heap_cells_used(HEAP_MODE_SCRATCH)
                 || atoms != atom_store_bytes_used()) result = M44_INVALID;
         }
+#if defined(M45_MANAGED_LIFECYCLE)
+        else if (c->op == 18) result = m45_supervisor_test_busy_mask();
+        else if (c->op == 20) result = m45_supervisor_test_resource_control(c->argument);
+        else if (c->op == 21) { m45_supervisor_test_epoch(c->argument); result = M44_OK; }
+        else if (c->op == 19 && c->argument <= 10000) {
+            uint64_t persist = heap_cells_used(HEAP_MODE_PERSIST), scratch = heap_cells_used(HEAP_MODE_SCRATCH);
+            uint64_t atoms = atom_store_bytes_used();
+            result = M44_OK;
+            for (uint32_t j = 0; j < c->argument; j++)
+                if (m45_supervisor_manage(7, 0) != 0) result = M44_INVALID;
+            if (persist != heap_cells_used(HEAP_MODE_PERSIST) || scratch != heap_cells_used(HEAP_MODE_SCRATCH)
+                || atoms != atom_store_bytes_used()) result = M44_INVALID;
+        }
+#endif
+#endif
+#if defined(M45_MANAGED_LIFECYCLE)
+        else if (c->op == 17) result = m45_supervisor_manage(c->argument, c->slot);
 #endif
         else if (c->op == 7 || c->op == 13) {
             const ResourceResultView *view = 0;

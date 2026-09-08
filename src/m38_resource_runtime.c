@@ -2952,7 +2952,16 @@ M38Status m44_resource_dispatch(ResourceSession *session, const void *owner,
     return status;
 }
 
-static M38Status m44_group_staged(ResourceSession *session, int restore,
+typedef enum {
+    M44_GROUP_METADATA = -1,
+    M44_GROUP_CAPTURE = 0,
+    M44_GROUP_RESTORE_SNAPSHOT = 1,
+#if defined(M45_MANAGED_LIFECYCLE)
+    M45_GROUP_INITIALIZE_ADMITTED = 2,
+#endif
+} M44GroupOperation;
+
+static M38Status m44_group_staged(ResourceSession *session, M44GroupOperation group_operation,
     const noun handles[2], const noun snapshots[2], const ResourceResultView **out_view)
 {
     WaveM44Group group;
@@ -2965,7 +2974,7 @@ static M38Status m44_group_staged(ResourceSession *session, int restore,
         WaveSlot *slot = &group.slots[i];
         *slot = session->slots[group.index[i]];
         noun handle, state, body;
-        if (!restore) {
+        if (!group_operation) {
             if (slot->snapshot_nonce == RESOURCE_MAX_SNAPSHOT_NONCE)
                 return M38_STATUS_REQUEST_INVALID;
             slot->snapshot_nonce++;
@@ -2974,6 +2983,23 @@ static M38Status m44_group_staged(ResourceSession *session, int restore,
                 || !wave_result_build(RESOURCE_WIRE_SNAPSHOT, slot->snapshot_root, &results[i]))
                 return M38_STATUS_ATOM_RESULT_STAGING;
         } else {
+#if defined(M45_MANAGED_LIFECYCLE)
+            if (group_operation == M45_GROUP_INITIALIZE_ADMITTED) {
+                if (slot->snapshot_nonce == RESOURCE_MAX_SNAPSHOT_NONCE)
+                    return M38_STATUS_REQUEST_INVALID;
+                slot->snapshot_nonce++;
+                slot->snapshot_root = NOUN_ZERO;
+                /* These are the explicit canonical initializer fields used by
+                 * LOAD, authenticated at admission. C copies that image; it
+                 * does not choose defaults, run ECC, or execute entry actions. */
+                for (uint32_t j = 0; j < plan->instance_count; j++) {
+                    const WavePlanType *type = &plan->types[plan->instance_types[j] - 1u];
+                    slot->state_ids[j] = type->state_id;
+                    for (uint32_t k = 0; k < type->value_count; k++)
+                        slot->state_values[j][k] = type->value_initials[k];
+                }
+            } else
+#endif
             if (!wave_snapshot_apply(session, plan, snapshots[i], group.index[i], slot))
                 return M38_STATUS_REQUEST_INVALID;
             if (!wave_state_build(session, plan, slot->catalog_index, slot, &state)
@@ -2997,7 +3023,7 @@ static M38Status m44_group_staged(ResourceSession *session, int restore,
     session->m44_group = &group;
     int committed = wave_promote_operation(session->runtime, session, 0, 0,
         NOUN_ZERO, NOUN_ZERO, NOUN_ZERO, result, M38_RESULT_OWNER_PRIMARY,
-        restore ? RESOURCE_WIRE_RESTORE : RESOURCE_WIRE_SNAPSHOT, &status);
+        group_operation ? RESOURCE_WIRE_RESTORE : RESOURCE_WIRE_SNAPSHOT, &status);
     session->m44_group = 0;
     if (committed) *out_view = &session->primary_view;
     return status;
@@ -3005,20 +3031,38 @@ static M38Status m44_group_staged(ResourceSession *session, int restore,
 
 /* A single broker envelope owns all temporary nouns and both candidates. */
 static M38Status m44_group_operation(ResourceSession *session, const void *owner,
-    int restore, const noun handles[2], const noun snapshots[2],
+    M44GroupOperation group_operation, const noun handles[2], const noun snapshots[2],
     const M44PublicationHooks *hooks, const ResourceResultView **out_view)
 {
     if (out_view) *out_view = 0;
     M38Status status = m44_access(session, owner);
     if (status != M38_STATUS_OK) return status;
-    if (!m44_hooks_valid(hooks) || restore < -1 || restore > 1)
+    if (!m44_hooks_valid(hooks) || group_operation < M44_GROUP_METADATA || group_operation >
+#if defined(M45_MANAGED_LIFECYCLE)
+        2
+#else
+        1
+#endif
+       )
         return M38_STATUS_INVALID_ARGUMENT;
     ResourceRuntime *runtime = session->runtime;
-    if (restore >= 0) {
-        if (!out_view || !handles || (restore && !snapshots)) return M38_STATUS_INVALID_ARGUMENT;
+    if (group_operation >= 0) {
+        if (!out_view || !handles || (
+#if defined(M45_MANAGED_LIFECYCLE)
+            group_operation == M44_GROUP_RESTORE_SNAPSHOT
+#else
+            group_operation
+#endif
+            && !snapshots)) return M38_STATUS_INVALID_ARGUMENT;
         for (uint32_t i = 0; i < 2; i++)
             if (!wave_safe_noun(runtime, handles[i])
-                || (restore && !wave_safe_noun(runtime, snapshots[i]))) return M38_STATUS_REQUEST_INVALID;
+                || (
+#if defined(M45_MANAGED_LIFECYCLE)
+                    group_operation == M44_GROUP_RESTORE_SNAPSHOT
+#else
+                    group_operation
+#endif
+                    && !wave_safe_noun(runtime, snapshots[i]))) return M38_STATUS_REQUEST_INVALID;
     }
     status = wave_take_fault(runtime, WAVE_FAULT_BROKER_BEGIN);
     if (status != M38_STATUS_OK) return status;
@@ -3031,10 +3075,10 @@ static M38Status m44_group_operation(ResourceSession *session, const void *owner
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (!noun_tx_begin(HEAP_MODE_SCRATCH)) status = M38_STATUS_INTERNAL;
     else {
-        if (restore < 0) {
+        if (group_operation < 0) {
             (void)wave_promote_operation(runtime, session, 0, 0, NOUN_ZERO,
                 NOUN_ZERO, NOUN_ZERO, NOUN_ZERO, M38_RESULT_OWNER_NONE, 0, &status);
-        } else status = m44_group_staged(session, restore, handles, snapshots, out_view);
+        } else status = m44_group_staged(session, group_operation, handles, snapshots, out_view);
         if (status == M38_STATUS_OK) noun_tx_commit();
         else noun_tx_abort();
     }
@@ -3054,14 +3098,23 @@ M38Status m44_resource_group(ResourceSession *session, const void *owner,
         if (out_view) *out_view = 0;
         return M38_STATUS_INVALID_ARGUMENT;
     }
-    return m44_group_operation(session, owner, restore, handles, snapshots, hooks, out_view);
+    return m44_group_operation(session, owner, (M44GroupOperation)restore, handles, snapshots, hooks, out_view);
 }
 
 M38Status m44_resource_publish(ResourceSession *session, const void *owner,
     const M44PublicationHooks *hooks)
 {
-    return m44_group_operation(session, owner, -1, 0, 0, hooks, 0);
+    return m44_group_operation(session, owner, M44_GROUP_METADATA, 0, 0, hooks, 0);
 }
+
+#if defined(M45_MANAGED_LIFECYCLE)
+M38Status m45_resource_reinitialize(ResourceSession *session, const void *owner,
+    const noun handles[2], const M44PublicationHooks *hooks,
+    const ResourceResultView **out_view)
+{
+    return m44_group_operation(session, owner, M45_GROUP_INITIALIZE_ADMITTED, handles, 0, hooks, out_view);
+}
+#endif
 
 M38Status m44_resource_inspect(ResourceSession *session, const void *owner,
     M44ResourceInspection *out)
@@ -3108,6 +3161,21 @@ void m44_resource_test_fail_publication(ResourceSession *session, uint32_t point
     if (wave_session_valid(session) && session->in_flight && point <= 2)
         session->m44_test_fault = (uint8_t)point;
 }
+#if defined(M45_MANAGED_LIFECYCLE)
+M38Status m45_resource_test_control(ResourceSession *session, const void *owner,
+    uint32_t point)
+{
+    M38Status status = m44_access(session, owner);
+    if (status != M38_STATUS_OK) return status;
+    if (point == 1) session->runtime->next_fault = WAVE_FAULT_BROKER_BEGIN;
+    else if (point == 2) {
+        for (uint32_t i = 0; i < RESOURCE_MAX_LIVE_HANDLES; i++)
+            if (session->slots[i].used)
+                session->slots[i].snapshot_nonce = RESOURCE_MAX_SNAPSHOT_NONCE;
+    } else return M38_STATUS_INVALID_ARGUMENT;
+    return M38_STATUS_OK;
+}
+#endif
 #endif
 #endif
 

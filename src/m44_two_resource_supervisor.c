@@ -29,11 +29,21 @@ static struct {
   M44State roots[2], checkpoints[2];
   uint32_t live, snapshot_bank, token, busy, initialized, operation, selected;
   uint32_t copy_fault, retire_fault, turn_fault;
+#if defined(M45_MANAGED_LIFECYCLE)
+  uint32_t managed, checkpoint_valid;
+#if defined(M44_G0_TEST_CONTROLS)
+  uint32_t management_busy_mask;
+#endif
+#endif
 #if defined(M44_G0_TEST_CONTROLS)
   uint32_t busy_probe, busy_mask;
 #endif
 } authority;
-enum { OP_TURN = 1, OP_RETIRE, OP_CAPTURE, OP_RESTORE, OP_ENQUEUE };
+enum { OP_TURN = 1, OP_RETIRE, OP_CAPTURE, OP_RESTORE, OP_ENQUEUE
+#if defined(M45_MANAGED_LIFECYCLE)
+, OP_MANAGE, OP_RESET
+#endif
+};
 static size_t textlen(const char *s) {
   size_t n = 0;
   while (s[n])
@@ -240,6 +250,14 @@ static int prepare(void *context, noun result) {
         (m44_supervisor_dispatch() == M44_BUSY ? 2u : 0u) |
         (m44_supervisor_capture(&token) == M44_BUSY ? 4u : 0u) |
         (m44_supervisor_restore(authority.token) == M44_BUSY ? 8u : 0u);
+#if defined(M45_MANAGED_LIFECYCLE)
+    if (authority.managed)
+      authority.management_busy_mask =
+          (m45_supervisor_manage(2, 0) == M45_OVERFLOW ? 1u : 0u) |
+          (m45_supervisor_manage(3, 0) == M45_OVERFLOW ? 2u : 0u) |
+          (m45_supervisor_manage(7, 0) == M45_OVERFLOW ? 4u : 0u) |
+          (m45_supervisor_manage(8, 0) == M45_OVERFLOW ? 8u : 0u);
+#endif
   }
 #endif
   if (authority.operation == OP_TURN) {
@@ -276,8 +294,15 @@ static void commit(void *context) {
   if (authority.operation == OP_CAPTURE) {
     authority.snapshot_bank ^= 1u;
     authority.token++;
+#if defined(M45_MANAGED_LIFECYCLE)
+    authority.checkpoint_valid = 1;
+#endif
   } else
     authority.live ^= 1u;
+#if defined(M45_MANAGED_LIFECYCLE)
+  if (authority.operation == OP_RESET)
+    authority.checkpoint_valid = 0;
+#endif
 }
 static M44PublicationHooks hooks(void) {
   return (M44PublicationHooks){prepare, commit, 0};
@@ -359,6 +384,10 @@ M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *row) {
   M44Status status = ready();
   if (status)
     return status;
+#if defined(M45_MANAGED_LIFECYCLE)
+  if (authority.managed && live()->lifecycle != 1)
+    return M44_INVALID;
+#endif
   if (slot < 1 || slot > 2 || !row || row->sequence ||
       !valid_row(slot - 1, row, 0) ||
       (slot == authority.descriptor.target_slot &&
@@ -379,6 +408,10 @@ M44Status m44_supervisor_dispatch(void) {
   M44Status status = ready();
   if (status)
     return status;
+#if defined(M45_MANAGED_LIFECYCLE)
+  if (authority.managed && live()->lifecycle != 1)
+    return M44_INVALID;
+#endif
   uint32_t slot = live()->cursor - 1;
   if (!live()->counts[slot])
     slot ^= 1u;
@@ -447,6 +480,10 @@ M44Status m44_supervisor_capture(uint32_t *token) {
   M44Status status = ready();
   if (status)
     return status;
+#if defined(M45_MANAGED_LIFECYCLE)
+  if (authority.managed && live()->lifecycle != 2)
+    return M44_INVALID;
+#endif
   if (!token || authority.token == UINT32_MAX)
     return M44_INVALID;
   authority.busy = 1;
@@ -470,11 +507,26 @@ M44Status m44_supervisor_restore(uint32_t token) {
   M44Status status = ready();
   if (status)
     return status;
+#if defined(M45_MANAGED_LIFECYCLE)
+  if (authority.managed && live()->lifecycle != 2)
+    return M44_INVALID;
+#endif
+#if defined(M45_MANAGED_LIFECYCLE)
+  if (authority.managed && (!authority.checkpoint_valid ||
+      authority.checkpoints[authority.snapshot_bank].epoch != live()->epoch))
+    return M44_INVALID;
+#endif
   if (!token || token != authority.token)
     return M44_INVALID;
   authority.busy = 1;
   authority.operation = OP_RESTORE;
   *stage() = authority.checkpoints[authority.snapshot_bank];
+#if defined(M45_MANAGED_LIFECYCLE)
+  if (authority.managed) {
+    stage()->lifecycle = 2;
+    stage()->epoch = live()->epoch;
+  }
+#endif
   noun handles[2], snapshots[2];
   int ok = 1;
   for (uint32_t i = 0; i < 2; i++)
@@ -490,6 +542,64 @@ M44Status m44_supervisor_restore(uint32_t token) {
   authority.busy = 0;
   return r ? M44_PUBLICATION : M44_OK;
 }
+#if defined(M45_MANAGED_LIFECYCLE)
+M44Status m45_supervisor_init(ResourceSession *session, const M44Descriptor *d,
+                             const M44Saved handles[2]) {
+  M44Status status = m44_supervisor_init(session, d, handles);
+  if (!status) {
+    authority.managed = 1;
+    live()->lifecycle = 0;
+    live()->epoch = 1;
+  }
+  return status;
+}
+uint32_t m45_supervisor_is_managed(void) {
+  return authority.initialized && authority.managed;
+}
+M45Status m45_supervisor_manage(uint32_t command, uint32_t target) {
+  if (authority.busy)
+    return M45_OVERFLOW;
+  if (!authority.initialized || !authority.managed)
+    return M45_NOT_READY;
+  if (target)
+    return M45_NO_SUCH_OBJECT;
+  if (command != 2 && command != 3 && command != 7 && command != 8)
+    return M45_UNSUPPORTED_CMD;
+  if (command == 7)
+    return M45_RDY;
+  if (live()->fenced)
+    return M45_NOT_READY;
+  if ((command == 2 && live()->lifecycle != 0 && live()->lifecycle != 2) ||
+      (command == 3 && live()->lifecycle != 1) ||
+      (command == 8 && live()->lifecycle != 2))
+    return M45_INVALID_STATE;
+  if (command == 8 && live()->epoch == UINT32_MAX)
+    return M45_NOT_READY;
+  authority.busy = 1;
+  *stage() = *live();
+  M44PublicationHooks h = hooks();
+  M38Status result;
+  if (command == 8) {
+    byte_fill(stage(), 0, sizeof(*stage()));
+    stage()->epoch = live()->epoch + 1;
+    stage()->cursor = 1;
+    authority.operation = OP_RESET;
+    noun handles[2];
+    const ResourceResultView *view = 0;
+    int ok = decode(&authority.handles[0], &handles[0]) &&
+             decode(&authority.handles[1], &handles[1]);
+    result = ok ? m45_resource_reinitialize(authority.session, &authority,
+                                            handles, &h, &view)
+                : M38_STATUS_REQUEST_INVALID;
+  } else {
+    stage()->lifecycle = command == 2 ? 1 : 2;
+    authority.operation = OP_MANAGE;
+    result = m44_resource_publish(authority.session, &authority, &h);
+  }
+  authority.busy = 0;
+  return result ? M45_NOT_READY : M45_RDY;
+}
+#endif
 const M44State *m44_supervisor_state(void) {
   return authority.initialized && !authority.busy ? live() : 0;
 }
@@ -531,6 +641,23 @@ void m44_supervisor_test_busy(void) {
   }
 }
 uint32_t m44_supervisor_test_busy_mask(void) { return authority.busy_mask; }
+#if defined(M45_MANAGED_LIFECYCLE)
+uint32_t m45_supervisor_test_busy_mask(void) { return authority.management_busy_mask; }
+void m45_supervisor_test_epoch(uint32_t epoch) {
+  if (authority.initialized && !authority.busy && authority.managed &&
+      !live()->fenced && epoch)
+    live()->epoch = epoch;
+}
+M44Status m45_supervisor_test_resource_control(uint32_t point) {
+  M44Status status = ready();
+  if (status)
+    return status;
+  if (!authority.managed || (point != 1 && point != 2))
+    return M44_INVALID;
+  M38Status result = m45_resource_test_control(authority.session, &authority, point);
+  return result ? M44_INVALID : M44_OK;
+}
+#endif
 void m44_supervisor_test_sequence(uint32_t sequence) {
   if (authority.initialized && !authority.busy)
     live()->sequence = sequence;

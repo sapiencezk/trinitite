@@ -154,7 +154,13 @@ int m44_g0_try_boot(noun input) {
     if(!list(envelope[1],rows,MAX_COMMANDS,&count)) goto fail;
     for(uint32_t i=0;i<count;i++) {
         Command *c=&commands[i];
-        if(!record(rows[i],fields,5) || !scalar(fields[0],14,&c->op) || !c->op
+        if(!record(rows[i],fields,5) || !scalar(fields[0],
+#if defined(M45_MANAGED_LIFECYCLE)
+           15,
+#else
+           14,
+#endif
+           &c->op) || !c->op
            || !scalar(fields[1],1,&c->slot) || !scalar(fields[3],4,&c->mode)
            || !scalar(fields[4],65535,&c->value) || !atom_copy(fields[2],c->arg.jam,MAX_ARGUMENT,&c->arg.bytes)) goto fail;
     }
@@ -192,6 +198,13 @@ int m44_g0_try_boot(noun input) {
         else if(c->op==8) status=m38_resource_session_reset(runtime,session);
         else if(c->op==9) status=m38_resource_session_dispose(runtime,session);
         else if(c->op==11) status=m44_resource_publish(session,&owner,&hooks);
+#if defined(M45_MANAGED_LIFECYCLE)
+        else if(c->op==15) {
+            for(uint32_t j=0;j<2;j++)
+                if(!decode(handles[j].jam,handles[j].bytes,&hs[j])) goto fail;
+            status=m45_resource_reinitialize(session,&owner,hs,&hooks,&view);
+        }
+#endif
         else if(c->op==4 || c->op==5 || c->op==10 || c->op==12) {
             for(uint32_t j=0;j<2;j++) {
                 if(!decode(handles[j].jam,handles[j].bytes,&hs[j])) goto fail;

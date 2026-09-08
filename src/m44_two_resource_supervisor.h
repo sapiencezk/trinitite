@@ -33,6 +33,9 @@ typedef struct {
   uint32_t cursor, sequence, fault, fenced, counts[2], output_count;
   M44Row queues[2][16], outputs[32];
   uint32_t output_slots[32];
+#if defined(M45_MANAGED_LIFECYCLE)
+  uint32_t lifecycle, epoch;
+#endif
 } M44State;
 typedef enum {
   M44_FAULT_NONE = 0,
@@ -66,6 +69,24 @@ M44Status m44_supervisor_restore_checked(uint32_t token,
                                          const uint8_t descriptor_identity[32],
                                          uint64_t capability);
 size_t m44_supervisor_storage_bytes(void);
+#if defined(M45_MANAGED_LIFECYCLE)
+typedef enum {
+  M45_RDY = 0, M45_NOT_READY = 4, M45_UNSUPPORTED_CMD = 5,
+  M45_NO_SUCH_OBJECT = 7, M45_INVALID_STATE = 10, M45_OVERFLOW = 11
+} M45Status;
+/* Boot-only: handles must be freshly loaded admitted initial resources.
+ * Initialization performs no IEC execution. */
+M44Status m45_supervisor_init(ResourceSession *, const M44Descriptor *,
+                             const M44Saved handles[2]);
+uint32_t m45_supervisor_is_managed(void);
+M45Status m45_supervisor_manage(uint32_t command, uint32_t target);
+#if defined(M44_G0_TEST_CONTROLS)
+uint32_t m45_supervisor_test_busy_mask(void);
+void m45_supervisor_test_epoch(uint32_t epoch);
+/* Combined broker/copy fault injection is outside qualification support. */
+M44Status m45_supervisor_test_resource_control(uint32_t point);
+#endif
+#endif
 #if defined(M44_G0_TEST_CONTROLS)
 void m44_supervisor_test_fault(uint32_t copy_point,
                                uint32_t retirement_failure);
