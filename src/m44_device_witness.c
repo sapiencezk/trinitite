@@ -63,6 +63,12 @@ static uint32_t resident_mode;
 static int m46_device_try_boot(noun input);
 static uint32_t live_replacement, active_package, staged_package;
 static uint32_t expected_generation[MAX_COMMANDS], expected_package[MAX_COMMANDS];
+#if defined(M52_RESIDENT_REPLACEMENT)
+static uint32_t managed_replacement;
+static int m52_device_try_boot(noun input);
+static int m52_package_read(uint32_t index, uint8_t compatibility[32]);
+static int m52_catalog_validate(void);
+#endif
 #endif
 static size_t length(const char *s) { size_t n = 0; while (s[n]) n++; return n; }
 static noun cord(const char *s) { return cord_from_bytes(s, length(s)); }
@@ -454,6 +460,9 @@ static void finish(void) {
 #include "m48_device_resident.inc"
 
 int m44_device_try_boot(noun input) {
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (m52_device_try_boot(input)) return 1;
+#endif
 #if defined(M46_LIVE_REPLACEMENT)
     if (m46_device_try_boot(input)) return 1;
 #endif
@@ -839,7 +848,16 @@ static M44Status m46_load(uint32_t index, uint32_t bank, M46LoadedPackage *loade
     *loaded_session = 0;
     loaded->descriptor = &descriptor;
     loaded->handles = handles;
-    if (!m46_package_read(index, loaded->compatibility)) return M44_INVALID;
+    if (!(
+#if defined(M52_RESIDENT_REPLACEMENT)
+        managed_replacement ? m52_package_read(index, loaded->compatibility) :
+#endif
+        m46_package_read(index, loaded->compatibility))) return M44_INVALID;
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (managed_replacement) {
+        if (!m52_catalog_validate()) return M44_INVALID;
+    } else
+#endif
     for (uint32_t i = 0; i < 2; i++) {
         noun core, admission;
         if (!decode(m44_boot_catalog_storage(i, 1), catalog_bytes[i][1], &core)
@@ -1042,4 +1060,7 @@ invalid:
 failed:
     uart_puts("M44 terminal=refuse\r\n"); finish(); return 1;
 }
+#endif
+#if defined(M52_RESIDENT_REPLACEMENT)
+#include "m52_device_resident.inc"
 #endif

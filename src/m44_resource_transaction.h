@@ -100,6 +100,13 @@ M38Status m46_resource_diagnostics(ResourceSession *, const void *owner,
                                    M46ResourceDiagnostics *out);
 M38Status m46_validate_replacement_pair(ResourceSession *, ResourceSession *,
                                   const void *owner);
+#if defined(M52_RESIDENT_REPLACEMENT)
+/* M51 layout with only CONTROL.send_healthy OUTPUT RHS varying between
+ * LAST and UINT16 literal. All service/timer bodies remain identical. */
+M38Status m52_validate_replacement_pair(ResourceSession *, ResourceSession *,
+                                       const void *owner);
+M38Status m52_validate_controller_session(ResourceSession *, const void *owner);
+#endif
 M38Status m46_resource_cancel(ResourceSession *, const void *owner);
 /* Loader-only abandonment before a supervisor claim. Closed is idempotent;
  * a claimed session always refuses. No allocation, copying or fallible cleanup

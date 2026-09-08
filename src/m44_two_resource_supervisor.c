@@ -33,6 +33,9 @@ static struct {
   M44Saved candidate_handles[2];
   uint8_t compatibility[32], candidate_old_identity[32];
   uint32_t deployment_generation, candidate_generation, candidate_token, candidate_serial;
+#if defined(M52_RESIDENT_REPLACEMENT)
+  uint32_t resident_replacement, replacement_call;
+#endif
 #if defined(M44_G0_TEST_CONTROLS)
   uint32_t replacement_fault, replacement_busy_mask;
 #endif
@@ -782,6 +785,9 @@ M44Status m47_provider_enqueue(uint32_t slot, uint32_t epoch, const M44Row *row)
   } else {
 #if defined(M49_MANAGED_DELAY)
     /* A future expiry still owns the provider path, including private RELEASE. */
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (authority.resident_replacement && authority.candidate) return M44_INVALID;
+#endif
     if (authority.timed && (
 #if defined(M51_CONTROLLER)
         authority.controller ? m51_active() :
@@ -830,6 +836,9 @@ M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *row) {
 #endif
 #if defined(M47_MANAGED_SERVICES)
   if (m47_public_release(slot-1,row)) {
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (authority.resident_replacement && authority.candidate) return M44_INVALID;
+#endif
 #if defined(M49_MANAGED_DELAY)
     if (authority.timed && (
 #if defined(M51_CONTROLLER)
@@ -1052,6 +1061,9 @@ M45Status m45_supervisor_manage(uint32_t command, uint32_t target) {
     return M45_INVALID_STATE;
 #if defined(M47_MANAGED_SERVICES)
   if (authority.services && command == 8) {
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (authority.resident_replacement && authority.candidate) return M45_NOT_READY;
+#endif
     if (authority.receive_holds) return M45_NOT_READY;
     for (uint32_t i=0;i<2;i++) {
       const M47ProviderLedger *p=&live()->providers[i];
@@ -1181,7 +1193,11 @@ const M44Descriptor *m46_supervisor_active_descriptor(void) {
 }
 M44Status m46_supervisor_diagnostics(M46ResourceDiagnostics *out) {
   M44Status status = ready();
-  if (status != M44_OK)
+  if (status != M44_OK
+#if defined(M52_RESIDENT_REPLACEMENT)
+      && !(authority.resident_replacement && status == M44_FENCED)
+#endif
+      )
     return status;
   return m46_resource_diagnostics(authority.session, &authority, out) ==
                  M38_STATUS_OK
@@ -1200,7 +1216,11 @@ M44Status m46_supervisor_stage(ResourceSession *candidate,
                                const uint8_t compatibility[32],
                                uint32_t expected_generation, uint32_t *token) {
 #if defined(M47_MANAGED_SERVICES)
-  if (authority.services) return M44_INVALID;
+  if (authority.services
+#if defined(M52_RESIDENT_REPLACEMENT)
+      && !authority.replacement_call
+#endif
+     ) return M44_INVALID;
 #endif
   if (token)
     *token = 0;
@@ -1232,7 +1252,14 @@ M44Status m46_supervisor_stage(ResourceSession *candidate,
       byte_compare((const uint8_t *)d + offset,
                    (const uint8_t *)&authority.descriptor + offset,
                    sizeof(*d) - offset) ||
-      m46_validate_replacement_pair(authority.session, candidate, &authority)) {
+#if defined(M52_RESIDENT_REPLACEMENT)
+      (authority.replacement_call ? m52_validate_replacement_pair(authority.session,candidate,&authority) :
+#endif
+      m46_validate_replacement_pair(authority.session, candidate, &authority)
+#if defined(M52_RESIDENT_REPLACEMENT)
+      )
+#endif
+      ) {
     M38Status cleanup = m46_resource_cancel(candidate, &authority);
     authority.busy = 0;
     return cleanup == M38_STATUS_OK ? M44_INVALID : M44_PUBLICATION;
@@ -1271,6 +1298,12 @@ static int m46_prepare(void *context, noun result) {
         (m44_supervisor_dispatch() == M44_BUSY ? 4u : 0u) |
         (m46_supervisor_stage(0, 0, 0, 0, 0, &token) == M44_BUSY ? 8u : 0u) |
         (m45_supervisor_manage(3, 0) == M45_OVERFLOW ? 16u : 0u);
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (authority.resident_replacement) authority.replacement_busy_mask |=
+        (m49_supervisor_clock(live()->epoch,authority.clock_ms,authority.clock_turn+1)==M44_BUSY?32u:0u) |
+        (m47_provider_receive_hold(1,live()->epoch,1)==M44_BUSY?64u:0u) |
+        (m52_supervisor_activate(authority.candidate_token,authority.deployment_generation,0)==M44_BUSY?128u:0u);
+#endif
     return 0;
   }
   if (point == 2 || point == 3)
@@ -1291,7 +1324,11 @@ static void m46_commit(void *context) {
 M44Status m46_supervisor_activate(uint32_t token,
                                   uint32_t expected_generation) {
 #if defined(M47_MANAGED_SERVICES)
-  if (authority.services) return M44_INVALID;
+  if (authority.services
+#if defined(M52_RESIDENT_REPLACEMENT)
+      && !authority.replacement_call
+#endif
+     ) return M44_INVALID;
 #endif
   M44Status s = ready();
   if (s)
@@ -1318,11 +1355,18 @@ M44Status m46_supervisor_activate(uint32_t token,
 }
 M44Status m46_supervisor_cancel(uint32_t token, uint32_t expected_generation) {
 #if defined(M47_MANAGED_SERVICES)
-  if (authority.services) return M44_INVALID;
+  if (authority.services
+#if defined(M52_RESIDENT_REPLACEMENT)
+      && !authority.replacement_call
+#endif
+     ) return M44_INVALID;
 #endif
   M44Status s = ready();
-  if (s)
-    return s;
+  if (s
+#if defined(M52_RESIDENT_REPLACEMENT)
+      && !(s==M44_FENCED && authority.replacement_call)
+#endif
+     ) return s;
   if (!authority.candidate || !token || token != authority.candidate_token ||
       expected_generation != authority.deployment_generation)
     return M44_INVALID;
@@ -1347,6 +1391,9 @@ void m46_supervisor_test_ticket_serial(uint32_t serial) {
   if (!authority.busy)
     authority.candidate_serial = serial;
 }
+#endif
+#if defined(M52_RESIDENT_REPLACEMENT)
+#include "m52_supervisor_replacement.inc"
 #endif
 #endif
 

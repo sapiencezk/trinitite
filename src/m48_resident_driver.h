@@ -26,7 +26,11 @@ typedef struct {
 #endif
 } M48Adapter;
 typedef enum { M48_LOCAL_NONE=0, M48_LOCAL_INGRESS=1,
-               M48_LOCAL_MANAGE=2, M48_LOCAL_RELEASE=3 } M48LocalKind;
+               M48_LOCAL_MANAGE=2, M48_LOCAL_RELEASE=3
+#if defined(M52_RESIDENT_REPLACEMENT)
+               ,M52_LOCAL_REPLACEMENT=4
+#endif
+               } M48LocalKind;
 typedef struct {
   M48LocalKind kind;
   uint32_t epoch,slot,command,target;
@@ -49,6 +53,12 @@ typedef struct {
   uint64_t tx_token;
 #if defined(M51_CONTROLLER)
   uint32_t tx_status;
+#endif
+#if defined(M52_RESIDENT_REPLACEMENT)
+  /* Native loader bridge. Dedicated commands skip every background stage.
+   * The current hold mask is derived by this driver, not from request bytes. */
+  M44Status (*replacement)(void *,const M48LocalRequest *,uint32_t holds);
+  void *replacement_context;
 #endif
 #if defined(M49_MANAGED_DELAY)
   /* Optional M49 boot hook, once after admissions and before dispatch.

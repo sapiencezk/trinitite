@@ -3345,6 +3345,9 @@ M38Status m46_validate_replacement_pair(ResourceSession *old,
   }
   return M38_STATUS_OK;
 }
+#if defined(M52_RESIDENT_REPLACEMENT)
+#include "m52_resource_compatibility.inc"
+#endif
 M38Status m46_resource_cancel(ResourceSession *session, const void *owner) {
   M38Status status = m44_access(session, owner);
   if (status != M38_STATUS_OK)

@@ -199,6 +199,24 @@ const M44Descriptor *m46_supervisor_active_descriptor(void);
 M44Status m46_supervisor_diagnostics(M46ResourceDiagnostics *out);
 uint32_t m46_supervisor_generation(void);
 uint32_t m46_supervisor_candidate_token(void);
+#if defined(M52_RESIDENT_REPLACEMENT)
+/* Dedicated resident replacement calls; default M46 APIs still refuse services.
+ * The serialized resident caller supplies its current rx_valid/tx_valid mask
+ * at activation. These are native-owned facts, never local request fields. */
+/* Cold boot only. Failure after the underlying M51 claim is terminal to the
+ * boot caller; this is not a reusable session-registration API. */
+M44Status m52_supervisor_init(ResourceSession *,const M44Descriptor *,
+    const M44Saved[2],const M47ProviderBinding[2],const M51TimerBinding[2],
+    const M51ReturnBinding *,const uint8_t compatibility[32]);
+M44Status m52_supervisor_can_stage(uint32_t expected_generation);
+M44Status m52_supervisor_stage(ResourceSession *,const M44Descriptor *,
+    const M44Saved[2],const M47ProviderBinding[2],const M51TimerBinding[2],
+    const M51ReturnBinding *,const uint8_t compatibility[32],
+    uint32_t expected_generation,uint32_t *ticket);
+M44Status m52_supervisor_activate(uint32_t ticket,uint32_t expected_generation,
+                                  uint32_t driver_holds);
+M44Status m52_supervisor_cancel(uint32_t ticket,uint32_t expected_generation);
+#endif
 #if defined(M44_G0_TEST_CONTROLS)
 /* 1: prepare refusal, 2: copy-one, 3: copy-all, 5: actual prepare
  * reentry probe then prepare refusal. Other values are ignored. */

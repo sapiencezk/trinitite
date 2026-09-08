@@ -2,12 +2,22 @@
  * UART is trusted local ingress; no provider observation opcodes exist here. */
 #if defined(M48_RESIDENT)
 #include "m48_resident_driver.h"
+#if defined(M52_RESIDENT_REPLACEMENT)
+static M44Status m52_local_replace(void *,const M48LocalRequest *,uint32_t);
+#if defined(M44_G0_TEST_CONTROLS)
+static M44Status m52_test_command(const Command *);
+#endif
+#endif
 static M48ResidentDriver m48_driver;
 static uint8_t m48_input[232];
 static uint32_t m48_input_used, m48_input_wanted;
 static uint64_t m48_turns;
 static uint64_t m48_input_last, m48_frequency;
 static uint32_t m48_input_refusals;
+#if defined(M52_RESIDENT_REPLACEMENT)
+static M48LocalRequest m52_pending_request;
+static uint32_t m52_pending_valid,m52_pending_id;
+#endif
 static uint64_t m48_counter(void) {
     uint64_t value; __asm__ volatile("mrs %0, cntvct_el0":"=r"(value)); return value;
 }
@@ -83,7 +93,13 @@ static int m48_local_read(M48LocalRequest *request,uint32_t *id) {
         request->command=m48_word(24); request->target=m48_word(28);
         request->row.event=m48_word(32); request->row.count=m48_word(36);
         if (request->row.count>16 || m48_input_wanted!=40+12*request->row.count ||
-            request->kind<1 || request->kind>3) request->kind=(M48LocalKind)99;
+            request->kind<1 || request->kind>
+#if defined(M52_RESIDENT_REPLACEMENT)
+            (managed_replacement?4:3)
+#else
+            3
+#endif
+            ) request->kind=(M48LocalKind)99;
         else for (uint32_t i=0;i<request->row.count;i++) {
             request->row.values[i]=(M44Value){m48_word(40+12*i),m48_word(44+12*i),m48_word(48+12*i)};
         }
@@ -113,6 +129,17 @@ static int m48_emit(uint32_t index,uint32_t request,const M48TurnResult *r) {
 #endif
     { uart_puts("],\"input_refusals\":"); }
     number(m48_input_refusals);
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (managed_replacement) {
+        M46ResourceDiagnostics diagnostics={0};
+        (void)m46_supervisor_diagnostics(&diagnostics);
+        uart_puts(",\"registered_sessions\":"); number(diagnostics.registered_sessions);
+        uart_puts(",\"issued_capability\":"); number(diagnostics.issued_capability);
+#if defined(M44_G0_TEST_CONTROLS)
+        uart_puts(",\"replacement_busy_mask\":"); number(m46_supervisor_test_busy_mask());
+#endif
+    }
+#endif
 #if defined(M51_CONTROLLER)
     if (managed_controller) { uart_puts(",\"completion_status\":");number(m48_driver.tx_status); }
 #endif
@@ -161,6 +188,9 @@ static int m48_qualified_run(uint32_t count,uint32_t blocked) {
     if (managed_controller) adapter.completion_result=m51_fake_completion;
 #endif
     if (m48_resident_init(&m48_driver,m47_bindings,&adapter)!=M44_OK) return 0;
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (managed_replacement) m48_driver.replacement=m52_local_replace;
+#endif
 #if defined(M49_MANAGED_DELAY)
     if (managed_delay) m48_driver.before_dispatch=m49_fake_before_dispatch;
 #endif
@@ -177,6 +207,21 @@ static int m48_qualified_run(uint32_t count,uint32_t blocked) {
     for (uint32_t i=0;i<count;i++) {
         const Command *c=&commands[i]; M48LocalRequest request={0};
         request.epoch=c->epoch; request.slot=c->slot; request.row=c->row;
+#if defined(M52_RESIDENT_REPLACEMENT)
+        if (managed_replacement && c->op>=48) {
+            m48_turns++;
+            M48TurnResult result=empty;
+            result.local=m52_test_command(c);
+            m48_driver.before_dispatch_status=M48_SKIPPED;
+            if (!m48_emit(i+1,i+1,&result)) return 0;
+            continue;
+        }
+        if (managed_replacement && c->op>=45 && c->op<=47) {
+            request.kind=M52_LOCAL_REPLACEMENT;
+            request.command=c->op-44; request.target=c->argument;
+            request.row.event=(uint32_t)c->provider_token;
+        } else
+#endif
         if (c->op==1) request.kind=M48_LOCAL_INGRESS;
         else if (c->op==17) { request.kind=M48_LOCAL_MANAGE; request.command=c->argument; request.target=c->slot; }
         else if (c->op==36) request.kind=M48_LOCAL_RELEASE;
@@ -237,6 +282,9 @@ static int m48_qualified_run(uint32_t count,uint32_t blocked) {
 static size_t m48_storage_bytes(void) {
     return sizeof(m48_driver)+sizeof(m48_input)+sizeof(m48_input_used)+sizeof(m48_input_wanted)+sizeof(m48_turns)
         +sizeof(m48_input_last)+sizeof(m48_frequency)+sizeof(m48_input_refusals)+M48_REPORT_CAPACITY+32
+#if defined(M52_RESIDENT_REPLACEMENT)
+        +sizeof(m52_pending_request)+sizeof(m52_pending_valid)+sizeof(m52_pending_id)
+#endif
 #if defined(M44_G0_TEST_CONTROLS)
         +sizeof(m48_fixture)
 #if defined(M49_MANAGED_DELAY)
@@ -256,6 +304,9 @@ static int m48_run(uint32_t mode,uint32_t count) {
 #endif
     M48Adapter adapter;
     if (!m48_transport_init(&adapter) || m48_resident_init(&m48_driver,m47_bindings,&adapter)!=M44_OK) return 0;
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (managed_replacement) m48_driver.replacement=m52_local_replace;
+#endif
     __asm__ volatile("mrs %0, cntfrq_el0":"=r"(m48_frequency));
     if (!m48_frequency || !m48_report_begin()) return 0;
 #if defined(M49_MANAGED_DELAY)
@@ -267,6 +318,10 @@ static int m48_run(uint32_t mode,uint32_t count) {
 #if defined(M49_MANAGED_DELAY)
 #if defined(M50_PERIODIC)
 #if defined(M51_CONTROLLER)
+#if defined(M52_RESIDENT_REPLACEMENT)
+    if (managed_replacement) uart_puts("M52 resident=ready\r\n");
+    else
+#endif
     if (managed_controller) uart_puts("M51 resident=ready\r\n");
     else
 #endif
@@ -285,7 +340,20 @@ static int m48_run(uint32_t mode,uint32_t count) {
         m48_report_drain();
         /* A pending response applies backpressure to the local request path;
          * provider and IEC progress below remains independent of serial TX. */
-        int input=m48_report_idle()?m48_local_read(&request,&id):0;
+        int input;
+#if defined(M52_RESIDENT_REPLACEMENT)
+        if (managed_replacement) {
+            /* Collect one bounded request even while telemetry drains. Its
+             * execution still waits for report capacity and rechecks authority. */
+            if (!m52_pending_valid)
+                m52_pending_valid=m48_local_read(&m52_pending_request,&m52_pending_id);
+            input=m52_pending_valid && m48_report_idle();
+            if (input) {
+                request=m52_pending_request; id=m52_pending_id; m52_pending_valid=0;
+            }
+        } else
+#endif
+        input=m48_report_idle()?m48_local_read(&request,&id):0;
         if (m48_turns!=UINT64_MAX) m48_turns++;
         M48TurnResult result=m48_resident_turn(&m48_driver,input?&request:0);
         int progress=input || result.dispatch==M44_OK || result.dispatch==M44_RETIRED ||

@@ -33,6 +33,13 @@ static uint32_t local(M48ResidentDriver *d,const M48LocalRequest *r) {
   const M44State *s=m44_supervisor_state();
   if (!r || r->kind==M48_LOCAL_NONE) return M48_SKIPPED;
   if (!s || r->epoch!=s->epoch) return M44_INVALID;
+#if defined(M52_RESIDENT_REPLACEMENT)
+  if (r->kind==M52_LOCAL_REPLACEMENT) {
+    if (!d->replacement) return M44_INVALID;
+    return d->replacement(d->replacement_context,r,
+                          (d->rx_valid?1u:0u)|(d->tx_valid?2u:0u));
+  }
+#endif
   if (r->kind==M48_LOCAL_MANAGE) return m45_supervisor_manage(r->command,r->target);
   if (r->kind==M48_LOCAL_INGRESS) return m44_supervisor_enqueue(r->slot,&r->row);
   if (r->kind==M48_LOCAL_RELEASE && r->slot>=1 && r->slot<=2) {
@@ -47,6 +54,12 @@ M48TurnResult m48_resident_turn(M48ResidentDriver *d,const M48LocalRequest *r) {
     M48_SKIPPED,M48_SKIPPED,M48_SKIPPED,M48_SKIPPED,M48_SKIPPED};
   if (!d || !d->initialized) { out.local=M44_INVALID; return out; }
   out.local=local(d,r);
+#if defined(M52_RESIDENT_REPLACEMENT)
+  if (r && r->kind==M52_LOCAL_REPLACEMENT) {
+    d->before_dispatch_status=M48_SKIPPED;
+    return out;
+  }
+#endif
   const M44State *s=m44_supervisor_state();
   if (!s || s->fenced || (s->lifecycle!=1 && s->lifecycle!=2)) return out;
   uint32_t pub=d->bindings[0].kind==1?0:1,sub=1-pub;

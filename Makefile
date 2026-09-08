@@ -158,6 +158,14 @@ $(error M51_CONTROLLER=1 requires M50_PERIODIC=1)
 endif
 CFLAGS += -DM51_CONTROLLER=1
 endif
+
+M52_RESIDENT_REPLACEMENT ?= 0
+ifeq ($(M52_RESIDENT_REPLACEMENT),1)
+ifneq ($(M51_CONTROLLER),1)
+$(error M52_RESIDENT_REPLACEMENT=1 requires M51_CONTROLLER=1)
+endif
+CFLAGS += -DM52_RESIDENT_REPLACEMENT=1
+endif
 M49_MANAGED_DELAY ?= 0
 ifeq ($(M49_MANAGED_DELAY),1)
 ifneq ($(M48_RESIDENT),1)
@@ -635,6 +643,9 @@ endif
 ifeq ($(M51_CONTROLLER),1)
 CONFIG_KEY := $(CONFIG_KEY)-m51
 endif
+ifeq ($(M52_RESIDENT_REPLACEMENT),1)
+CONFIG_KEY := $(CONFIG_KEY)-m52
+endif
 ifeq ($(M44_G0_TEST_CONTROLS),1)
 CONFIG_KEY := $(CONFIG_KEY)-g0test
 endif
@@ -857,5 +868,15 @@ FORCE:
 
 ifeq ($(M49_MANAGED_DELAY),1)
 $(OBJDIR)/m44_device_witness.o: $(SRCDIR)/m49_device_resident.inc
+
+ifeq ($(M51_CONTROLLER),1)
+$(OBJDIR)/m44_device_witness.o: $(SRCDIR)/m51_device_resident.inc
+$(OBJDIR)/m44_two_resource_supervisor.o: $(SRCDIR)/m51_controller_authority.inc
+endif
+ifeq ($(M52_RESIDENT_REPLACEMENT),1)
+$(OBJDIR)/m44_device_witness.o: $(SRCDIR)/m52_device_resident.inc
+$(OBJDIR)/m44_two_resource_supervisor.o: $(SRCDIR)/m52_supervisor_replacement.inc
+$(OBJDIR)/m38_resource_runtime.o: $(SRCDIR)/m52_resource_compatibility.inc
+endif
 $(OBJDIR)/m44_two_resource_supervisor.o $(OBJDIR)/m49_clock_adapter.o: $(SRCDIR)/m49_clock_adapter.h
 endif
