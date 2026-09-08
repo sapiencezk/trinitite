@@ -1,0 +1,539 @@
+#include "m44_two_resource_supervisor.h"
+#if defined(M44_TWO_RESOURCE)
+#include "bounded_cue.h"
+#include "jam.h"
+#include "memory.h"
+static void byte_copy(void *destination, const void *source, size_t count) {
+  uint8_t *to = destination;
+  const uint8_t *from = source;
+  for (size_t i = 0; i < count; i++)
+    to[i] = from[i];
+}
+static void byte_fill(void *destination, int value, size_t count) {
+  uint8_t *to = destination;
+  for (size_t i = 0; i < count; i++)
+    to[i] = (uint8_t)value;
+}
+static int byte_compare(const void *left, const void *right, size_t count) {
+  const uint8_t *a = left, *b = right;
+  for (size_t i = 0; i < count; i++)
+    if (a[i] != b[i])
+      return 1;
+  return 0;
+}
+/* All durable objects are C copies. No noun survives a public call. */
+static struct {
+  ResourceSession *session;
+  M44Descriptor descriptor;
+  M44Saved handles[2], snapshots[2][2];
+  M44State roots[2], checkpoints[2];
+  uint32_t live, snapshot_bank, token, busy, initialized, operation, selected;
+  uint32_t copy_fault, retire_fault, turn_fault;
+#if defined(M44_G0_TEST_CONTROLS)
+  uint32_t busy_probe, busy_mask;
+#endif
+} authority;
+enum { OP_TURN = 1, OP_RETIRE, OP_CAPTURE, OP_RESTORE, OP_ENQUEUE };
+static size_t textlen(const char *s) {
+  size_t n = 0;
+  while (s[n])
+    n++;
+  return n;
+}
+static noun cord(const char *s) { return cord_from_bytes(s, textlen(s)); }
+static int pair(noun n, noun *a, noun *b) {
+  if (!noun_is_cell(n))
+    return 0;
+  cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
+  *a = c->head;
+  *b = c->tail;
+  return 1;
+}
+static int record(noun n, noun *out, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++)
+    if (!pair(n, &out[i], &n))
+      return 0;
+  return n == NOUN_ZERO;
+}
+static int list(noun n, noun *out, uint32_t max, uint32_t *count) {
+  *count = 0;
+  while (n != NOUN_ZERO) {
+    if (*count == max || !pair(n, &out[*count], &n))
+      return 0;
+    (*count)++;
+  }
+  return 1;
+}
+static int scalar(noun n, uint32_t max, uint32_t *out) {
+  if (!noun_is_direct(n) || direct_val(n) > max)
+    return 0;
+  *out = direct_val(n);
+  return 1;
+}
+static int textis(noun n, const char *s) {
+  uint8_t bytes[128];
+  if (!noun_atom_read_fixed(n, bytes, sizeof(bytes)))
+    return 0;
+  size_t len = textlen(s);
+  for (uint32_t i = 0; i < sizeof(bytes); i++)
+    if (bytes[i] != (i < len ? (uint8_t)s[i] : 0))
+      return 0;
+  return 1;
+}
+static int build(const noun *v, uint32_t n, noun *out) {
+  *out = NOUN_ZERO;
+  while (n)
+    if (!alloc_cell_checked(v[--n], *out, out))
+      return 0;
+  return 1;
+}
+static int tagged(const char *tag, const char *schema, const noun *v,
+                  uint32_t n, noun *out) {
+  noun row[5], body;
+  if (n > 4)
+    return 0;
+  row[0] = cord(schema);
+  for (uint32_t i = 0; i < n; i++)
+    row[i + 1] = v[i];
+  return build(row, n + 1, &body) && alloc_cell_checked(cord(tag), body, out);
+}
+static int fields(noun n, const char *tag, const char *schema, noun *out,
+                  uint32_t count) {
+  noun t, b, r[5];
+  if (count > 4 || !pair(n, &t, &b) || !textis(t, tag) ||
+      !record(b, r, count + 1) || !textis(r[0], schema))
+    return 0;
+  for (uint32_t i = 0; i < count; i++)
+    out[i] = r[i + 1];
+  return 1;
+}
+static int save(noun n, M44Saved *out) {
+  const uint8_t *bytes;
+  uint64_t size;
+  jam_admission_budget_t budget;
+  jam_admission_budget_init(&budget, 2000000);
+  if (jam_encode_bytes_identity_bounded(n, &bytes, &size, &budget) ||
+      size > M44_SAVED_BYTES)
+    return 0;
+  byte_copy(out->jam, bytes, size);
+  out->bytes = size;
+  return 1;
+}
+static int decode(const M44Saved *in, noun *out) {
+  if (!in->bytes || in->bytes > M44_SAVED_BYTES ||
+      cue_bounded_bytes(in->jam, in->bytes, &cue_i2_limits, HEAP_MODE_PERSIST,
+                        out) != CUE_BOUNDED_OK)
+    return 0;
+  noun_tx_commit();
+  return 1;
+}
+static M44State *live(void) { return &authority.roots[authority.live]; }
+static M44State *stage(void) { return &authority.roots[authority.live ^ 1u]; }
+static const char *value_schema(uint32_t slot) {
+  return authority.descriptor.signed_values[slot]
+             ? "m41-numeric-value-schema-v1"
+             : "m38-resource-abi-v1-numeric-value-schema-v1";
+}
+static const M44Boundary *boundary(uint32_t slot, uint32_t event, int output) {
+  const M44Descriptor *d = &authority.descriptor;
+  uint32_t n = output ? d->output_count[slot] : d->ingress_count[slot];
+  const M44Boundary *rows = output ? d->outputs[slot] : d->ingress[slot];
+  for (uint32_t i = 0; i < n; i++)
+    if (rows[i].event == event)
+      return &rows[i];
+  return 0;
+}
+static int valid_row(uint32_t slot, const M44Row *row, int output) {
+  const M44Boundary *b = boundary(slot, row->event, output);
+  if (!b || row->count != b->count || row->count > 16)
+    return 0;
+  for (uint32_t i = 0; i < row->count; i++)
+    if (row->values[i].id != b->values[i].id ||
+        row->values[i].type != b->values[i].type ||
+        row->values[i].raw > (row->values[i].type == 1 ? 1u : 65535u))
+      return 0;
+  return 1;
+}
+static void retire(M44State *s, uint32_t slot) {
+  for (uint32_t i = 1; i < s->counts[slot]; i++)
+    s->queues[slot][i - 1] = s->queues[slot][i];
+  s->counts[slot]--;
+  byte_fill(&s->queues[slot][s->counts[slot]], 0, sizeof(M44Row));
+  s->cursor = 2u - slot;
+}
+static int parse_outputs(noun result) {
+  noun rf[2], body[4], ef[1], rows[32];
+  uint32_t count, wire;
+  M44State *s = stage();
+  uint32_t slot = authority.selected;
+  if (!fields(result, "m38-resource-abi-v1-result",
+              "m38-resource-abi-v1-result-schema-v1", rf, 2) ||
+      !scalar(rf[0], 255, &wire) || wire != 2 || !record(rf[1], body, 4) ||
+      !fields(body[1], "m38-resource-abi-v1-numeric-effects",
+              "m38-resource-abi-v1-numeric-effects-schema-v1", ef, 1) ||
+      !list(ef[0], rows, 32, &count))
+    return 0;
+  uint32_t internal = 0;
+  const M44Descriptor *d = &authority.descriptor;
+  for (uint32_t i = 0; i < count; i++) {
+    noun of[2], vs[16];
+    M44Row row = {0};
+    if (!fields(rows[i], "m38-resource-abi-v1-numeric-effect",
+                "m38-resource-abi-v1-numeric-effect-schema-v1", of, 2) ||
+        !scalar(of[0], 65535, &row.event) || !list(of[1], vs, 16, &row.count))
+      return 0;
+    for (uint32_t j = 0; j < row.count; j++) {
+      noun vf[3];
+      if (!fields(vs[j], "m38-resource-abi-v1-numeric-value",
+                  value_schema(slot), vf, 3) ||
+          !scalar(vf[0], 65535, &row.values[j].id) ||
+          !scalar(vf[1], 3, &row.values[j].type) ||
+          !scalar(vf[2], 65535, &row.values[j].raw))
+        return 0;
+    }
+    if (!valid_row(slot, &row, 1))
+      return 0;
+    if (slot + 1 == d->source_slot && row.event == d->source_event) {
+      uint32_t dest = d->target_slot - 1;
+      if (++internal > d->batch_bound || s->counts[dest] >= 16 ||
+          s->sequence == UINT32_MAX) {
+        authority.turn_fault = M44_FAULT_DELIVERY_RESERVATION;
+        return 0;
+      }
+      M44Row delivery = {0};
+      delivery.event = d->target_event;
+      delivery.count = d->value_count;
+      delivery.sequence = ++s->sequence;
+      for (uint32_t j = 0; j < d->value_count; j++) {
+        uint32_t found = 0;
+        for (uint32_t k = 0; k < row.count; k++)
+          if (row.values[k].id == d->source_ids[j] &&
+              row.values[k].type == d->types[j]) {
+            delivery.values[j] =
+                (M44Value){d->target_ids[j], d->types[j], row.values[k].raw};
+            found++;
+          }
+        if (found != 1)
+          return 0;
+      }
+      if (!valid_row(dest, &delivery, 0))
+        return 0;
+      s->queues[dest][s->counts[dest]++] = delivery;
+    } else {
+      if (s->output_count == 32)
+        return 0;
+      s->output_slots[s->output_count] = slot + 1;
+      s->outputs[s->output_count++] = row;
+    }
+  }
+  return 1;
+}
+static int prepare(void *context, noun result) {
+  (void)context;
+#if defined(M44_G0_TEST_CONTROLS)
+  if (authority.busy_probe) {
+    authority.busy_probe = 0;
+    uint32_t token = 0;
+    M44Row row = {0};
+    authority.busy_mask =
+        (m44_supervisor_enqueue(1, &row) == M44_BUSY ? 1u : 0u) |
+        (m44_supervisor_dispatch() == M44_BUSY ? 2u : 0u) |
+        (m44_supervisor_capture(&token) == M44_BUSY ? 4u : 0u) |
+        (m44_supervisor_restore(authority.token) == M44_BUSY ? 8u : 0u);
+  }
+#endif
+  if (authority.operation == OP_TURN) {
+    authority.turn_fault = M44_FAULT_PRODUCT;
+    if (!parse_outputs(result))
+      return 0;
+    authority.turn_fault = M44_FAULT_PUBLICATION;
+  }
+  if (authority.operation == OP_CAPTURE) {
+    noun tag, body, results[2], rf[2];
+    if (!pair(result, &tag, &body) || !textis(tag, "m44-resource-group-v1") ||
+        !record(body, results, 2))
+      return 0;
+    for (uint32_t i = 0; i < 2; i++)
+      if (!fields(results[i], "m38-resource-abi-v1-result",
+                  "m38-resource-abi-v1-result-schema-v1", rf, 2) ||
+          !save(rf[1], &authority.snapshots[authority.snapshot_bank ^ 1u][i]))
+        return 0;
+  }
+#if defined(M44_G0_TEST_CONTROLS)
+  uint32_t fault = authority.operation == OP_RETIRE ? authority.retire_fault
+                                                    : authority.copy_fault;
+  if (fault)
+    m44_resource_test_fail_publication(authority.session, fault);
+  if (authority.operation == OP_RETIRE)
+    authority.retire_fault = 0;
+  else
+    authority.copy_fault = 0;
+#endif
+  return 1;
+}
+static void commit(void *context) {
+  (void)context;
+  if (authority.operation == OP_CAPTURE) {
+    authority.snapshot_bank ^= 1u;
+    authority.token++;
+  } else
+    authority.live ^= 1u;
+}
+static M44PublicationHooks hooks(void) {
+  return (M44PublicationHooks){prepare, commit, 0};
+}
+static M44Status ready(void) {
+  if (!authority.initialized)
+    return M44_INVALID;
+  if (authority.busy)
+    return M44_BUSY;
+  if (live()->fenced)
+    return M44_FENCED;
+  return M44_OK;
+}
+static int request(uint32_t slot, uint32_t op, noun argument, noun *out) {
+  noun handle, args, af[2], rf[2];
+  if (!decode(&authority.handles[slot], &handle))
+    return 0;
+  af[0] = handle;
+  af[1] = argument;
+  if (!build(af, 2, &args))
+    return 0;
+  rf[0] = direct(op);
+  rf[1] = args;
+  return tagged("m38-resource-abi-v1-request",
+                "m38-resource-abi-v1-request-schema-v1", rf, 2, out);
+}
+M44Status m44_supervisor_init(ResourceSession *session, const M44Descriptor *d,
+                              const M44Saved handles[2]) {
+  if (authority.initialized || !session || !d || !handles ||
+      d->source_slot < 1 || d->source_slot > 2 || d->target_slot < 1 ||
+      d->target_slot > 2 || d->source_slot == d->target_slot ||
+      !d->batch_bound || d->batch_bound > 16 || d->value_count > 16)
+    return M44_INVALID;
+  for (uint32_t i = 0; i < 2; i++) {
+    if (d->ingress_count[i] > 128 || d->output_count[i] > 128 ||
+        !handles[i].bytes || handles[i].bytes > M44_SAVED_BYTES)
+      return M44_INVALID;
+    for (uint32_t j = 0; j < d->ingress_count[i]; j++)
+      if (d->ingress[i][j].count > 16)
+        return M44_INVALID;
+    for (uint32_t j = 0; j < d->output_count[i]; j++)
+      if (d->outputs[i][j].count > 16)
+        return M44_INVALID;
+  }
+  authority.session = session;
+  authority.descriptor = *d;
+  const M44Boundary *source = boundary(d->source_slot - 1, d->source_event, 1);
+  const M44Boundary *target = boundary(d->target_slot - 1, d->target_event, 0);
+  if (!source || !target || source->count != d->value_count ||
+      target->count != d->value_count)
+    return M44_INVALID;
+  for (uint32_t i = 0; i < d->value_count; i++) {
+    if (target->values[i].id != d->target_ids[i] ||
+        target->values[i].type != d->types[i])
+      return M44_INVALID;
+    uint32_t matches = 0;
+    for (uint32_t j = 0; j < source->count; j++)
+      if (source->values[j].id == d->source_ids[i] &&
+          source->values[j].type == d->types[i])
+        matches++;
+    if (matches != 1)
+      return M44_INVALID;
+    for (uint32_t j = 0; j < i; j++)
+      if (d->source_ids[j] == d->source_ids[i] ||
+          d->target_ids[j] == d->target_ids[i])
+        return M44_INVALID;
+  }
+  noun decoded[2];
+  for (uint32_t i = 0; i < 2; i++)
+    if (!decode(&handles[i], &decoded[i]) || !save(decoded[i], &authority.handles[i]))
+      return M44_INVALID;
+  authority.roots[0].cursor = 1;
+  if (m44_resource_claim(session, &authority, decoded) != M38_STATUS_OK)
+    return M44_INVALID;
+  authority.initialized = 1;
+  return M44_OK;
+}
+M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *row) {
+  M44Status status = ready();
+  if (status)
+    return status;
+  if (slot < 1 || slot > 2 || !row || row->sequence ||
+      !valid_row(slot - 1, row, 0) ||
+      (slot == authority.descriptor.target_slot &&
+       row->event == authority.descriptor.target_event))
+    return M44_INVALID;
+  if (live()->counts[slot - 1] == 16)
+    return M44_FULL;
+  authority.busy = 1;
+  *stage() = *live();
+  stage()->queues[slot - 1][stage()->counts[slot - 1]++] = *row;
+  authority.operation = OP_ENQUEUE;
+  M44PublicationHooks h = hooks();
+  M38Status r = m44_resource_publish(authority.session, &authority, &h);
+  authority.busy = 0;
+  return r ? M44_PUBLICATION : M44_OK;
+}
+M44Status m44_supervisor_dispatch(void) {
+  M44Status status = ready();
+  if (status)
+    return status;
+  uint32_t slot = live()->cursor - 1;
+  if (!live()->counts[slot])
+    slot ^= 1u;
+  if (!live()->counts[slot])
+    return M44_NO_WORK;
+  authority.busy = 1;
+  authority.selected = slot;
+  *stage() = *live();
+  retire(stage(), slot);
+  stage()->output_count = 0;
+  byte_fill(stage()->outputs, 0, sizeof(stage()->outputs));
+  byte_fill(stage()->output_slots, 0, sizeof(stage()->output_slots));
+  stage()->fault = 0;
+  authority.operation = OP_TURN;
+  authority.turn_fault = M44_FAULT_NONE;
+  const M44Row *row = &live()->queues[slot][0];
+  noun values[16] = {0}, value_list = NOUN_ZERO, stimulus = NOUN_ZERO,
+       req = NOUN_ZERO;
+  int built = 1;
+  heap_set_mode(HEAP_MODE_PERSIST);
+  for (uint32_t i = 0; i < row->count; i++) {
+    noun vf[3] = {direct(row->values[i].id), direct(row->values[i].type),
+                  direct(row->values[i].raw)};
+    if (!tagged("m38-resource-abi-v1-numeric-value", value_schema(slot), vf, 3,
+                &values[i]))
+      built = 0;
+  }
+  noun sf[2];
+  if (!build(values, row->count, &value_list))
+    built = 0;
+  sf[0] = direct(row->event);
+  sf[1] = value_list;
+  if (!tagged("m38-resource-abi-v1-numeric-stimulus",
+              "m38-resource-abi-v1-numeric-stimulus-schema-v1", sf, 2,
+              &stimulus) ||
+      !request(slot, 2, stimulus, &req))
+    built = 0;
+  M44PublicationHooks h = hooks();
+  const ResourceResultView *view = 0;
+  M38Status r = built ? m44_resource_dispatch(authority.session, &authority,
+                                              req, &h, &view)
+                      : M38_STATUS_REQUEST_INVALID;
+  if (!r && view && view->wire_status == 2) {
+    authority.busy = 0;
+    return M44_OK;
+  }
+  *stage() = *live();
+  retire(stage(), slot);
+  stage()->fault = authority.turn_fault
+                       ? authority.turn_fault
+                       : (!built ? M44_FAULT_PUBLICATION
+                                 : (!r || r == M38_STATUS_EVALUATOR_ABORT
+                                        ? M44_FAULT_EVALUATION
+                                        : M44_FAULT_PUBLICATION));
+  stage()->output_count = 0;
+  byte_fill(stage()->outputs, 0, sizeof(stage()->outputs));
+  byte_fill(stage()->output_slots, 0, sizeof(stage()->output_slots));
+  authority.operation = OP_RETIRE;
+  r = m44_resource_publish(authority.session, &authority, &h);
+  if (r)
+    live()->fenced = 1;
+  authority.busy = 0;
+  return r ? M44_FENCED : M44_RETIRED;
+}
+M44Status m44_supervisor_capture(uint32_t *token) {
+  M44Status status = ready();
+  if (status)
+    return status;
+  if (!token || authority.token == UINT32_MAX)
+    return M44_INVALID;
+  authority.busy = 1;
+  authority.operation = OP_CAPTURE;
+  authority.checkpoints[authority.snapshot_bank ^ 1u] = *live();
+  noun handles[2], snapshots[2] = {NOUN_ZERO, NOUN_ZERO};
+  int ok = decode(&authority.handles[0], &handles[0]) &&
+           decode(&authority.handles[1], &handles[1]);
+  M44PublicationHooks h = hooks();
+  const ResourceResultView *view = 0;
+  M38Status r = ok ? m44_resource_group(authority.session, &authority, 0,
+                                        handles, snapshots, &h, &view)
+                   : M38_STATUS_REQUEST_INVALID;
+  authority.busy = 0;
+  if (r)
+    return M44_PUBLICATION;
+  *token = authority.token;
+  return M44_OK;
+}
+M44Status m44_supervisor_restore(uint32_t token) {
+  M44Status status = ready();
+  if (status)
+    return status;
+  if (!token || token != authority.token)
+    return M44_INVALID;
+  authority.busy = 1;
+  authority.operation = OP_RESTORE;
+  *stage() = authority.checkpoints[authority.snapshot_bank];
+  noun handles[2], snapshots[2];
+  int ok = 1;
+  for (uint32_t i = 0; i < 2; i++)
+    if (!decode(&authority.handles[i], &handles[i]) ||
+        !decode(&authority.snapshots[authority.snapshot_bank][i],
+                &snapshots[i]))
+      ok = 0;
+  M44PublicationHooks h = hooks();
+  const ResourceResultView *view = 0;
+  M38Status r = ok ? m44_resource_group(authority.session, &authority, 1,
+                                        handles, snapshots, &h, &view)
+                   : M38_STATUS_REQUEST_INVALID;
+  authority.busy = 0;
+  return r ? M44_PUBLICATION : M44_OK;
+}
+const M44State *m44_supervisor_state(void) {
+  return authority.initialized && !authority.busy ? live() : 0;
+}
+M44Status m44_supervisor_inspect(M44ResourceInspection *out) {
+  if (!authority.initialized || !out)
+    return M44_INVALID;
+  if (authority.busy)
+    return M44_BUSY;
+  authority.busy = 1;
+  M38Status r = m44_resource_inspect(authority.session, &authority, out);
+  authority.busy = 0;
+  return r ? M44_PUBLICATION : M44_OK;
+}
+M44Status m44_supervisor_restore_checked(uint32_t token,
+                                         const uint8_t identity[32],
+                                         uint64_t capability) {
+  if (!identity || byte_compare(identity, authority.descriptor.identity, 32))
+    return M44_INVALID;
+  M44ResourceInspection inspection;
+  M44Status status = m44_supervisor_inspect(&inspection);
+  if (status)
+    return status;
+  if (inspection.capability != capability)
+    return M44_INVALID;
+  return m44_supervisor_restore(token);
+}
+size_t m44_supervisor_storage_bytes(void) { return sizeof(authority); }
+#if defined(M44_G0_TEST_CONTROLS)
+void m44_supervisor_test_fault(uint32_t point, uint32_t retirement) {
+  if (!authority.busy) {
+    authority.copy_fault = point;
+    authority.retire_fault = retirement;
+  }
+}
+void m44_supervisor_test_busy(void) {
+  if (!authority.busy) {
+    authority.busy_probe = 1;
+    authority.busy_mask = 0;
+  }
+}
+uint32_t m44_supervisor_test_busy_mask(void) { return authority.busy_mask; }
+void m44_supervisor_test_sequence(uint32_t sequence) {
+  if (authority.initialized && !authority.busy)
+    live()->sequence = sequence;
+}
+#endif
+#endif

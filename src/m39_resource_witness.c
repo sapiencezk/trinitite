@@ -7,6 +7,12 @@
 #include "uart.h"
 #include "m38_resource_runtime.h"
 #include "m39_resource_witness.h"
+#if defined(M44_TWO_RESOURCE)
+#include "m44_device_witness.h"
+#endif
+#if defined(M44_G0_TEST_CONTROLS)
+#include "m44_g0_witness.h"
+#endif
 #include "m37_a_r_adapter.h"
 
 /* Generic, test-only D8 supervisor. The image contains no IEC fixture, source
@@ -27,7 +33,17 @@ typedef struct Saved {
 static uint8_t control[64u * 1024u] __attribute__((aligned(64)));
 static uint8_t workspace[4u * 1024u * 1024u] __attribute__((aligned(64)));
 static uint8_t session_storage[2u * 1024u * 1024u] __attribute__((aligned(64)));
+#if defined(M44_TWO_RESOURCE)
+void *m44_boot_control(void) { return control; }
+void *m44_boot_workspace(void) { return workspace; }
+void *m44_boot_session_storage(void) { return session_storage; }
+#endif
 static uint8_t catalog_jams[2][2][MAX_JAM];
+#if defined(M44_TWO_RESOURCE)
+void *m44_boot_catalog_storage(uint32_t slot, uint32_t part) {
+    return slot < 2 && part < 2 ? catalog_jams[slot][part] : 0;
+}
+#endif
 static uint32_t catalog_bytes[2][2];
 static Command commands[MAX_COMMANDS];
 static Saved handles[8], snapshots[8];
@@ -311,8 +327,14 @@ void m39_resource_boot(void) {
     for (uint32_t i = 0; i < 8; i++) bytes |= (uint64_t)base[i] << (8u * i);
     if (!bytes || bytes > 1024u * 1024u
         || cue_bounded_bytes((const uint8_t *)(uintptr_t)(PILL_BASE + 16u), bytes,
-                             &cue_i2_limits, HEAP_MODE_SCRATCH, &input) != CUE_BOUNDED_OK
-        || !record(input, envelope, 3) || !provider_config(envelope[2])
+                             &cue_i2_limits, HEAP_MODE_SCRATCH, &input) != CUE_BOUNDED_OK) goto fail;
+#if defined(M44_G0_TEST_CONTROLS)
+    if (m44_g0_try_boot(input)) return;
+#endif
+#if defined(M44_TWO_RESOURCE)
+    if (m44_device_try_boot(input)) return;
+#endif
+    if (!record(input, envelope, 3) || !provider_config(envelope[2])
         || !list(envelope[0], rows, 2, &count) || !count) goto fail;
     for (uint32_t i = 0; i < count; i++) {
         if (!record(rows[i], fields, 2)) goto fail;

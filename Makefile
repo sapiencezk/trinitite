@@ -140,6 +140,22 @@ M38_D7_NATIVE ?= 0
 M38_D8_NATIVE ?= 0
 M38_D8_WAVE_A ?= 0
 M39_RESOURCE_WITNESS ?= 0
+M44_TWO_RESOURCE ?= 0
+M44_G0_TEST_CONTROLS ?= 0
+ifeq ($(M44_TWO_RESOURCE),1)
+ifneq ($(M39_RESOURCE_WITNESS),1)
+$(error M44_TWO_RESOURCE=1 requires M39_RESOURCE_WITNESS=1)
+endif
+# M44 copies fixed typed records while the MMU is disabled. Do not combine
+# adjacent 32-bit fields into unaligned wide accesses in device memory.
+CFLAGS += -DM44_TWO_RESOURCE=1 -mstrict-align
+endif
+ifeq ($(M44_G0_TEST_CONTROLS),1)
+ifneq ($(M44_TWO_RESOURCE),1)
+$(error M44_G0_TEST_CONTROLS=1 requires M44_TWO_RESOURCE=1)
+endif
+CFLAGS += -DM44_G0_TEST_CONTROLS=1
+endif
 ifeq ($(M39_RESOURCE_WITNESS),1)
 ifneq ($(M38_D8_WAVE_A),1)
 $(error M39_RESOURCE_WITNESS=1 requires M38_D8_WAVE_A=1)
@@ -512,6 +528,12 @@ endif
 M38_D8_B1_OBJS =
 ifeq ($(M39_RESOURCE_WITNESS),1)
 M38_D8_WAVE_A_OBJS = m38_resource_runtime.o m39_resource_witness.o virtio_net.o m25_aethernet_native.o m36_aethernet_native.o m37_a_r_adapter.o
+ifeq ($(M44_TWO_RESOURCE),1)
+M38_D8_WAVE_A_OBJS += m44_two_resource_supervisor.o m44_device_witness.o
+endif
+ifeq ($(M44_G0_TEST_CONTROLS),1)
+M38_D8_WAVE_A_OBJS += m44_g0_witness.o
+endif
 endif
 ifeq ($(M38_D8_WAVE_B_SCENARIO),b1)
 M38_D8_B1_OBJS = m38_resource_wave_b1_witness.o
@@ -532,6 +554,12 @@ endif
 CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKEND)-$(M8_EVIDENCE)-$(I2_OPERATOR)-$(M21_SINK_EMBED)-$(M23_TEST_CONTROLS)-$(M24_NATIVE)-$(M25_TARGET)-$(M26_DUPLEX)-$(M27_COMMISSION)-$(M28_COMMISSION)-$(M29_COMMISSION)-$(M36_TYPED)-$(M37_A)-$(M37_A_R)-$(M38_C)-$(M38_D5_NATIVE)-$(M38_D7_NATIVE)-$(M38_D8_NATIVE)-$(M38_D8_WAVE_A)-$(M24_NODE_ID)
 ifeq ($(M39_RESOURCE_WITNESS),1)
 CONFIG_KEY := $(CONFIG_KEY)-m39
+endif
+ifeq ($(M44_TWO_RESOURCE),1)
+CONFIG_KEY := $(CONFIG_KEY)-m44-strict
+endif
+ifeq ($(M44_G0_TEST_CONTROLS),1)
+CONFIG_KEY := $(CONFIG_KEY)-g0test
 endif
 ifeq ($(M38_D8_WAVE_B_TEST_CONTROLS),1)
 CONFIG_KEY := $(CONFIG_KEY)-m38wavebtest
@@ -605,6 +633,13 @@ $(OBJDIR)/forth.o: $(SRCDIR)/forth.s | $(OBJDIR)
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+ifeq ($(M44_TWO_RESOURCE),1)
+$(OBJDIR)/m44_two_resource_supervisor.o $(OBJDIR)/m44_device_witness.o: \
+	$(SRCDIR)/m44_two_resource_supervisor.h $(SRCDIR)/m44_resource_transaction.h
+$(OBJDIR)/m38_resource_runtime.o $(OBJDIR)/m44_g0_witness.o: $(SRCDIR)/m44_resource_transaction.h
+$(OBJDIR)/m39_resource_witness.o $(OBJDIR)/m44_device_witness.o $(OBJDIR)/m44_g0_witness.o: $(SRCDIR)/m39_resource_witness.h
+endif
 
 # Generated admission data is a semantic target input.  The explicit edge
 # prevents an M21 artifact regeneration from linking an old policy object.

@@ -6,6 +6,9 @@
 #include "jam.h"
 #include "m38_resource_core_descriptor.h"
 #include "m38_resource_runtime.h"
+#if defined(M44_TWO_RESOURCE)
+#include "m44_resource_transaction.h"
+#endif
 #include "memory.h"
 #include "nock.h"
 #include "sha256.h"
@@ -250,6 +253,13 @@ typedef struct WaveSlot {
     uint32_t state_values[RESOURCE_MAX_PLAN_INSTANCES][RESOURCE_MAX_PLAN_VALUES];
 } WaveSlot;
 
+#if defined(M44_TWO_RESOURCE)
+typedef struct WaveM44Group {
+    uint32_t index[2];
+    WaveSlot slots[2];
+} WaveM44Group;
+#endif
+
 typedef struct WaveCatalogCopy {
     uint8_t valid;
     M38ResourceCoreDescriptor descriptor_storage;
@@ -278,6 +288,15 @@ struct ResourceSession {
     uint64_t refusal_generation;
     uint64_t session_transaction_id;
     uint64_t parse_count;
+#if defined(M44_TWO_RESOURCE)
+    const void *m44_owner;
+    const M44PublicationHooks *m44_hooks;
+    const WaveM44Group *m44_group;
+    uint8_t m44_call_active;
+#if defined(M44_G0_TEST_CONTROLS)
+    uint8_t m44_test_fault;
+#endif
+#endif
 };
 
 struct ResourceRuntime {
@@ -2190,11 +2209,30 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
     WaveRootCopies copies[RESOURCE_MAX_REGISTERED_SESSIONS];
     noun handle_copy = NOUN_ZERO, state_copy = NOUN_ZERO;
     noun snapshot_copy = NOUN_ZERO, result_copy = NOUN_ZERO;
-    uint64_t next_result_generation;
+    uint64_t next_result_generation = 0;
+#if defined(M44_TWO_RESOURCE)
+    const M44PublicationHooks *hooks = session->m44_hooks;
+    const WaveM44Group *group = session->m44_group;
+    noun group_handles[2], group_states[2], group_snapshots[2];
+    int participant = hooks && (wire_status == RESOURCE_WIRE_POKE || group
+                                || owner == M38_RESULT_OWNER_NONE);
+    if (owner == M38_RESULT_OWNER_NONE && !participant) {
+        *failure = M38_STATUS_SLOT_PUBLICATION;
+        return 0;
+    }
+    if (participant && !hooks->prepare(hooks->context, staged_result)) {
+        *failure = M38_STATUS_SLOT_PUBLICATION;
+        return 0;
+    }
+    if (owner != M38_RESULT_OWNER_NONE)
+#endif
     if (owner != M38_RESULT_OWNER_PRIMARY && owner != M38_RESULT_OWNER_REFUSAL) {
         *failure = M38_STATUS_SLOT_PUBLICATION;
         return 0;
     }
+#if defined(M44_TWO_RESOURCE)
+    if (owner != M38_RESULT_OWNER_NONE)
+#endif
     if (!wave_result_generation_advance(
             owner == M38_RESULT_OWNER_PRIMARY ? session->primary_generation
                                                : session->refusal_generation,
@@ -2243,6 +2281,28 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
         || !wave_copy_root(staged_snapshot, &snapshot_copy)
         || !wave_copy_root(staged_result, &result_copy))
         goto collective_fail;
+#if defined(M44_TWO_RESOURCE)
+    if (group) {
+        for (uint32_t i = 0; i < 2; i++) {
+            if (!wave_copy_root(group->slots[i].handle_root, &group_handles[i])
+                || !wave_copy_root(group->slots[i].state_root, &group_states[i])
+                || !wave_copy_root(group->slots[i].snapshot_root, &group_snapshots[i]))
+                goto collective_fail;
+#if defined(M44_G0_TEST_CONTROLS)
+            if (i == 0 && session->m44_test_fault == 2) {
+                session->m44_test_fault = 0;
+                goto collective_fail;
+            }
+#endif
+        }
+    }
+#if defined(M44_G0_TEST_CONTROLS)
+    if (session->m44_test_fault == 1) {
+        session->m44_test_fault = 0;
+        goto collective_fail;
+    }
+#endif
+#endif
 #if defined(M38_D8_WAVE_B_B0)
     b0_peak_sample();
 #endif
@@ -2250,7 +2310,7 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
     wave_apply_root_copies(runtime, copies);
     if (owner == M38_RESULT_OWNER_PRIMARY)
         session->primary_root = result_copy;
-    else
+    else if (owner == M38_RESULT_OWNER_REFUSAL)
         session->refusal_root = result_copy;
     if (staged_slot) {
         /* A staged slot is a value copy made before the persist flip.  Roots
@@ -2273,13 +2333,24 @@ static int wave_promote_operation(ResourceRuntime *runtime, ResourceSession *ses
         session->primary_view.generation = session->primary_generation;
         session->primary_view.wire_status = wire_status;
         session->primary_view.owner = M38_RESULT_OWNER_PRIMARY;
-    } else {
+    } else if (owner == M38_RESULT_OWNER_REFUSAL) {
         session->refusal_generation = next_result_generation;
         session->refusal_view.root_slot = &session->refusal_root;
         session->refusal_view.generation = session->refusal_generation;
         session->refusal_view.wire_status = wire_status;
         session->refusal_view.owner = M38_RESULT_OWNER_REFUSAL;
     }
+#if defined(M44_TWO_RESOURCE)
+    if (group) {
+        for (uint32_t i = 0; i < 2; i++) {
+            session->slots[group->index[i]] = group->slots[i];
+            session->slots[group->index[i]].handle_root = group_handles[i];
+            session->slots[group->index[i]].state_root = group_states[i];
+            session->slots[group->index[i]].snapshot_root = group_snapshots[i];
+        }
+    }
+    if (participant) hooks->commit(hooks->context);
+#endif
     runtime->promoted_root_count++;
     *failure = M38_STATUS_OK;
     heap_set_mode(HEAP_MODE_SCRATCH);
@@ -2780,6 +2851,10 @@ M38Status m38_resource_session_dispatch(ResourceSession *session, noun request,
     if (!wave_session_valid(session)) B0_DISPATCH_RETURN(M38_STATUS_RUNTIME_UNINITIALIZED);
     ResourceRuntime *runtime = session->runtime;
     if (session->state == 2) B0_DISPATCH_RETURN(M38_STATUS_SESSION_CLOSED);
+#if defined(M44_TWO_RESOURCE)
+    if (session->m44_owner && !session->m44_call_active)
+        B0_DISPATCH_RETURN(M38_STATUS_SESSION_BUSY);
+#endif
     if (session->in_flight) B0_DISPATCH_RETURN(M38_STATUS_SESSION_BUSY);
     if (runtime->broker_owner != 0 || runtime->state != 2)
         B0_DISPATCH_RETURN(M38_STATUS_RUNTIME_BUSY);
@@ -2819,6 +2894,223 @@ M38Status m38_resource_session_dispatch(ResourceSession *session, noun request,
 #undef B0_DISPATCH_RETURN
 }
 
+#if defined(M44_TWO_RESOURCE)
+static M38Status m44_access(ResourceSession *session, const void *owner)
+{
+    if (!wave_session_valid(session)) return M38_STATUS_RUNTIME_UNINITIALIZED;
+    if (session->state != 1) return M38_STATUS_SESSION_CLOSED;
+    if (!owner || session->m44_owner != owner) return M38_STATUS_SESSION_BUSY;
+    if (session->m44_call_active || session->in_flight) return M38_STATUS_SESSION_BUSY;
+    if (session->runtime->broker_owner || session->runtime->state != 2)
+        return M38_STATUS_RUNTIME_BUSY;
+    return M38_STATUS_OK;
+}
+
+static int m44_hooks_valid(const M44PublicationHooks *hooks)
+{
+    return hooks && hooks->prepare && hooks->commit;
+}
+
+M38Status m44_resource_claim(ResourceSession *session, const void *owner, const noun handles[2])
+{
+    if (!wave_session_valid(session)) return M38_STATUS_RUNTIME_UNINITIALIZED;
+    if (!owner || !handles) return M38_STATUS_INVALID_ARGUMENT;
+    if (session->state != 1) return M38_STATUS_SESSION_CLOSED;
+    if (session->m44_owner || session->in_flight) return M38_STATUS_SESSION_BUSY;
+    if (session->runtime->broker_owner || session->runtime->state != 2)
+        return M38_STATUS_RUNTIME_BUSY;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < RESOURCE_MAX_LIVE_HANDLES; i++)
+        if (session->slots[i].used) count++;
+    if (count != 2) return M38_STATUS_INVALID_ARGUMENT;
+    uint32_t indices[2];
+    for (uint32_t i = 0; i < 2; i++)
+        if (!wave_safe_noun(session->runtime, handles[i])
+            || !wave_handle_decode(session, handles[i], &indices[i])
+            || indices[i] != i) return M38_STATUS_REQUEST_INVALID;
+    session->m44_owner = owner;
+    return M38_STATUS_OK;
+}
+
+M38Status m44_resource_dispatch(ResourceSession *session, const void *owner,
+    noun request, const M44PublicationHooks *hooks, const ResourceResultView **out_view)
+{
+    if (!out_view) return M38_STATUS_INVALID_ARGUMENT;
+    *out_view = 0;
+    M38Status status = m44_access(session, owner);
+    if (status != M38_STATUS_OK) return status;
+    WaveRequest decoded = {0};
+    if (!wave_safe_noun(session->runtime, request) || !wave_request_decode(request, &decoded)
+        || (decoded.operation != RESOURCE_OP_POKE && decoded.operation != RESOURCE_OP_PEEK)
+        || (decoded.operation == RESOURCE_OP_POKE && !m44_hooks_valid(hooks)))
+        return M38_STATUS_REQUEST_INVALID;
+    session->m44_hooks = hooks;
+    session->m44_call_active = 1;
+    status = m38_resource_session_dispatch(session, request, out_view);
+    session->m44_call_active = 0;
+    session->m44_hooks = 0;
+    return status;
+}
+
+static M38Status m44_group_staged(ResourceSession *session, int restore,
+    const noun handles[2], const noun snapshots[2], const ResourceResultView **out_view)
+{
+    WaveM44Group group;
+    noun results[2];
+    for (uint32_t i = 0; i < 2; i++) {
+        WavePlan *plan;
+        if (!wave_handle_decode(session, handles[i], &group.index[i])
+            || !wave_plan_for_slot(session, group.index[i], &plan)
+            || (i && group.index[0] == group.index[1])) return M38_STATUS_REQUEST_INVALID;
+        WaveSlot *slot = &group.slots[i];
+        *slot = session->slots[group.index[i]];
+        noun handle, state, body;
+        if (!restore) {
+            if (slot->snapshot_nonce == RESOURCE_MAX_SNAPSHOT_NONCE)
+                return M38_STATUS_REQUEST_INVALID;
+            slot->snapshot_nonce++;
+            if (!wave_snapshot_build(session, plan, group.index[i], slot,
+                                      &state, &handle, &slot->snapshot_root)
+                || !wave_result_build(RESOURCE_WIRE_SNAPSHOT, slot->snapshot_root, &results[i]))
+                return M38_STATUS_ATOM_RESULT_STAGING;
+        } else {
+            if (!wave_snapshot_apply(session, plan, snapshots[i], group.index[i], slot))
+                return M38_STATUS_REQUEST_INVALID;
+            if (!wave_state_build(session, plan, slot->catalog_index, slot, &state)
+                || !wave_handle_build(session, group.index[i] + 1u, slot->generation,
+                                      slot->catalog_index, &handle)) return M38_STATUS_ATOM_RESULT_STAGING;
+            noun receipt, receipt_fields[2] = {handle, direct(slot->snapshot_nonce)};
+            if (!wave_build_tagged(RESOURCE_RECEIPT_TAG, RESOURCE_RECEIPT_SCHEMA,
+                                   receipt_fields, 2, &receipt)
+                || !wave_build_record((noun[3]){handle, state, receipt}, 3, &body)
+                || !wave_result_build(RESOURCE_WIRE_RESTORE, body, &results[i]))
+                return M38_STATUS_ATOM_RESULT_STAGING;
+        }
+        slot->handle_root = handle;
+        slot->state_root = state;
+    }
+    noun body, result;
+    if (!wave_build_list(results, 2, &body)
+        || !alloc_cell_checked(wave_cord("m44-resource-group-v1"), body, &result))
+        return M38_STATUS_ATOM_RESULT_STAGING;
+    M38Status status;
+    session->m44_group = &group;
+    int committed = wave_promote_operation(session->runtime, session, 0, 0,
+        NOUN_ZERO, NOUN_ZERO, NOUN_ZERO, result, M38_RESULT_OWNER_PRIMARY,
+        restore ? RESOURCE_WIRE_RESTORE : RESOURCE_WIRE_SNAPSHOT, &status);
+    session->m44_group = 0;
+    if (committed) *out_view = &session->primary_view;
+    return status;
+}
+
+/* A single broker envelope owns all temporary nouns and both candidates. */
+static M38Status m44_group_operation(ResourceSession *session, const void *owner,
+    int restore, const noun handles[2], const noun snapshots[2],
+    const M44PublicationHooks *hooks, const ResourceResultView **out_view)
+{
+    if (out_view) *out_view = 0;
+    M38Status status = m44_access(session, owner);
+    if (status != M38_STATUS_OK) return status;
+    if (!m44_hooks_valid(hooks) || restore < -1 || restore > 1)
+        return M38_STATUS_INVALID_ARGUMENT;
+    ResourceRuntime *runtime = session->runtime;
+    if (restore >= 0) {
+        if (!out_view || !handles || (restore && !snapshots)) return M38_STATUS_INVALID_ARGUMENT;
+        for (uint32_t i = 0; i < 2; i++)
+            if (!wave_safe_noun(runtime, handles[i])
+                || (restore && !wave_safe_noun(runtime, snapshots[i]))) return M38_STATUS_REQUEST_INVALID;
+    }
+    status = wave_take_fault(runtime, WAVE_FAULT_BROKER_BEGIN);
+    if (status != M38_STATUS_OK) return status;
+    runtime->broker_owner = (uint8_t)(session->registry_index + 1u);
+    runtime->state = 3;
+    session->in_flight = session->m44_call_active = 1;
+    session->m44_hooks = hooks;
+    session->session_transaction_id = ++runtime->broker_transaction_id;
+    uint64_t mark = heap_scratch_mark();
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    if (!noun_tx_begin(HEAP_MODE_SCRATCH)) status = M38_STATUS_INTERNAL;
+    else {
+        if (restore < 0) {
+            (void)wave_promote_operation(runtime, session, 0, 0, NOUN_ZERO,
+                NOUN_ZERO, NOUN_ZERO, NOUN_ZERO, M38_RESULT_OWNER_NONE, 0, &status);
+        } else status = m44_group_staged(session, restore, handles, snapshots, out_view);
+        if (status == M38_STATUS_OK) noun_tx_commit();
+        else noun_tx_abort();
+    }
+    session->m44_hooks = 0;
+    session->m44_group = 0;
+    session->in_flight = session->m44_call_active = 0;
+    wave_broker_release(runtime);
+    (void)heap_scratch_rewind(mark);
+    return status;
+}
+
+M38Status m44_resource_group(ResourceSession *session, const void *owner,
+    int restore, const noun handles[2], const noun snapshots[2],
+    const M44PublicationHooks *hooks, const ResourceResultView **out_view)
+{
+    if (restore != 0 && restore != 1) {
+        if (out_view) *out_view = 0;
+        return M38_STATUS_INVALID_ARGUMENT;
+    }
+    return m44_group_operation(session, owner, restore, handles, snapshots, hooks, out_view);
+}
+
+M38Status m44_resource_publish(ResourceSession *session, const void *owner,
+    const M44PublicationHooks *hooks)
+{
+    return m44_group_operation(session, owner, -1, 0, 0, hooks, 0);
+}
+
+M38Status m44_resource_inspect(ResourceSession *session, const void *owner,
+    M44ResourceInspection *out)
+{
+    M38Status status = m44_access(session, owner);
+    if (status != M38_STATUS_OK) return status;
+    if (!out) return M38_STATUS_INVALID_ARGUMENT;
+    M44ResourceInspection candidate = {0};
+    uint32_t slots[2];
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < RESOURCE_MAX_LIVE_HANDLES; i++) {
+        if (!session->slots[i].used) continue;
+        if (count == 2) return M38_STATUS_INTERNAL;
+        slots[count++] = i;
+    }
+    if (count != 2) return M38_STATUS_INTERNAL;
+    candidate.capability = session->capability;
+    for (uint32_t i = 0; i < 2; i++) {
+        WavePlan *plan;
+        if (!wave_plan_for_slot(session, slots[i], &plan))
+            return M38_STATUS_REQUEST_INVALID;
+        const WaveSlot *slot = &session->slots[slots[i]];
+        candidate.generations[i] = slot->generation;
+        candidate.snapshot_nonces[i] = slot->snapshot_nonce;
+        candidate.instance_counts[i] = plan->instance_count;
+        for (uint32_t j = 0; j < plan->instance_count; j++) {
+            const WavePlanType *type = &plan->types[plan->instance_types[j] - 1u];
+            M44InstanceInspection *instance = &candidate.instances[i][j];
+            instance->active = slot->state_ids[j];
+            instance->value_count = type->value_count;
+            for (uint32_t k = 0; k < type->value_count; k++) {
+                instance->types[k] = type->value_types[k];
+                instance->values[k] = slot->state_values[j][k];
+            }
+        }
+    }
+    *out = candidate;
+    return M38_STATUS_OK;
+}
+
+#if defined(M44_G0_TEST_CONTROLS)
+void m44_resource_test_fail_publication(ResourceSession *session, uint32_t point)
+{
+    if (wave_session_valid(session) && session->in_flight && point <= 2)
+        session->m44_test_fault = (uint8_t)point;
+}
+#endif
+#endif
+
 static M38Status wave_lifecycle_begin(ResourceRuntime *runtime,
                                       ResourceSession *session)
 {
@@ -2826,6 +3118,9 @@ static M38Status wave_lifecycle_begin(ResourceRuntime *runtime,
     if (!wave_session_valid(session) || session->runtime != runtime)
         return M38_STATUS_RUNTIME_UNINITIALIZED;
     if (session->state == 2) return M38_STATUS_SESSION_CLOSED;
+#if defined(M44_TWO_RESOURCE)
+    if (session->m44_owner) return M38_STATUS_SESSION_BUSY;
+#endif
     if (session->in_flight) return M38_STATUS_SESSION_BUSY;
     if (runtime->broker_owner != 0 || runtime->state == 3)
         return M38_STATUS_RUNTIME_BUSY;
