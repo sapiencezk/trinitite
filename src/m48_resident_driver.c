@@ -56,12 +56,32 @@ M48TurnResult m48_resident_turn(M48ResidentDriver *d,const M48LocalRequest *r) {
    * was consumed. Never turn a failed submit into a fresh attempt. */
   if (d->tx_valid && p.tx_state==M47_TX_NONE) {
     d->tx_valid=0; d->tx_observed=0;
+#if defined(M51_CONTROLLER)
+    d->tx_status=0;
+#endif
   }
   if (d->tx_valid && !d->tx_observed && d->tx_epoch==epoch &&
       p.tx_state==M47_TX_CLAIMED && p.tx_token==d->tx_token) {
+#if defined(M51_CONTROLLER)
+    if (d->adapter.completion_result) {
+      uint32_t status=0;
+      out.completion_poll=d->adapter.completion_result(d->adapter.context,epoch,d->tx_token,d->tx_value,&status);
+      if (out.completion_poll==M48_READY) {
+        d->tx_observed=1; d->tx_status=status;
+        if (status>2) out.completion_poll=M48_REFUSED;
+      }
+    } else
+#endif
     out.completion_poll=d->adapter.completion(d->adapter.context,epoch,d->tx_token,d->tx_value);
     if (out.completion_poll==M48_READY) d->tx_observed=1;
   }
+#if defined(M51_CONTROLLER)
+  /* An invalid one-shot completion is still an observation. Preserve the
+   * claim and raw status, stop this driver, and require cold-boot recovery. */
+  if (d->tx_valid && d->tx_observed && d->tx_status>2) {
+    out.completion_admit=M44_INVALID; return out;
+  }
+#endif
   if (!d->rx_valid && q.phase==M47_SERVICE_OPEN && !q.rx_state && !q.release_queued) {
     uint64_t token=0; uint32_t value=0;
     out.receive_poll=d->adapter.receive(d->adapter.context,epoch,&token,&value);
@@ -80,6 +100,9 @@ M48TurnResult m48_resident_turn(M48ResidentDriver *d,const M48LocalRequest *r) {
   if (d->tx_valid && d->tx_observed && d->tx_epoch==epoch &&
       p.tx_state==M47_TX_CLAIMED && p.tx_token==d->tx_token) {
     M44Row row=cause(d->bindings[pub].instance_id,3,d->tx_token,d->tx_value);
+#if defined(M51_CONTROLLER)
+    row.values[5].raw=d->tx_status;
+#endif
     out.completion_admit=m47_provider_enqueue(pub+1,epoch,&row);
   }
   if (d->rx_valid) {
@@ -110,6 +133,9 @@ M48TurnResult m48_resident_turn(M48ResidentDriver *d,const M48LocalRequest *r) {
   if (!s->fenced && p.phase==M47_SERVICE_OPEN && p.tx_state==M47_TX_COMMITTED) {
     out.claim=m47_provider_claim(pub+1,epoch,p.tx_token);
     if (out.claim==M44_OK) {
+#if defined(M51_CONTROLLER)
+      d->tx_status=0;
+#endif
       d->tx_valid=1; d->tx_observed=0; d->tx_epoch=epoch;
       d->tx_token=p.tx_token; d->tx_value=p.tx_value;
       out.submit=d->adapter.submit(d->adapter.context,epoch,p.tx_token,p.tx_value);

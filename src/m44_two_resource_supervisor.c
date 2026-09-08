@@ -48,6 +48,11 @@ static struct {
   uint32_t periodic;
 #endif
   M49TimerBinding timer_binding;
+#if defined(M51_CONTROLLER)
+  uint32_t controller, controller_cnf;
+  M51TimerBinding timer_bindings[2];
+  M51ReturnBinding completion;
+#endif
   uint64_t clock_ms, clock_turn;
 #endif
   M44Descriptor descriptor;
@@ -199,10 +204,22 @@ static int valid_row(uint32_t slot, const M44Row *row, int output) {
 }
 #if defined(M47_MANAGED_SERVICES)
 #if defined(M49_MANAGED_DELAY)
+#if defined(M51_CONTROLLER)
+static int m51_private(uint32_t slot,uint32_t event);
+static int m51_active(void);
+static uint32_t m51_capacity(uint32_t slot,int consuming);
+static int m51_output(uint32_t slot,const M44Row *row);
+static int m51_consumed(uint32_t slot);
+static int m51_crossing(uint32_t slot,const M44Row *row);
+static M44Status m51_clock(void);
+#endif
 static uint32_t m49_event(uint32_t ordinal) {
   return authority.timer_binding.instance_id*1024u+ordinal;
 }
 static int m49_private(uint32_t slot,uint32_t event) {
+#if defined(M51_CONTROLLER)
+  if (authority.controller) return m51_private(slot,event);
+#endif
   return authority.timed && slot+1==authority.timer_binding.slot && event==m49_event(3);
 }
 static void m49_clear(M49TimerLedger *timer) {
@@ -223,6 +240,9 @@ static int m47_public_release(uint32_t slot,const M44Row *row) {
       row->count==2 && row->values[0].raw==0;
 }
 static uint32_t m47_capacity(uint32_t slot,int consuming) {
+#if defined(M51_CONTROLLER)
+  if (authority.controller) return m51_capacity(slot,consuming);
+#endif
   if (!authority.services || slot+1!=authority.descriptor.target_slot) return 16;
   uint32_t source=authority.descriptor.source_slot-1;
 #if defined(M49_MANAGED_DELAY)
@@ -253,6 +273,9 @@ static uint64_t m47_token(const M44Row *row, uint32_t offset) {
 }
 #if defined(M49_MANAGED_DELAY)
 static int m49_output(uint32_t slot,const M44Row *row) {
+#if defined(M51_CONTROLLER)
+  if (authority.controller) return m51_output(slot,row);
+#endif
   if (!authority.timed || slot+1!=authority.timer_binding.slot) return 1;
   M49TimerLedger *timer=&stage()->timer;
   if (row->event==m49_event(5)) { /* ARM: DT then four token limbs */
@@ -285,6 +308,9 @@ static int m49_output(uint32_t slot,const M44Row *row) {
   return 1;
 }
 static int m49_consumed(uint32_t slot) {
+#if defined(M51_CONTROLLER)
+  if (authority.controller) return m51_consumed(slot);
+#endif
   if (!authority.timed) return 1;
   const M44Row *row=&live()->queues[slot][0];
   if (m49_private(slot,row->event) && stage()->timer.phase==M49_TIMER_QUEUED &&
@@ -302,6 +328,9 @@ static int m47_output(uint32_t slot, const M44Row *row) {
   } else if (authority.bindings[slot].kind == 1 &&
              row->event == m47_event(slot, 7)) {
     uint64_t token = m47_token(row, 0);
+#if defined(M51_CONTROLLER)
+    if (authority.controller && !stage()->publish_roundtrip) return 0;
+#endif
     if (p->phase != 1 || p->tx_state || !token || token >> 63 ||
         p->release_queued || row->values[5].raw != 0) return 0;
     p->tx_state = 1; p->tx_token = token; p->tx_value = row->values[4].raw;
@@ -315,6 +344,9 @@ static int m47_consumed(uint32_t slot) {
   if (row->event == m47_event(slot, 3)) {
     if (authority.bindings[slot].kind == 1) {
       uint32_t cnf = 0;
+#if defined(M51_CONTROLLER)
+      if (authority.controller) cnf=authority.controller_cnf;
+#endif
       for (uint32_t i=0;i<stage()->output_count;i++)
         if (stage()->output_slots[i] == slot+1 &&
             stage()->outputs[i].event == m47_event(slot,6)) cnf++;
@@ -353,6 +385,9 @@ static int parse_outputs(noun result) {
               "m38-resource-abi-v1-numeric-effects-schema-v1", ef, 1) ||
       !list(ef[0], rows, 32, &count))
     return 0;
+#if defined(M51_CONTROLLER)
+  authority.controller_cnf=0;
+#endif
   uint32_t internal = 0;
   const M44Descriptor *d = &authority.descriptor;
   for (uint32_t i = 0; i < count; i++) {
@@ -386,6 +421,13 @@ static int parse_outputs(noun result) {
 #if defined(M49_MANAGED_DELAY)
     if (!m49_output(slot, &row)) return 0;
 #endif
+#endif
+#if defined(M51_CONTROLLER)
+    if (authority.controller) {
+      int routed=m51_crossing(slot,&row);
+      if (routed<0) return 0;
+      if (routed) continue;
+    }
 #endif
     if (slot + 1 == d->source_slot && row.event == d->source_event) {
       uint32_t dest = d->target_slot - 1;
@@ -673,6 +715,9 @@ M44Status m49_supervisor_clock(uint32_t epoch,uint64_t now_ms,uint64_t turn) {
   if (!authority.timed || epoch!=live()->epoch ||
       (authority.clock_valid && (now_ms<authority.clock_ms || turn<=authority.clock_turn))) return M44_INVALID;
   authority.clock_ms=now_ms; authority.clock_turn=turn; authority.clock_valid=1;
+#if defined(M51_CONTROLLER)
+  if (authority.controller) return m51_clock();
+#endif
   const M49TimerLedger *timer=&live()->timer;
   if (timer->phase!=M49_TIMER_ARMED || now_ms<timer->deadline_ms || turn<timer->not_before_turn) return M44_NO_WORK;
   uint32_t slot=authority.timer_binding.slot-1;
@@ -685,6 +730,7 @@ M44Status m49_supervisor_clock(uint32_t epoch,uint64_t now_ms,uint64_t turn) {
   return m47_publish();
 }
 #endif
+#include "m51_controller_authority.inc"
 uint32_t m47_provider_receive_holds(void) { return authority.receive_holds; }
 M44Status m47_provider_receive_hold(uint32_t slot,uint32_t epoch,uint32_t pending) {
   M44Status status=m47_ready(slot,epoch);
@@ -736,7 +782,11 @@ M44Status m47_provider_enqueue(uint32_t slot, uint32_t epoch, const M44Row *row)
   } else {
 #if defined(M49_MANAGED_DELAY)
     /* A future expiry still owns the provider path, including private RELEASE. */
-    if (authority.timed && live()->timer.phase) return M44_INVALID;
+    if (authority.timed && (
+#if defined(M51_CONTROLLER)
+        authority.controller ? m51_active() :
+#endif
+        live()->timer.phase)) return M44_INVALID;
 #endif
     if ((authority.receive_holds & (1u<<index)) || p->tx_state || p->rx_state || live()->counts[index] ||
         row->values[0].raw>2) return M44_INVALID;
@@ -769,6 +819,10 @@ M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *row) {
 #if defined(M47_MANAGED_SERVICES)
 #if defined(M49_MANAGED_DELAY)
   if (m49_private(slot-1,row->event)) return M44_INVALID;
+#if defined(M51_CONTROLLER)
+  if (authority.controller && slot==authority.completion.target_slot &&
+      row->event==authority.completion.target_event) return M44_INVALID;
+#endif
 #endif
   if (m47_private(slot-1,row->event) ||
       (authority.services && row->event == m47_event(slot-1,1) &&
@@ -777,7 +831,11 @@ M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *row) {
 #if defined(M47_MANAGED_SERVICES)
   if (m47_public_release(slot-1,row)) {
 #if defined(M49_MANAGED_DELAY)
-    if (authority.timed && live()->timer.phase) return M44_INVALID;
+    if (authority.timed && (
+#if defined(M51_CONTROLLER)
+        authority.controller ? m51_active() :
+#endif
+        live()->timer.phase)) return M44_INVALID;
 #endif
     const M47ProviderLedger *p=&live()->providers[slot-1];
     if ((authority.receive_holds & (1u<<(slot-1))) || p->phase!=1 || p->tx_state || p->rx_state || live()->counts[slot-1]) return M44_INVALID;
@@ -861,6 +919,11 @@ M44Status m44_supervisor_dispatch(void) {
   if (m47_private(slot,row->event) || m47_public_release(slot,row)
 #if defined(M49_MANAGED_DELAY)
       || m49_private(slot,row->event)
+#if defined(M51_CONTROLLER)
+      || (authority.controller && row->sequence &&
+          ((slot+1==authority.descriptor.target_slot && row->event==authority.descriptor.target_event) ||
+           (slot+1==authority.completion.target_slot && row->event==authority.completion.target_event)))
+#endif
 #endif
       ) stage()->fenced=1;
 #endif
@@ -998,7 +1061,11 @@ M45Status m45_supervisor_manage(uint32_t command, uint32_t target) {
   }
 #endif
 #if defined(M49_MANAGED_DELAY)
-  if (authority.timed && command==8 && live()->timer.phase) return M45_NOT_READY;
+  if (authority.timed && command==8 && (
+#if defined(M51_CONTROLLER)
+        authority.controller ? m51_active() :
+#endif
+        live()->timer.phase)) return M45_NOT_READY;
 #endif
   if (command == 8 && live()->epoch == UINT32_MAX)
     return M45_NOT_READY;

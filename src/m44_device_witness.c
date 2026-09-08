@@ -49,6 +49,11 @@ static uint32_t managed_delay;
 static uint32_t managed_cycle;
 #endif
 static M49TimerBinding m49_timer_binding;
+#if defined(M51_CONTROLLER)
+static uint32_t managed_controller;
+static M51TimerBinding m51_timer_bindings[2];
+static M51ReturnBinding m51_completion;
+#endif
 #endif
 #endif
 #if defined(M48_RESIDENT)
@@ -218,6 +223,9 @@ static int descriptor_read(noun value, noun expected) {
     descriptor_timed_profile=text_is(tag,"m49-two-resource-deployment-v1");
 #if defined(M50_PERIODIC)
     if (text_is(tag,"m50-two-resource-deployment-v1")) descriptor_timed_profile=2;
+#if defined(M51_CONTROLLER)
+    if (text_is(tag,"m51-two-resource-deployment-v1")) descriptor_timed_profile=3;
+#endif
 #endif
     if (!descriptor_timed_profile && !text_is(tag,"m44-two-resource-deployment-v1")) return 0;
 #else
@@ -381,6 +389,20 @@ static int emit(uint32_t index, uint32_t status, uint32_t token) {
         uart_putc(',');number(timer->deadline_ms);uart_putc(',');number(timer->not_before_turn);uart_putc(']');
     }
 #endif
+#if defined(M51_CONTROLLER)
+    if (managed_controller) {
+        uart_puts(",\"roundtrip\":");number(state->publish_roundtrip);
+        uart_puts(",\"timers\":[");
+        for (uint32_t i=0;i<2;i++) {
+            const M49TimerLedger *t=&state->timers[i];
+            if (i) uart_putc(',');
+            uart_putc('[');number(t->phase);uart_putc(',');number(t->generation);
+            uart_putc(',');number(t->highwater);uart_putc(',');number(t->duration_ms);
+            uart_putc(',');number(t->deadline_ms);uart_putc(',');number(t->not_before_turn);uart_putc(']');
+        }
+        uart_putc(']');
+    }
+#endif
     uart_puts(",\"fenced\":"); number(state->fenced); uart_puts(",\"queues\":[");
     for (uint32_t slot = 0; slot < 2; slot++) {
         if (slot) uart_putc(',');
@@ -428,6 +450,7 @@ static void finish(void) {
 
 #include "m47_device_witness.inc"
 #include "m49_device_resident.inc"
+#include "m51_device_resident.inc"
 #include "m48_device_resident.inc"
 
 int m44_device_try_boot(noun input) {
@@ -452,6 +475,10 @@ int m44_device_try_boot(noun input) {
 #if defined(M50_PERIODIC)
     managed_cycle=text_is(tag,"m50-resident-boot-v1");
     managed_delay |= managed_cycle;
+#if defined(M51_CONTROLLER)
+    managed_controller=text_is(tag,"m51-resident-boot-v1");
+    managed_delay |= managed_controller;
+#endif
 #endif
     if (managed_delay) resident_mode=1;
 #endif
@@ -460,6 +487,9 @@ int m44_device_try_boot(noun input) {
     if (text_is(tag,"m49-driver-test-v1")) { managed_delay=1; resident_mode=2; }
 #if defined(M50_PERIODIC)
     if (text_is(tag,"m50-driver-test-v1")) { managed_cycle=1; managed_delay=1; resident_mode=2; }
+#if defined(M51_CONTROLLER)
+    if (text_is(tag,"m51-driver-test-v1")) { managed_controller=1; managed_delay=1; resident_mode=2; }
+#endif
 #endif
 #endif
     if (text_is(tag,"m48-driver-test-v1")) resident_mode=2;
@@ -477,7 +507,11 @@ int m44_device_try_boot(noun input) {
     if (managed_services) {
         if (!record(body,envelope,6) ||
 #if defined(M49_MANAGED_DELAY)
-            !(managed_delay ? m49_descriptor_read(envelope[0],envelope[1]) : m47_descriptor_read(envelope[0],envelope[1])) ||
+            !(
+#if defined(M51_CONTROLLER)
+              managed_controller ? m51_descriptor_read(envelope[0],envelope[1]) :
+#endif
+              managed_delay ? m49_descriptor_read(envelope[0],envelope[1]) : m47_descriptor_read(envelope[0],envelope[1])) ||
 #else
             !m47_descriptor_read(envelope[0],envelope[1]) ||
 #endif
@@ -512,6 +546,9 @@ int m44_device_try_boot(noun input) {
 #if defined(M45_MANAGED_LIFECYCLE)
             #if defined(M47_MANAGED_SERVICES)
 #if defined(M49_MANAGED_DELAY) && defined(M44_G0_TEST_CONTROLS)
+#if defined(M51_CONTROLLER)
+            managed_controller ? 44 :
+#endif
             managed_delay ? 43 :
 #endif
             managed_services ? 39 :
@@ -623,6 +660,9 @@ int m44_device_try_boot(noun input) {
 #if defined(M47_MANAGED_SERVICES)
 #if defined(M49_MANAGED_DELAY)
 #if defined(M50_PERIODIC)
+#if defined(M51_CONTROLLER)
+         managed_controller ? m51_supervisor_init(session,&descriptor,handles,m47_bindings,m51_timer_bindings,&m51_completion) :
+#endif
          managed_cycle ? m50_supervisor_init(session,&descriptor,handles,m47_bindings,m49_timer_binding) :
 #endif
          managed_delay ? m49_supervisor_init(session,&descriptor,handles,m47_bindings,m49_timer_binding) :
@@ -642,6 +682,9 @@ int m44_device_try_boot(noun input) {
     storage += sizeof(managed_delay)+sizeof(m49_timer_binding);
 #if defined(M50_PERIODIC)
     storage += sizeof(managed_cycle);
+#if defined(M51_CONTROLLER)
+    storage += sizeof(managed_controller)+sizeof(m51_timer_bindings)+sizeof(m51_completion);
+#endif
 #endif
 #endif
 #endif

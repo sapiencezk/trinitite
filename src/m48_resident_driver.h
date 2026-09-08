@@ -15,6 +15,15 @@ typedef struct {
   M48IOStatus (*submit)(void *,uint32_t epoch,uint64_t token,uint32_t value);
   /* READY only when shared physical transport has no pending TX. */
   M48IOStatus (*release_ready)(void *);
+#if defined(M51_CONTROLLER)
+  /* Optional matching completion with retained service status 0..2. READY
+   * captures status once with epoch/token/value; later queue pressure cannot
+   * poll it again. Invalid READY status is captured but stops driver stages;
+   * its retained claim requires cold-boot recovery. Null retains the original
+   * success-only adapter contract. */
+  M48IOStatus (*completion_result)(void *,uint32_t epoch,uint64_t token,
+                                  uint32_t value,uint32_t *status);
+#endif
 } M48Adapter;
 typedef enum { M48_LOCAL_NONE=0, M48_LOCAL_INGRESS=1,
                M48_LOCAL_MANAGE=2, M48_LOCAL_RELEASE=3 } M48LocalKind;
@@ -38,6 +47,9 @@ typedef struct {
   uint64_t rx_token;
   uint32_t tx_valid,tx_observed,tx_epoch,tx_value;
   uint64_t tx_token;
+#if defined(M51_CONTROLLER)
+  uint32_t tx_status;
+#endif
 #if defined(M49_MANAGED_DELAY)
   /* Optional M49 boot hook, once after admissions and before dispatch.
    * It may publish one trusted expiry through the supervisor. Null retains

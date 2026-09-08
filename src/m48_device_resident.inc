@@ -112,7 +112,11 @@ static int m48_emit(uint32_t index,uint32_t request,const M48TurnResult *r) {
     else
 #endif
     { uart_puts("],\"input_refusals\":"); }
-    number(m48_input_refusals); uart_puts("}\r\n");
+    number(m48_input_refusals);
+#if defined(M51_CONTROLLER)
+    if (managed_controller) { uart_puts(",\"completion_status\":");number(m48_driver.tx_status); }
+#endif
+    uart_puts("}\r\n");
     return emit(index,r->local==M48_SKIPPED?0:r->local,0);
 }
 #if defined(M44_G0_TEST_CONTROLS)
@@ -121,6 +125,9 @@ static int m48_emit(uint32_t index,uint32_t request,const M48TurnResult *r) {
 typedef struct { uint32_t rx,rx_epoch,rx_value,completion,completion_epoch,completion_value,
     refuse_submit,physical_pending; uint64_t rx_token,completion_token; } M48Fixture;
 static M48Fixture m48_fixture;
+#if defined(M51_CONTROLLER)
+static uint32_t m51_fixture_completion_status;
+#endif
 static M48IOStatus m48_fake_rx(void *ctx,uint32_t epoch,uint64_t *token,uint32_t *value) {
     M48Fixture *f=ctx; if (!f->rx) return M48_EMPTY;
     f->rx=0; if (epoch!=f->rx_epoch) return M48_REFUSED;
@@ -132,6 +139,13 @@ static M48IOStatus m48_fake_completion(void *ctx,uint32_t epoch,uint64_t token,u
     if (epoch!=f->completion_epoch || token!=f->completion_token || value!=f->completion_value) return M48_REFUSED;
     f->physical_pending=0; return M48_READY;
 }
+#if defined(M51_CONTROLLER)
+static M48IOStatus m51_fake_completion(void *ctx,uint32_t epoch,uint64_t token,uint32_t value,uint32_t *status) {
+    M48IOStatus result=m48_fake_completion(ctx,epoch,token,value);
+    if (result==M48_READY) *status=m51_fixture_completion_status;
+    return result;
+}
+#endif
 static M48IOStatus m48_fake_submit(void *ctx,uint32_t epoch,uint64_t token,uint32_t value) {
     M48Fixture *f=ctx; (void)epoch; (void)token; (void)value;
     if (f->refuse_submit) return M48_REFUSED;
@@ -143,6 +157,9 @@ static M48IOStatus m48_fake_release(void *ctx) {
 static int m48_qualified_run(uint32_t count,uint32_t blocked) {
     M48Adapter adapter={.context=&m48_fixture,.receive=m48_fake_rx,.completion=m48_fake_completion,
         .submit=m48_fake_submit,.release_ready=m48_fake_release};
+#if defined(M51_CONTROLLER)
+    if (managed_controller) adapter.completion_result=m51_fake_completion;
+#endif
     if (m48_resident_init(&m48_driver,m47_bindings,&adapter)!=M44_OK) return 0;
 #if defined(M49_MANAGED_DELAY)
     if (managed_delay) m48_driver.before_dispatch=m49_fake_before_dispatch;
@@ -171,7 +188,14 @@ static int m48_qualified_run(uint32_t count,uint32_t blocked) {
             if (m48_fixture.rx) return 0;
             m48_fixture.rx=1; m48_fixture.rx_epoch=c->epoch;
             m48_fixture.rx_token=c->provider_token; m48_fixture.rx_value=c->argument;
-        } else if (c->op==31) {
+        } else if (c->op==31
+#if defined(M51_CONTROLLER)
+                   || (managed_controller && c->op==44)
+#endif
+        ) {
+#if defined(M51_CONTROLLER)
+            m51_fixture_completion_status=c->op==44?c->slot:0;
+#endif
             if (m48_fixture.completion) return 0;
             m48_fixture.completion=1; m48_fixture.completion_epoch=c->epoch;
             m48_fixture.completion_token=c->provider_token; m48_fixture.completion_value=c->argument;
@@ -242,6 +266,10 @@ static int m48_run(uint32_t mode,uint32_t count) {
 #endif
 #if defined(M49_MANAGED_DELAY)
 #if defined(M50_PERIODIC)
+#if defined(M51_CONTROLLER)
+    if (managed_controller) uart_puts("M51 resident=ready\r\n");
+    else
+#endif
     if (managed_cycle) uart_puts("M50 resident=ready\r\n");
     else
 #endif

@@ -50,6 +50,14 @@ typedef struct {
   uint32_t phase, duration_ms;
   uint64_t generation, highwater, deadline_ms, not_before_turn;
 } M49TimerLedger;
+#if defined(M51_CONTROLLER)
+typedef struct { uint32_t kind; M49TimerBinding binding; } M51TimerBinding;
+/* The sole reverse crossing projects publisher STATUS to PUBLISH_DONE. */
+typedef struct {
+  uint32_t source_slot, source_event, target_slot, target_event;
+  uint32_t source_id, target_id, type;
+} M51ReturnBinding;
+#endif
 #endif
 typedef struct {
   uint32_t cursor, sequence, fault, fenced, counts[2], output_count;
@@ -63,6 +71,10 @@ typedef struct {
 #endif
 #if defined(M49_MANAGED_DELAY)
   M49TimerLedger timer;
+#if defined(M51_CONTROLLER)
+  M49TimerLedger timers[2];
+  uint32_t publish_roundtrip;
+#endif
 #endif
 } M44State;
 typedef enum {
@@ -113,6 +125,11 @@ M44Status m49_supervisor_clock(uint32_t epoch, uint64_t now_ms, uint64_t turn);
 /* Same timer authority, with positive-period and consumed-expiry re-arm rules. */
 M44Status m50_supervisor_init(ResourceSession *, const M44Descriptor *,
     const M44Saved handles[2], const M47ProviderBinding bindings[2], M49TimerBinding timer);
+#endif
+#if defined(M51_CONTROLLER)
+M44Status m51_supervisor_init(ResourceSession *, const M44Descriptor *,
+    const M44Saved handles[2], const M47ProviderBinding bindings[2],
+    const M51TimerBinding timers[2], const M51ReturnBinding *completion);
 #endif
 #endif
 M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *);
