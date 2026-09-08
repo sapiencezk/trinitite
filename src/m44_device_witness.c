@@ -45,6 +45,9 @@ static uint32_t managed_services;
 static M47ProviderBinding m47_bindings[2];
 #if defined(M49_MANAGED_DELAY)
 static uint32_t managed_delay;
+#if defined(M50_PERIODIC)
+static uint32_t managed_cycle;
+#endif
 static M49TimerBinding m49_timer_binding;
 #endif
 #endif
@@ -213,6 +216,9 @@ static int descriptor_read(noun value, noun expected) {
     if (!pair(value, &tag, &body)) return 0;
 #if defined(M49_MANAGED_DELAY)
     descriptor_timed_profile=text_is(tag,"m49-two-resource-deployment-v1");
+#if defined(M50_PERIODIC)
+    if (text_is(tag,"m50-two-resource-deployment-v1")) descriptor_timed_profile=2;
+#endif
     if (!descriptor_timed_profile && !text_is(tag,"m44-two-resource-deployment-v1")) return 0;
 #else
     if (!text_is(tag,"m44-two-resource-deployment-v1")) return 0;
@@ -443,11 +449,18 @@ int m44_device_try_boot(noun input) {
     resident_mode=text_is(tag,"m48-resident-boot-v1");
 #if defined(M49_MANAGED_DELAY)
     managed_delay=text_is(tag,"m49-resident-boot-v1");
+#if defined(M50_PERIODIC)
+    managed_cycle=text_is(tag,"m50-resident-boot-v1");
+    managed_delay |= managed_cycle;
+#endif
     if (managed_delay) resident_mode=1;
 #endif
 #if defined(M44_G0_TEST_CONTROLS)
 #if defined(M49_MANAGED_DELAY)
     if (text_is(tag,"m49-driver-test-v1")) { managed_delay=1; resident_mode=2; }
+#if defined(M50_PERIODIC)
+    if (text_is(tag,"m50-driver-test-v1")) { managed_cycle=1; managed_delay=1; resident_mode=2; }
+#endif
 #endif
     if (text_is(tag,"m48-driver-test-v1")) resident_mode=2;
     if (text_is(tag,"m48-backpressure-test-v1")) resident_mode=3;
@@ -609,6 +622,9 @@ int m44_device_try_boot(noun input) {
     if ((
 #if defined(M47_MANAGED_SERVICES)
 #if defined(M49_MANAGED_DELAY)
+#if defined(M50_PERIODIC)
+         managed_cycle ? m50_supervisor_init(session,&descriptor,handles,m47_bindings,m49_timer_binding) :
+#endif
          managed_delay ? m49_supervisor_init(session,&descriptor,handles,m47_bindings,m49_timer_binding) :
 #endif
          managed_services ? m47_supervisor_init(session,&descriptor,handles,m47_bindings) :
@@ -624,6 +640,9 @@ int m44_device_try_boot(noun input) {
     storage += m48_storage_bytes()+sizeof(resident_mode);
 #if defined(M49_MANAGED_DELAY)
     storage += sizeof(managed_delay)+sizeof(m49_timer_binding);
+#if defined(M50_PERIODIC)
+    storage += sizeof(managed_cycle);
+#endif
 #endif
 #endif
     if (storage >

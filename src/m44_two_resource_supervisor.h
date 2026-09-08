@@ -109,6 +109,11 @@ M44Status m49_supervisor_init(ResourceSession *, const M44Descriptor *,
 /* Trusted monotonic sample, once before dispatch per resident turn. Expiry
  * admission is allowed while STOPPED; queue refusal retains timer ownership. */
 M44Status m49_supervisor_clock(uint32_t epoch, uint64_t now_ms, uint64_t turn);
+#if defined(M50_PERIODIC)
+/* Same timer authority, with positive-period and consumed-expiry re-arm rules. */
+M44Status m50_supervisor_init(ResourceSession *, const M44Descriptor *,
+    const M44Saved handles[2], const M47ProviderBinding bindings[2], M49TimerBinding timer);
+#endif
 #endif
 M44Status m44_supervisor_enqueue(uint32_t slot, const M44Row *);
 M44Status m44_supervisor_dispatch(void);

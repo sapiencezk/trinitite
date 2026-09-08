@@ -241,6 +241,10 @@ static int m48_run(uint32_t mode,uint32_t count) {
     }
 #endif
 #if defined(M49_MANAGED_DELAY)
+#if defined(M50_PERIODIC)
+    if (managed_cycle) uart_puts("M50 resident=ready\r\n");
+    else
+#endif
     if (managed_delay) uart_puts("M49 resident=ready\r\n");
     else
 #endif

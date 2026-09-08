@@ -27,14 +27,29 @@ static int m49_timer_table(noun n,uint32_t slot,uint32_t iid,
 static int m49_descriptor_read(noun value,noun expected) {
     noun tag,body,f[4],rows[2],p[7],timer[6];
     uint8_t actual[32],supplied[32],numeric[32],names[3][65];uint32_t version;
-    if (!pair(value,&tag,&body) || !text_is(tag,"m49-managed-delay-deployment-v1") ||
+    const char *schema="m49-managed-delay-deployment-v1";
+    const char *domain="1499kernel-m49-managed-delay-deployment-v1";
+#if defined(M50_PERIODIC)
+    uint32_t profile=1;
+    if (managed_cycle) {
+        schema="m50-managed-cycle-deployment-v1";
+        domain="1499kernel-m50-managed-cycle-deployment-v1";
+        profile=2;
+    }
+#endif
+    if (!pair(value,&tag,&body) || !text_is(tag,schema) ||
         !record(body,f,4) || !scalar(f[0],1,&version) || version!=1 ||
         !record(f[2],rows,2) || !record(f[3],timer,6) ||
-        !hash_noun(value,"1499kernel-m49-managed-delay-deployment-v1",1,actual) ||
+        !hash_noun(value,domain,1,actual) ||
         !digest(expected,supplied) || !same(actual,supplied,32) ||
         !hash_noun(f[1],"1499kernel-m44-deployment-v1",1,numeric) ||
         !descriptor_read(f[1],cord_from_bytes((const char *)numeric,32)) ||
-        !descriptor_timed_profile) return 0;
+#if defined(M50_PERIODIC)
+        descriptor_timed_profile!=profile
+#else
+        !descriptor_timed_profile
+#endif
+        ) return 0;
     for (uint32_t i=0;i<2;i++) {
         M47ProviderBinding *b=&m47_bindings[i];
         if (!record(rows[i],p,7) || !scalar(p[0],2,&b->slot) || b->slot!=i+1 ||

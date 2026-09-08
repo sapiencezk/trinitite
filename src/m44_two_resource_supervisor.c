@@ -44,6 +44,9 @@ static struct {
 #endif
 #if defined(M49_MANAGED_DELAY)
   uint32_t timed, clock_valid;
+#if defined(M50_PERIODIC)
+  uint32_t periodic;
+#endif
   M49TimerBinding timer_binding;
   uint64_t clock_ms, clock_turn;
 #endif
@@ -255,6 +258,17 @@ static int m49_output(uint32_t slot,const M44Row *row) {
   if (row->event==m49_event(5)) { /* ARM: DT then four token limbs */
     uint64_t token=m47_token(row,1);
     M49ClockArm candidate={0};
+#if defined(M50_PERIODIC)
+    if (authority.periodic) {
+      if (row->count!=5 || !row->values[0].raw) return 0;
+      /* A matching consumed expiry may replace its own ledger in this same
+       * unpublished transaction. A stale row cannot retire a newer arm. */
+      const M44Row *cause=&live()->queues[slot][0];
+      if (timer->phase==M49_TIMER_QUEUED && live()->counts[slot] &&
+          m49_private(slot,cause->event) && cause->count==4 &&
+          m47_token(cause,0)==timer->generation) m49_clear(timer);
+    }
+#endif
     if (row->count!=5 || row->values[0].type!=4 || !authority.clock_valid ||
         timer->phase!=M49_TIMER_FREE || token!=timer->highwater+1 ||
         !m49_clock_prepare_arm(live()->epoch,token,authority.clock_ms,
@@ -645,6 +659,14 @@ M44Status m49_supervisor_init(ResourceSession *session,const M44Descriptor *d,
   if (!status) { authority.timed=1; authority.timer_binding=timer; }
   return status;
 }
+#if defined(M50_PERIODIC)
+M44Status m50_supervisor_init(ResourceSession *session,const M44Descriptor *d,
+    const M44Saved handles[2],const M47ProviderBinding bindings[2],M49TimerBinding timer) {
+  M44Status status=m49_supervisor_init(session,d,handles,bindings,timer);
+  if (!status) authority.periodic=1;
+  return status;
+}
+#endif
 M44Status m49_supervisor_clock(uint32_t epoch,uint64_t now_ms,uint64_t turn) {
   M44Status status=ready();
   if (status) return status;
