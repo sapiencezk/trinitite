@@ -143,6 +143,13 @@ M39_RESOURCE_WITNESS ?= 0
 M44_TWO_RESOURCE ?= 0
 M44_G0_TEST_CONTROLS ?= 0
 M47_MANAGED_SERVICES ?= 0
+M48_RESIDENT ?= 0
+ifeq ($(M48_RESIDENT),1)
+ifneq ($(M47_MANAGED_SERVICES),1)
+$(error M48_RESIDENT=1 requires M47_MANAGED_SERVICES=1)
+endif
+CFLAGS += -DM48_RESIDENT=1
+endif
 ifeq ($(M47_MANAGED_SERVICES),1)
 ifneq ($(M46_LIVE_REPLACEMENT),1)
 $(error M47_MANAGED_SERVICES=1 requires M46_LIVE_REPLACEMENT=1)
@@ -551,6 +558,9 @@ ifeq ($(M39_RESOURCE_WITNESS),1)
 M38_D8_WAVE_A_OBJS = m38_resource_runtime.o m39_resource_witness.o virtio_net.o m25_aethernet_native.o m36_aethernet_native.o m37_a_r_adapter.o
 ifeq ($(M44_TWO_RESOURCE),1)
 M38_D8_WAVE_A_OBJS += m44_two_resource_supervisor.o m44_device_witness.o
+ifeq ($(M48_RESIDENT),1)
+M38_D8_WAVE_A_OBJS += m48_resident_driver.o m48_report.o
+endif
 endif
 ifeq ($(M44_G0_TEST_CONTROLS),1)
 M38_D8_WAVE_A_OBJS += m44_g0_witness.o
@@ -587,6 +597,9 @@ CONFIG_KEY := $(CONFIG_KEY)-m46
 endif
 ifeq ($(M47_MANAGED_SERVICES),1)
 CONFIG_KEY := $(CONFIG_KEY)-m47
+endif
+ifeq ($(M48_RESIDENT),1)
+CONFIG_KEY := $(CONFIG_KEY)-m48
 endif
 ifeq ($(M44_G0_TEST_CONTROLS),1)
 CONFIG_KEY := $(CONFIG_KEY)-g0test
@@ -669,6 +682,12 @@ $(OBJDIR)/m44_two_resource_supervisor.o $(OBJDIR)/m44_device_witness.o: \
 	$(SRCDIR)/m44_two_resource_supervisor.h $(SRCDIR)/m44_resource_transaction.h $(SRCDIR)/m47_device_witness.inc
 $(OBJDIR)/m38_resource_runtime.o $(OBJDIR)/m44_g0_witness.o: $(SRCDIR)/m44_resource_transaction.h
 $(OBJDIR)/m39_resource_witness.o $(OBJDIR)/m44_device_witness.o $(OBJDIR)/m44_g0_witness.o: $(SRCDIR)/m39_resource_witness.h $(SRCDIR)/m47_transport_witness.inc
+endif
+ifeq ($(M48_RESIDENT),1)
+$(OBJDIR)/m44_device_witness.o: $(SRCDIR)/m48_device_resident.inc $(SRCDIR)/m48_resident_driver.h $(SRCDIR)/m48_report.h
+$(OBJDIR)/m48_resident_driver.o: $(SRCDIR)/m48_resident_driver.h $(SRCDIR)/m44_two_resource_supervisor.h
+$(OBJDIR)/m48_report.o: $(SRCDIR)/m48_report.h $(SRCDIR)/uart.h
+$(OBJDIR)/m39_resource_witness.o: $(SRCDIR)/m48_transport_adapter.inc $(SRCDIR)/m48_resident_driver.h
 endif
 
 # Generated admission data is a semantic target input.  The explicit edge

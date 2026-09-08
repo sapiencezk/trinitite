@@ -194,10 +194,17 @@ static int publication_build(uint32_t value) {
     for (uint32_t i = 0; i < size; i++) pending_data[i] = bytes[i];
     pending_bytes = size; return 1;
 }
+#if defined(M48_RESIDENT)
+static int m48_publication_fields(const m37_a_r_datagram_t *datagram,
+                                   noun publication,uint32_t *value) {
+    noun tag, body, fields[18];
+    if (!pair(publication, &tag, &body) || !record(body, fields, 18)) return 0;
+#else
 static int publication_read(const m37_a_r_datagram_t *datagram, uint32_t *value) {
     noun publication, tag, body, fields[18];
     if (datagram->payload_len > 512 || !decode(datagram->payload, datagram->payload_len, &publication)
         || !pair(publication, &tag, &body) || !record(body, fields, 18)) return 0;
+#endif
     uint8_t bytes[32] = {0};
     if (!noun_atom_read_fixed(tag, bytes, 32)) return 0;
     const char *text = "m36-t-envelope-v1";
@@ -219,6 +226,19 @@ static int publication_read(const m37_a_r_datagram_t *datagram, uint32_t *value)
     for (uint32_t i = 0; i < size; i++) if (canonical[i] != datagram->payload[i]) return 0;
     return 1;
 }
+#if defined(M48_RESIDENT)
+static int publication_read(const m37_a_r_datagram_t *datagram,uint32_t *value) {
+    noun publication;
+    if (datagram->payload_len>512 ||
+        cue_bounded_bytes(datagram->payload,datagram->payload_len,&cue_i2_limits,
+                          HEAP_MODE_SCRATCH,&publication)!=CUE_BOUNDED_OK) return 0;
+    int valid=m48_publication_fields(datagram,publication,value);
+    /* Both accepted and rejected frames leave only a copied UINT16. Abort
+     * removes newly interned atoms as well as cells, including malformed tags. */
+    noun_tx_abort();
+    return valid;
+}
+#endif
 static int provider_effects(const ResourceResultView *view, uint32_t handle) {
     if (!provider_enabled || handle != provider_handle || !view || view->wire_status != 2) return 1;
     noun result[2], body[4], effect_list[1], effects[32]; uint32_t count;
@@ -300,6 +320,7 @@ static M38Status provider_input(uint32_t operation, noun argument, noun *out, ui
     *token_out = token; return M38_STATUS_OK;
 }
 #include "m47_transport_witness.inc"
+#include "m48_transport_adapter.inc"
 
 static int emit(uint32_t row, M38Status status, const ResourceResultView *view) {
     uart_puts("M39 row="); number(row); uart_puts(" status="); number(status);

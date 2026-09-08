@@ -11,6 +11,21 @@
 #include "m39_resource_witness.h"
 #include "m44_two_resource_supervisor.h"
 #include "m44_device_witness.h"
+#if defined(M48_RESIDENT)
+#include "m48_report.h"
+/* Only resident report capture redirects UART. Retained finite witnesses keep
+ * their existing output path and byte representation. */
+static void m48_output_putc(char c) {
+    if (m48_report_capturing()) m48_report_putc((uint8_t)c);
+    else uart_putc(c);
+}
+static void m48_output_puts(const char *s) {
+    if (m48_report_capturing()) m48_report_puts(s);
+    else uart_puts(s);
+}
+#define uart_putc m48_output_putc
+#define uart_puts m48_output_puts
+#endif
 #define MAX_JAM (128u * 1024u)
 #define MAX_COMMANDS 256u
 #define DESCRIPTOR_BYTES (64u * 1024u)
@@ -28,6 +43,9 @@ static ResourceSession *session;
 #if defined(M47_MANAGED_SERVICES)
 static uint32_t managed_services;
 static M47ProviderBinding m47_bindings[2];
+#endif
+#if defined(M48_RESIDENT)
+static uint32_t resident_mode;
 #endif
 #if defined(M46_LIVE_REPLACEMENT)
 static int m46_device_try_boot(noun input);
@@ -368,6 +386,7 @@ static void finish(void) {
 }
 
 #include "m47_device_witness.inc"
+#include "m48_device_resident.inc"
 
 int m44_device_try_boot(noun input) {
 #if defined(M46_LIVE_REPLACEMENT)
@@ -384,6 +403,14 @@ int m44_device_try_boot(noun input) {
     uint32_t managed = text_is(tag, "m45-device-boot-v1");
 #if defined(M47_MANAGED_SERVICES)
     managed_services = text_is(tag,"m47-device-boot-v1");
+#if defined(M48_RESIDENT)
+    resident_mode=text_is(tag,"m48-resident-boot-v1");
+#if defined(M44_G0_TEST_CONTROLS)
+    if (text_is(tag,"m48-driver-test-v1")) resident_mode=2;
+    if (text_is(tag,"m48-backpressure-test-v1")) resident_mode=3;
+#endif
+    managed_services |= resident_mode!=0;
+#endif
     managed |= managed_services;
 #endif
     if (!managed && !text_is(tag, "m44-device-boot-v1")) return 0;
@@ -402,6 +429,9 @@ int m44_device_try_boot(noun input) {
 #endif
         || !record(envelope[2], catalog, 2) || !list(envelope[3], rows, MAX_COMMANDS, &count)
         || !scalar(envelope[4], 5, &boot_failure)) goto invalid;
+#if defined(M48_RESIDENT)
+    if (resident_mode==1 && (count || boot_failure)) goto invalid;
+#endif
 #if !defined(M44_G0_TEST_CONTROLS)
     if (boot_failure) goto invalid;
 #endif
@@ -530,6 +560,9 @@ int m44_device_try_boot(noun input) {
 #endif
     size_t storage = m44_supervisor_storage_bytes() + sizeof(commands) + sizeof(descriptor)
         + sizeof(handles) + sizeof(catalog_bytes) + sizeof(runtime) + sizeof(session);
+#if defined(M48_RESIDENT)
+    storage += m48_storage_bytes()+sizeof(resident_mode);
+#endif
     if (storage >
 #if defined(M46_LIVE_REPLACEMENT)
         768u * 1024u
@@ -541,6 +574,9 @@ int m44_device_try_boot(noun input) {
     uart_puts("M44 storage=");
     number(storage);
     uart_puts("\r\n");
+#if defined(M48_RESIDENT)
+    if (resident_mode) { if (!m48_run(resident_mode,count)) goto failed; return 1; }
+#endif
     #if defined(M47_MANAGED_SERVICES)
     if (managed_services && !m47_transport_start()) goto failed;
 #endif

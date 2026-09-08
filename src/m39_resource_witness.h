@@ -18,3 +18,11 @@ int m47_transport_start(void);
 uint32_t m47_transport_action(uint32_t operation,uint32_t slot,uint32_t instance_id,
                               uint32_t kind,uint32_t epoch,uint64_t token,uint32_t argument);
 #endif
+
+#if defined(M48_RESIDENT)
+#include "m48_resident_driver.h"
+/* Singleton retained transport, cold boot once after transport config.
+ * Returned callbacks share the witness's static codec/device state; they do
+ * not create independent transport instances. No handshake or blocking wait. */
+int m48_transport_init(M48Adapter *out);
+#endif
