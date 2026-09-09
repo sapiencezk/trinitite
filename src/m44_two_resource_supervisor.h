@@ -216,6 +216,17 @@ M44Status m52_supervisor_stage(ResourceSession *,const M44Descriptor *,
 M44Status m52_supervisor_activate(uint32_t ticket,uint32_t expected_generation,
                                   uint32_t driver_holds);
 M44Status m52_supervisor_cancel(uint32_t ticket,uint32_t expected_generation);
+#if defined(M54_RESIDENT_REPLACEMENT)
+/* Cold boot and stage use one source-derived numeric policy. All ordinals are
+ * checked against admitted payloads; activation/cancel reuse the M52 calls. */
+M44Status m54_supervisor_init(ResourceSession *,const M44Descriptor *,
+    const M44Saved[2],const M47ProviderBinding[2],const M51TimerBinding[2],
+    const M51ReturnBinding *,const uint8_t compatibility[32],const M54Policy *);
+M44Status m54_supervisor_stage(ResourceSession *,const M44Descriptor *,
+    const M44Saved[2],const M47ProviderBinding[2],const M51TimerBinding[2],
+    const M51ReturnBinding *,const uint8_t compatibility[32],uint32_t generation,
+    uint32_t *ticket,const M54Policy *);
+#endif
 #endif
 #if defined(M44_G0_TEST_CONTROLS)
 /* 1: prepare refusal, 2: copy-one, 3: copy-all, 5: actual prepare

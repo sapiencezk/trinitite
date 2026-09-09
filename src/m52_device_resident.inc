@@ -18,6 +18,16 @@ static int m52_envelope(noun input,noun packages[4],noun *script,uint32_t *count
                         uint32_t *mode,noun *transport_binding) {
     noun tag,body,f[3];
     if (!pair(input,&tag,&body)) return 0;
+#if defined(M54_RESIDENT_REPLACEMENT)
+    if (managed_replacement==2) {
+        *mode=text_is(tag,"m54-resident-boot-v1")?1:0;
+#if defined(M44_G0_TEST_CONTROLS)
+        if (text_is(tag,"m54-driver-test-v1")) *mode=2;
+#endif
+        return *mode && record(body,f,3) && list(f[0],packages,4,count) && *count &&
+            ((*script=f[1]),(*transport_binding=f[2]),1);
+    }
+#endif
     *mode=text_is(tag,"m52-resident-boot-v1")?1:0;
 #if defined(M44_G0_TEST_CONTROLS)
     if (text_is(tag,"m52-driver-test-v1")) *mode=2;
@@ -25,7 +35,13 @@ static int m52_envelope(noun input,noun packages[4],noun *script,uint32_t *count
     return *mode && record(body,f,3) && list(f[0],packages,4,count) && *count &&
         ((*script=f[1]),(*transport_binding=f[2]),1);
 }
+#if defined(M54_RESIDENT_REPLACEMENT)
+#include "m54_device_package.inc"
+#endif
 static int m52_package_read(uint32_t index,uint8_t compatibility[32]) {
+#if defined(M54_RESIDENT_REPLACEMENT)
+    if (managed_replacement==2) return m54_package_read(index,compatibility);
+#endif
     noun input,packages[4],script,entry[3],tag,body,f[3],catalog[2],parts[2],transport_binding;
     uint32_t count,version,mode; uint8_t identity[32],supplied[32];
     const uint8_t *base=(const uint8_t *)(uintptr_t)PILL_BASE;
@@ -73,6 +89,12 @@ static M44Status m52_local_replace(void *unused,const M48LocalRequest *r,uint32_
         if (status==M44_FENCED) {
             uart_puts("M44 terminal=refuse\r\n"); finish(); return status;
         }
+#if defined(M54_RESIDENT_REPLACEMENT)
+        if (!status && managed_replacement==2) status=m54_supervisor_stage(candidate.session,candidate.descriptor,
+            candidate.handles,m47_bindings,resident_timer_bindings,&resident_completion,
+            candidate.compatibility,expected_generation,&ticket,&resident_policy);
+        else
+#endif
         if (!status) status=m52_supervisor_stage(candidate.session,candidate.descriptor,
             candidate.handles,m47_bindings,resident_timer_bindings,&resident_completion,
             candidate.compatibility,expected_generation,&ticket);
@@ -120,6 +142,15 @@ static M44Status m52_test_command(const Command *c) {
 static int m52_device_try_boot(noun input) {
     noun tag,body,packages[4],script,rows[MAX_COMMANDS],f[6],entry[3],transport_binding;
     uint32_t count,mode;
+#if defined(M54_RESIDENT_REPLACEMENT)
+    if (!pair(input,&tag,&body)) return 0;
+    if (text_is(tag,"m54-resident-boot-v1")
+#if defined(M44_G0_TEST_CONTROLS)
+        || text_is(tag,"m54-driver-test-v1")
+#endif
+        ) managed_replacement=2;
+    else
+#endif
     if (!pair(input,&tag,&body) || (!text_is(tag,"m52-resident-boot-v1")
 #if defined(M44_G0_TEST_CONTROLS)
         && !text_is(tag,"m52-driver-test-v1")
@@ -147,11 +178,25 @@ static int m52_device_try_boot(noun input) {
             c->provider_token>UINT32_MAX || (c->op==45 && c->provider_token))) goto invalid;
     }
     noun_tx_abort(); heap_scratch_reset();
+#if defined(M54_RESIDENT_REPLACEMENT)
+    if (!managed_replacement) managed_replacement=1;
+    managed_services=managed_delay=managed_controller=1;
+    managed_composition=managed_replacement==2;
+#else
     managed_replacement=managed_services=managed_delay=managed_controller=1;
+#endif
     if (m38_resource_runtime_init(m44_boot_control(),65536,m44_boot_workspace(),
         4u*1024u*1024u,&runtime)) goto invalid;
     M46LoadedPackage initial;
-    if (m46_load(1,0,&initial) || m52_supervisor_init(initial.session,initial.descriptor,
+    if (m46_load(1,0,&initial)) goto invalid;
+#if defined(M54_RESIDENT_REPLACEMENT)
+    if (managed_replacement==2) {
+        if (m54_supervisor_init(initial.session,initial.descriptor,initial.handles,
+            m47_bindings,resident_timer_bindings,&resident_completion,initial.compatibility,
+            &resident_policy)) goto invalid;
+    } else
+#endif
+    if (m52_supervisor_init(initial.session,initial.descriptor,
         initial.handles,m47_bindings,resident_timer_bindings,&resident_completion,initial.compatibility)) goto invalid;
     session=initial.session; active_package=live_replacement=1; resident_mode=mode;
     size_t storage=m44_supervisor_storage_bytes()+sizeof(commands)+sizeof(descriptor)+sizeof(handles)+

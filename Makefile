@@ -173,6 +173,13 @@ $(error M53_RESIDENT_COMPOSITION=1 requires M52_RESIDENT_REPLACEMENT=1)
 endif
 CFLAGS += -DM53_RESIDENT_COMPOSITION=1
 endif
+M54_RESIDENT_REPLACEMENT ?= 0
+ifeq ($(M54_RESIDENT_REPLACEMENT),1)
+ifneq ($(M53_RESIDENT_COMPOSITION),1)
+$(error M54_RESIDENT_REPLACEMENT=1 requires M53_RESIDENT_COMPOSITION=1)
+endif
+CFLAGS += -DM54_RESIDENT_REPLACEMENT=1
+endif
 M49_MANAGED_DELAY ?= 0
 ifeq ($(M49_MANAGED_DELAY),1)
 ifneq ($(M48_RESIDENT),1)
@@ -656,6 +663,9 @@ endif
 ifeq ($(M53_RESIDENT_COMPOSITION),1)
 CONFIG_KEY := $(CONFIG_KEY)-m53
 endif
+ifeq ($(M54_RESIDENT_REPLACEMENT),1)
+CONFIG_KEY := $(CONFIG_KEY)-m54
+endif
 ifeq ($(M44_G0_TEST_CONTROLS),1)
 CONFIG_KEY := $(CONFIG_KEY)-g0test
 endif
@@ -887,6 +897,11 @@ ifeq ($(M52_RESIDENT_REPLACEMENT),1)
 $(OBJDIR)/m44_device_witness.o: $(SRCDIR)/m52_device_resident.inc
 $(OBJDIR)/m44_two_resource_supervisor.o: $(SRCDIR)/m52_supervisor_replacement.inc
 $(OBJDIR)/m38_resource_runtime.o: $(SRCDIR)/m52_resource_compatibility.inc
+endif
+ifeq ($(M54_RESIDENT_REPLACEMENT),1)
+$(OBJDIR)/m44_device_witness.o: $(SRCDIR)/m54_device_package.inc $(SRCDIR)/m54_replacement_policy.h
+$(OBJDIR)/m44_two_resource_supervisor.o: $(SRCDIR)/m54_supervisor_replacement.inc $(SRCDIR)/m54_replacement_policy.h
+$(OBJDIR)/m38_resource_runtime.o: $(SRCDIR)/m54_resource_compatibility.inc $(SRCDIR)/m54_replacement_policy.h
 endif
 $(OBJDIR)/m44_two_resource_supervisor.o $(OBJDIR)/m49_clock_adapter.o: $(SRCDIR)/m49_clock_adapter.h
 endif

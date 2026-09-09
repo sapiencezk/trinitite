@@ -106,6 +106,13 @@ M38Status m46_validate_replacement_pair(ResourceSession *, ResourceSession *,
 M38Status m52_validate_replacement_pair(ResourceSession *, ResourceSession *,
                                        const void *owner);
 M38Status m52_validate_controller_session(ResourceSession *, const void *owner);
+#if defined(M54_RESIDENT_REPLACEMENT)
+#include "m54_replacement_policy.h"
+M38Status m54_validate_replacement_pair(ResourceSession *,ResourceSession *,
+                                       const void *owner,const M54Policy *);
+M38Status m54_validate_controller_session(ResourceSession *,const void *owner,
+                                         const M54Policy *);
+#endif
 #endif
 M38Status m46_resource_cancel(ResourceSession *, const void *owner);
 /* Loader-only abandonment before a supervisor claim. Closed is idempotent;

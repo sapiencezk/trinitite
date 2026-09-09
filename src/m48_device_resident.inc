@@ -323,6 +323,10 @@ static int m48_run(uint32_t mode,uint32_t count) {
 #if defined(M50_PERIODIC)
 #if defined(M51_CONTROLLER)
 #if defined(M53_RESIDENT_COMPOSITION)
+#if defined(M54_RESIDENT_REPLACEMENT)
+    if (managed_replacement==2) uart_puts("M54 resident=ready\r\n");
+    else
+#endif
     if (managed_composition) uart_puts("M53 resident=ready\r\n");
     else
 #endif

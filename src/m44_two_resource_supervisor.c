@@ -35,6 +35,9 @@ static struct {
   uint32_t deployment_generation, candidate_generation, candidate_token, candidate_serial;
 #if defined(M52_RESIDENT_REPLACEMENT)
   uint32_t resident_replacement, replacement_call;
+#if defined(M54_RESIDENT_REPLACEMENT)
+  M54Policy policy;
+#endif
 #endif
 #if defined(M44_G0_TEST_CONTROLS)
   uint32_t replacement_fault, replacement_busy_mask;
@@ -1253,7 +1256,14 @@ M44Status m46_supervisor_stage(ResourceSession *candidate,
                    (const uint8_t *)&authority.descriptor + offset,
                    sizeof(*d) - offset) ||
 #if defined(M52_RESIDENT_REPLACEMENT)
-      (authority.replacement_call ? m52_validate_replacement_pair(authority.session,candidate,&authority) :
+      (authority.replacement_call ?
+#if defined(M54_RESIDENT_REPLACEMENT)
+       (authority.resident_replacement==2 ?
+        m54_validate_replacement_pair(authority.session,candidate,&authority,&authority.policy) :
+        m52_validate_replacement_pair(authority.session,candidate,&authority)) :
+#else
+       m52_validate_replacement_pair(authority.session,candidate,&authority) :
+#endif
 #endif
       m46_validate_replacement_pair(authority.session, candidate, &authority)
 #if defined(M52_RESIDENT_REPLACEMENT)
@@ -1394,6 +1404,9 @@ void m46_supervisor_test_ticket_serial(uint32_t serial) {
 #endif
 #if defined(M52_RESIDENT_REPLACEMENT)
 #include "m52_supervisor_replacement.inc"
+#if defined(M54_RESIDENT_REPLACEMENT)
+#include "m54_supervisor_replacement.inc"
+#endif
 #endif
 #endif
 

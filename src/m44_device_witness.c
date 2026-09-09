@@ -68,6 +68,9 @@ static uint32_t live_replacement, active_package, staged_package;
 static uint32_t expected_generation[MAX_COMMANDS], expected_package[MAX_COMMANDS];
 #if defined(M52_RESIDENT_REPLACEMENT)
 static uint32_t managed_replacement;
+#if defined(M54_RESIDENT_REPLACEMENT)
+static M54Policy resident_policy;
+#endif
 static int m52_device_try_boot(noun input);
 static int m52_package_read(uint32_t index, uint8_t compatibility[32]);
 static int m52_catalog_validate(void);
