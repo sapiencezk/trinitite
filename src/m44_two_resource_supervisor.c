@@ -649,15 +649,31 @@ M44Status m47_supervisor_init(ResourceSession *session, const M44Descriptor *d,
       bindings[0].kind<1 || bindings[0].kind>2 ||
       bindings[1].kind<1 || bindings[1].kind>2) return M44_INVALID;
   const uint32_t init_ids[]={1,2}, init_types[]={1,2};
+#if defined(M55_SIGNED_RESIDENT)
+  if (d->service_value_type && d->service_value_type!=3) return M44_INVALID;
+  const uint32_t data_type=d->service_value_type?d->service_value_type:2;
+  const uint32_t cause_ids[]={11,12,13,14,3,5}, uint_types[]={2,2,2,2,data_type,2};
+#else
   const uint32_t cause_ids[]={11,12,13,14,3,5}, uint_types[]={2,2,2,2,2,2};
+#endif
   const uint32_t release_ids[]={5}, rsp_ids[]={1,11,12,13,14}, rsp_types[]={1,2,2,2,2};
   const uint32_t intent_ids[]={7,8,9,10,3,5};
   const uint32_t inito_ids[]={4,5}, inito_types[]={1,2};
+#if defined(M55_SIGNED_RESIDENT)
+  const uint32_t cnf_ids[]={4,5,6}, cnf_types[]={1,2,data_type};
+  const uint32_t req_ids[]={1,3}, req_types[]={1,data_type};
+#else
   const uint32_t cnf_ids[]={4,5,6}, cnf_types[]={1,2,2};
   const uint32_t req_ids[]={1,3}, req_types[]={1,2};
+#endif
   for (uint32_t slot=0;slot<2;slot++) {
     uint32_t iid=bindings[slot].instance_id;
-    if (!iid || iid>63 || d->signed_values[slot] ||
+    if (!iid || iid>63 ||
+#if defined(M55_SIGNED_RESIDENT)
+        (d->signed_values[slot] && data_type!=3) ||
+#else
+        d->signed_values[slot] ||
+#endif
         (bindings[slot].kind==1 && d->target_slot!=slot+1) ||
         !m47_signature(d,slot,iid,1,0,init_ids,init_types,2) ||
         !m47_signature(d,slot,iid,3,0,cause_ids,uint_types,6) ||
@@ -677,6 +693,11 @@ M44Status m47_supervisor_init(ResourceSession *session, const M44Descriptor *d,
   }
   return status;
 }
+#if defined(M55_SIGNED_RESIDENT)
+uint32_t m47_service_value_type(void) {
+  return authority.services && authority.descriptor.service_value_type==3?3:2;
+}
+#endif
 static M44Status m47_ready(uint32_t slot, uint32_t epoch) {
   M44Status status=ready();
   if (status) return status;

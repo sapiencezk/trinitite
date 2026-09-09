@@ -5,7 +5,9 @@
  * Callbacks must not reenter the driver or supervisor, and must validate the
  * supplied epoch/token/value against native observations.
  * READY means a validated matching observation, not merely a send attempt.
- * receive copies a decoded UINT16 and nonzero 63-bit token before returning.
+ * receive copies a bounded uint16 carrier and nonzero 63-bit token before
+ * returning. M55 explicitly binds INT16 data: semantic value+32768 is carried
+ * unchanged by providers/driver; conversion belongs to typed source execution.
  * submit is invoked exactly once after claim, including on REFUSED. */
 typedef enum { M48_READY=0, M48_EMPTY=1, M48_REFUSED=2 } M48IOStatus;
 typedef struct {

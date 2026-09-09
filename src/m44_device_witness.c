@@ -53,6 +53,9 @@ static M49TimerBinding m49_timer_binding;
 static uint32_t managed_controller;
 #if defined(M53_RESIDENT_COMPOSITION)
 static uint32_t managed_composition;
+#if defined(M55_SIGNED_RESIDENT)
+static uint32_t managed_signed_resident;
+#endif
 #endif
 static M51TimerBinding resident_timer_bindings[2];
 static M51ReturnBinding resident_completion;
@@ -239,6 +242,10 @@ static int descriptor_read(noun value, noun expected) {
     if (text_is(tag,"m51-two-resource-deployment-v1")) descriptor_timed_profile=3;
 #if defined(M53_RESIDENT_COMPOSITION)
     if (text_is(tag,"m53-two-resource-deployment-v1")) descriptor_timed_profile=4;
+#if defined(M55_SIGNED_RESIDENT)
+    if (text_is(tag,"m55-two-resource-deployment-v1")) descriptor_timed_profile=5;
+    descriptor.service_value_type=descriptor_timed_profile==5?3:0;
+#endif
 #endif
 #endif
 #endif
@@ -497,6 +504,10 @@ int m44_device_try_boot(noun input) {
     managed_controller=text_is(tag,"m51-resident-boot-v1");
 #if defined(M53_RESIDENT_COMPOSITION)
     managed_composition=text_is(tag,"m53-resident-boot-v1");
+#if defined(M55_SIGNED_RESIDENT)
+    managed_signed_resident=text_is(tag,"m55-resident-boot-v1");
+    managed_composition |= managed_signed_resident;
+#endif
     managed_controller |= managed_composition;
 #endif
     managed_delay |= managed_controller;
@@ -513,6 +524,9 @@ int m44_device_try_boot(noun input) {
     if (text_is(tag,"m51-driver-test-v1")) { managed_controller=1; managed_delay=1; resident_mode=2; }
 #if defined(M53_RESIDENT_COMPOSITION)
     if (text_is(tag,"m53-driver-test-v1")) { managed_composition=1; managed_controller=1; managed_delay=1; resident_mode=2; }
+#if defined(M55_SIGNED_RESIDENT)
+    if (text_is(tag,"m55-driver-test-v1")) { managed_signed_resident=1; managed_composition=1; managed_controller=1; managed_delay=1; resident_mode=2; }
+#endif
 #endif
 #endif
 #endif
@@ -535,6 +549,9 @@ int m44_device_try_boot(noun input) {
             !(
 #if defined(M51_CONTROLLER)
 #if defined(M53_RESIDENT_COMPOSITION)
+#if defined(M55_SIGNED_RESIDENT)
+              managed_signed_resident ? m55_descriptor_read(envelope[0],envelope[1]) :
+#endif
               managed_composition ? m53_descriptor_read(envelope[0],envelope[1]) :
 #endif
               managed_controller ? m51_descriptor_read(envelope[0],envelope[1]) :

@@ -12,7 +12,13 @@ static M44Row cause(uint32_t iid,uint32_t event,uint64_t token,uint32_t value) {
       row.values[start+i]=(M44Value){iid*1024+11+i,2,(uint32_t)(token>>(16*i))&65535u};
     row.count=start+4;
     if (event==3) {
-      row.values[4]=(M44Value){iid*1024+3,2,value};
+      row.values[4]=(M44Value){iid*1024+3,
+#if defined(M55_SIGNED_RESIDENT)
+          m47_service_value_type(),
+#else
+          2,
+#endif
+          value};
       row.values[5]=(M44Value){iid*1024+5,2,0}; row.count=6;
     }
   }

@@ -16,7 +16,11 @@ static int m47_binding_table(noun n, uint32_t slot, uint32_t iid,
             for (uint32_t k=0;k<nv;k++) {
                 uint32_t id,type;
                 if (!record(values[k],value,2) || !scalar(value[0],65535,&id) ||
-                    !scalar(value[1],2,&type) || id!=table[j].values[k].id || type!=table[j].values[k].type) return 0;
+                    !scalar(value[1],
+#if defined(M55_SIGNED_RESIDENT)
+                        descriptor.service_value_type==3?3:
+#endif
+                        2,&type) || id!=table[j].values[k].id || type!=table[j].values[k].type) return 0;
             }
             found++;
         }

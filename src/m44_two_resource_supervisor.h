@@ -26,6 +26,11 @@ typedef struct {
 #if defined(M49_MANAGED_DELAY)
   uint32_t time_values[2];
 #endif
+#if defined(M55_SIGNED_RESIDENT)
+  /* Explicit M55 source profile: 3 authorizes INT16 provider data; zero retains
+   * legacy UINT16. Flags, status and token limbs always retain their types. */
+  uint32_t service_value_type;
+#endif
   M44Boundary ingress[2][128], outputs[2][128];
 } M44Descriptor;
 typedef struct {
@@ -34,6 +39,10 @@ typedef struct {
 } M44Saved;
 #if defined(M47_MANAGED_SERVICES)
 typedef struct { uint32_t slot, kind, instance_id; } M47ProviderBinding;
+#if defined(M55_SIGNED_RESIDENT)
+/* Native-owned service value type for resident causes; never a request field. */
+uint32_t m47_service_value_type(void);
+#endif
 enum { M47_SERVICE_NEW=0, M47_SERVICE_OPEN=1, M47_SERVICE_RELEASED=2 };
 enum { M47_TX_NONE=0, M47_TX_COMMITTED=1, M47_TX_CLAIMED=2, M47_TX_COMPLETION_QUEUED=3 };
 enum { M47_RX_NONE=0, M47_RX_DELIVERY_QUEUED=1, M47_RX_INDICATED=2, M47_RX_RESPONSE_QUEUED=3 };

@@ -78,6 +78,12 @@ static int m51_descriptor_read(noun value,noun expected) {
   return controller_descriptor_read(value,expected,"m51-resident-controller-deployment-v1",
       "1499kernel-m51-resident-controller-deployment-v1",3);
 }
+#if defined(M55_SIGNED_RESIDENT)
+static int m55_descriptor_read(noun value,noun expected) {
+  return controller_descriptor_read(value,expected,"m55-signed-resident-deployment-v1",
+      "1499kernel-m55-signed-resident-deployment-v1",5);
+}
+#endif
 static int m53_descriptor_read(noun value,noun expected) {
   return controller_descriptor_read(value,expected,"m53-resident-composition-deployment-v1",
       "1499kernel-m53-resident-composition-deployment-v1",4);
