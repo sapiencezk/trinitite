@@ -130,7 +130,11 @@ static int m48_emit(uint32_t index,uint32_t request,const M48TurnResult *r) {
     { uart_puts("],\"input_refusals\":"); }
     number(m48_input_refusals);
 #if defined(M52_RESIDENT_REPLACEMENT)
-    if (managed_replacement) {
+    if (managed_replacement
+#if defined(M53_RESIDENT_COMPOSITION)
+        || managed_composition
+#endif
+        ) {
         M46ResourceDiagnostics diagnostics={0};
         (void)m46_supervisor_diagnostics(&diagnostics);
         uart_puts(",\"registered_sessions\":"); number(diagnostics.registered_sessions);
@@ -318,6 +322,10 @@ static int m48_run(uint32_t mode,uint32_t count) {
 #if defined(M49_MANAGED_DELAY)
 #if defined(M50_PERIODIC)
 #if defined(M51_CONTROLLER)
+#if defined(M53_RESIDENT_COMPOSITION)
+    if (managed_composition) uart_puts("M53 resident=ready\r\n");
+    else
+#endif
 #if defined(M52_RESIDENT_REPLACEMENT)
     if (managed_replacement) uart_puts("M52 resident=ready\r\n");
     else
@@ -342,7 +350,11 @@ static int m48_run(uint32_t mode,uint32_t count) {
          * provider and IEC progress below remains independent of serial TX. */
         int input;
 #if defined(M52_RESIDENT_REPLACEMENT)
-        if (managed_replacement) {
+        if (managed_replacement
+#if defined(M53_RESIDENT_COMPOSITION)
+            || managed_composition
+#endif
+            ) {
             /* Collect one bounded request even while telemetry drains. Its
              * execution still waits for report capacity and rechecks authority. */
             if (!m52_pending_valid)

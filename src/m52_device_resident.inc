@@ -74,7 +74,7 @@ static M44Status m52_local_replace(void *unused,const M48LocalRequest *r,uint32_
             uart_puts("M44 terminal=refuse\r\n"); finish(); return status;
         }
         if (!status) status=m52_supervisor_stage(candidate.session,candidate.descriptor,
-            candidate.handles,m47_bindings,m51_timer_bindings,&m51_completion,
+            candidate.handles,m47_bindings,resident_timer_bindings,&resident_completion,
             candidate.compatibility,expected_generation,&ticket);
         if (!status) staged_package=r->slot;
         else if (candidate.session && m46_resource_discard_unclaimed(candidate.session)) {
@@ -152,12 +152,12 @@ static int m52_device_try_boot(noun input) {
         4u*1024u*1024u,&runtime)) goto invalid;
     M46LoadedPackage initial;
     if (m46_load(1,0,&initial) || m52_supervisor_init(initial.session,initial.descriptor,
-        initial.handles,m47_bindings,m51_timer_bindings,&m51_completion,initial.compatibility)) goto invalid;
+        initial.handles,m47_bindings,resident_timer_bindings,&resident_completion,initial.compatibility)) goto invalid;
     session=initial.session; active_package=live_replacement=1; resident_mode=mode;
     size_t storage=m44_supervisor_storage_bytes()+sizeof(commands)+sizeof(descriptor)+sizeof(handles)+
         sizeof(catalog_bytes)+sizeof(runtime)+sizeof(session)+sizeof(expected_generation)+
         sizeof(expected_package)+sizeof(package_identity)+sizeof(m47_bindings)+
-        sizeof(m51_timer_bindings)+sizeof(m51_completion)+m48_storage_bytes()+64;
+        sizeof(resident_timer_bindings)+sizeof(resident_completion)+m48_storage_bytes()+64;
     if (storage>768u*1024u) goto invalid;
     uart_puts("M44 setup=0\r\nM44 storage="); number(storage); uart_puts("\r\n");
     if (m48_run(mode,count)) return 1;
