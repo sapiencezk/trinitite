@@ -8,7 +8,11 @@ static M44Status m52_replacement_ready(void) {
     M44ResourceInspection resources;
     if (m44_resource_inspect(authority.session,&authority,&resources)) return M44_INVALID;
 #if defined(M54_RESIDENT_REPLACEMENT)
-    if (authority.resident_replacement==2) {
+    if (authority.resident_replacement==2
+#if defined(M56_SIGNED_REPLACEMENT)
+        || authority.resident_replacement==3
+#endif
+        ) {
         const M54Policy *p=&authority.policy;
         if (!p->slot || p->slot>2 || !p->instance ||
             p->instance>resources.instance_counts[p->slot-1] || !p->failure ||
@@ -88,7 +92,12 @@ M44Status m52_supervisor_activate(uint32_t ticket,uint32_t expected_generation,
     if (status) return status;
     if (driver_holds || !m52_activation_transferable() || !authority.candidate ||
 #if defined(M54_RESIDENT_REPLACEMENT)
-        (authority.resident_replacement==2 ?
+        (
+#if defined(M56_SIGNED_REPLACEMENT)
+        authority.resident_replacement==3 ?
+        m56_validate_replacement_pair(authority.session,authority.candidate,&authority,&authority.policy) :
+#endif
+        authority.resident_replacement==2 ?
          m54_validate_replacement_pair(authority.session,authority.candidate,&authority,&authority.policy) :
          m52_validate_replacement_pair(authority.session,authority.candidate,&authority)))
 #else

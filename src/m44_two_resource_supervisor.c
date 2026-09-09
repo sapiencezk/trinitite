@@ -1279,7 +1279,12 @@ M44Status m46_supervisor_stage(ResourceSession *candidate,
 #if defined(M52_RESIDENT_REPLACEMENT)
       (authority.replacement_call ?
 #if defined(M54_RESIDENT_REPLACEMENT)
-       (authority.resident_replacement==2 ?
+       (
+#if defined(M56_SIGNED_REPLACEMENT)
+        authority.resident_replacement==3 ?
+        m56_validate_replacement_pair(authority.session,candidate,&authority,&authority.policy) :
+#endif
+        authority.resident_replacement==2 ?
         m54_validate_replacement_pair(authority.session,candidate,&authority,&authority.policy) :
         m52_validate_replacement_pair(authority.session,candidate,&authority)) :
 #else
@@ -1427,6 +1432,9 @@ void m46_supervisor_test_ticket_serial(uint32_t serial) {
 #include "m52_supervisor_replacement.inc"
 #if defined(M54_RESIDENT_REPLACEMENT)
 #include "m54_supervisor_replacement.inc"
+#if defined(M56_SIGNED_REPLACEMENT)
+#include "m56_supervisor_replacement.inc"
+#endif
 #endif
 #endif
 #endif

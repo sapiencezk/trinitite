@@ -18,6 +18,16 @@ static int m52_envelope(noun input,noun packages[4],noun *script,uint32_t *count
                         uint32_t *mode,noun *transport_binding) {
     noun tag,body,f[3];
     if (!pair(input,&tag,&body)) return 0;
+#if defined(M56_SIGNED_REPLACEMENT)
+    if (managed_replacement==3) {
+        *mode=text_is(tag,"m56-resident-boot-v1")?1:0;
+#if defined(M44_G0_TEST_CONTROLS)
+        if (text_is(tag,"m56-driver-test-v1")) *mode=2;
+#endif
+        return *mode && record(body,f,3) && list(f[0],packages,4,count) && *count &&
+            ((*script=f[1]),(*transport_binding=f[2]),1);
+    }
+#endif
 #if defined(M54_RESIDENT_REPLACEMENT)
     if (managed_replacement==2) {
         *mode=text_is(tag,"m54-resident-boot-v1")?1:0;
@@ -37,8 +47,14 @@ static int m52_envelope(noun input,noun packages[4],noun *script,uint32_t *count
 }
 #if defined(M54_RESIDENT_REPLACEMENT)
 #include "m54_device_package.inc"
+#if defined(M56_SIGNED_REPLACEMENT)
+#include "m56_device_package.inc"
+#endif
 #endif
 static int m52_package_read(uint32_t index,uint8_t compatibility[32]) {
+#if defined(M56_SIGNED_REPLACEMENT)
+    if (managed_replacement==3) return m56_package_read(index,compatibility);
+#endif
 #if defined(M54_RESIDENT_REPLACEMENT)
     if (managed_replacement==2) return m54_package_read(index,compatibility);
 #endif
@@ -89,6 +105,12 @@ static M44Status m52_local_replace(void *unused,const M48LocalRequest *r,uint32_
         if (status==M44_FENCED) {
             uart_puts("M44 terminal=refuse\r\n"); finish(); return status;
         }
+#if defined(M56_SIGNED_REPLACEMENT)
+        if (!status && managed_replacement==3) status=m56_supervisor_stage(candidate.session,candidate.descriptor,
+            candidate.handles,m47_bindings,resident_timer_bindings,&resident_completion,
+            candidate.compatibility,expected_generation,&ticket,&resident_policy);
+        else
+#endif
 #if defined(M54_RESIDENT_REPLACEMENT)
         if (!status && managed_replacement==2) status=m54_supervisor_stage(candidate.session,candidate.descriptor,
             candidate.handles,m47_bindings,resident_timer_bindings,&resident_completion,
@@ -144,6 +166,14 @@ static int m52_device_try_boot(noun input) {
     uint32_t count,mode;
 #if defined(M54_RESIDENT_REPLACEMENT)
     if (!pair(input,&tag,&body)) return 0;
+#if defined(M56_SIGNED_REPLACEMENT)
+    if (text_is(tag,"m56-resident-boot-v1")
+#if defined(M44_G0_TEST_CONTROLS)
+        || text_is(tag,"m56-driver-test-v1")
+#endif
+        ) { managed_replacement=3; managed_signed_resident=1; }
+    else
+#endif
     if (text_is(tag,"m54-resident-boot-v1")
 #if defined(M44_G0_TEST_CONTROLS)
         || text_is(tag,"m54-driver-test-v1")
@@ -181,7 +211,11 @@ static int m52_device_try_boot(noun input) {
 #if defined(M54_RESIDENT_REPLACEMENT)
     if (!managed_replacement) managed_replacement=1;
     managed_services=managed_delay=managed_controller=1;
+#if defined(M56_SIGNED_REPLACEMENT)
+    managed_composition=managed_replacement>=2;
+#else
     managed_composition=managed_replacement==2;
+#endif
 #else
     managed_replacement=managed_services=managed_delay=managed_controller=1;
 #endif
@@ -189,6 +223,13 @@ static int m52_device_try_boot(noun input) {
         4u*1024u*1024u,&runtime)) goto invalid;
     M46LoadedPackage initial;
     if (m46_load(1,0,&initial)) goto invalid;
+#if defined(M56_SIGNED_REPLACEMENT)
+    if (managed_replacement==3) {
+        if (m56_supervisor_init(initial.session,initial.descriptor,initial.handles,
+            m47_bindings,resident_timer_bindings,&resident_completion,initial.compatibility,
+            &resident_policy)) goto invalid;
+    } else
+#endif
 #if defined(M54_RESIDENT_REPLACEMENT)
     if (managed_replacement==2) {
         if (m54_supervisor_init(initial.session,initial.descriptor,initial.handles,

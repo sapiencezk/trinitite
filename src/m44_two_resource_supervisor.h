@@ -235,6 +235,15 @@ M44Status m54_supervisor_stage(ResourceSession *,const M44Descriptor *,
     const M44Saved[2],const M47ProviderBinding[2],const M51TimerBinding[2],
     const M51ReturnBinding *,const uint8_t compatibility[32],uint32_t generation,
     uint32_t *ticket,const M54Policy *);
+#if defined(M56_SIGNED_REPLACEMENT)
+M44Status m56_supervisor_init(ResourceSession *,const M44Descriptor *,
+    const M44Saved[2],const M47ProviderBinding[2],const M51TimerBinding[2],
+    const M51ReturnBinding *,const uint8_t compatibility[32],const M54Policy *);
+M44Status m56_supervisor_stage(ResourceSession *,const M44Descriptor *,
+    const M44Saved[2],const M47ProviderBinding[2],const M51TimerBinding[2],
+    const M51ReturnBinding *,const uint8_t compatibility[32],uint32_t generation,
+    uint32_t *ticket,const M54Policy *);
+#endif
 #endif
 #endif
 #if defined(M44_G0_TEST_CONTROLS)
