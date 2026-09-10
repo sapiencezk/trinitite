@@ -53,6 +53,27 @@ static void put_u64(uint64_t n)
         uart_putc(buf[--used]);
 }
 
+/* jumped is setjmp; budget reason is 1=ops, 2=wall, 3=cells, 4=stack. */
+static const char *abort_name(int jumped, uint64_t reason)
+{
+    if (jumped == 0)
+        return "none";
+    if (jumped == NOCK_ABORT_CRASH)
+        return "crash";
+    switch (reason) {
+    case 1:
+        return "ops";
+    case 2:
+        return "wall";
+    case 3:
+        return "cells";
+    case 4:
+        return "stack";
+    default:
+        return jumped == NOCK_ABORT_BUDGET ? "ops" : "crash";
+    }
+}
+
 static int nest(noun head, noun tail, noun *out)
 {
     return alloc_cell_checked(head, tail, out);
@@ -206,7 +227,7 @@ static void print_cue(cue_bounded_status_t status, uint64_t ticks)
 
 static void print_poke(const char *name, uint64_t ops, uint64_t cells,
                        uint64_t stack, uint64_t ticks, int parse,
-                       uint64_t effect_len, uint64_t abort_reason)
+                       uint64_t effect_len, const char *abort)
 {
     uart_puts("I3L0 poke name=");
     uart_puts(name);
@@ -223,7 +244,7 @@ static void print_poke(const char *name, uint64_t ops, uint64_t cells,
     uart_puts(" effect_len=");
     put_u64(effect_len);
     uart_puts(" abort=");
-    put_u64(abort_reason);
+    uart_puts(abort ? abort : "none");
     uart_puts(" policy_ops=");
     put_u64(POLICY_MAX_OPS);
     uart_puts(" policy_cells=");
@@ -243,7 +264,7 @@ static int slam_poke(noun kernel, noun formula, uint64_t num, noun cause,
     int parse = 0;
     uint64_t effects = 0;
     if (!ovum_job(num, cause, &job) || !nest(kernel, job, &subject)) {
-        print_poke(name, 0, 0, 0, 0, 0, 0, 0);
+        print_poke(name, 0, 0, 0, 0, 0, 0, "none");
         return 0;
     }
     nock_budget_set(0);
@@ -254,11 +275,10 @@ static int slam_poke(noun kernel, noun formula, uint64_t num, noun cause,
     int jumped = setjmp(nock_abort);
     if (jumped != 0) {
         uint64_t reason = nock_budget_abort_reason();
-        if (reason == 0)
-            reason = (uint64_t)jumped;
         t1 = cntvct();
         print_poke(name, nock_ops_used(), nock_cells_used(),
-                   nock_eval_stack_peak(), t1 - t0, 0, 0, reason);
+                   nock_eval_stack_peak(), t1 - t0, 0, 0,
+                   abort_name(jumped, reason));
         nock_budget_finish();
         __builtin_memcpy(nock_abort, saved, sizeof saved);
         return 0;
@@ -273,7 +293,7 @@ static int slam_poke(noun kernel, noun formula, uint64_t num, noun cause,
             *new_core = c->tail;
     }
     print_poke(name, nock_ops_used(), nock_cells_used(),
-               nock_eval_stack_peak(), t1 - t0, parse, effects, 0);
+               nock_eval_stack_peak(), t1 - t0, parse, effects, "none");
     nock_budget_finish();
     __builtin_memcpy(nock_abort, saved, sizeof saved);
     return parse;
@@ -374,7 +394,7 @@ void i3_l0_probe_boot(void)
             uart_puts(" ticks=");
             put_u64(kt1 - kt0);
             uart_puts(" parse=no abort=");
-            put_u64(nock_budget_abort_reason());
+            uart_puts(abort_name(jumped, nock_budget_abort_reason()));
             uart_puts("\r\n");
             nock_budget_finish();
             __builtin_memcpy(nock_abort, saved, sizeof saved);
@@ -393,7 +413,7 @@ void i3_l0_probe_boot(void)
         put_u64(kt1 - kt0);
         uart_puts(" parse=");
         uart_puts(noun_is_cell(kernel) ? "yes" : "no");
-        uart_puts(" abort=0\r\n");
+        uart_puts(" abort=none\r\n");
         nock_budget_finish();
         __builtin_memcpy(nock_abort, saved, sizeof saved);
         if (!noun_is_cell(kernel)) {
