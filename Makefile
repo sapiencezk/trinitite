@@ -454,6 +454,8 @@ endif
 ifneq ($(filter 1,$(M38_C) $(M38_D5_NATIVE) $(M38_D7_NATIVE) $(M38_D8_NATIVE) $(M38_D8_WAVE_A) $(M39_RESOURCE_WITNESS) $(I2_OPERATOR)),)
 $(error I3_L0_PROBE=1 cannot be combined with other boot selectors)
 endif
+# qemu-virt boots with the MMU off. Same as M44: do not combine adjacent
+# 32-bit fields into unaligned wide accesses.
 CFLAGS += -DI3_L0_PROBE=1 -mstrict-align
 endif
 

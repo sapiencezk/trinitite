@@ -3,8 +3,17 @@
 #include "bounded_cue.h"
 #include "i2_admission_envelope.h"
 #include "i2_admission_metrics.h"
+#if defined(I3_L0_PROBE)
+#include "memory.h"
+#endif
 
+#if defined(I3_L0_PROBE)
+/* Probe-only table. mini.jam unique graph nodes 283416; cue also caches
+ * backref sites, ~550k entries. Production table is 131072. */
+#define BOUNDED_CACHE_MAX       1048576u
+#else
 #define BOUNDED_CACHE_MAX       I2_CUE_CACHE_ENTRIES
+#endif
 #define BOUNDED_ATOM_LIMBS_MAX  32768u /* 256 KiB */
 
 typedef struct {
@@ -29,7 +38,14 @@ typedef struct {
     uint32_t probe_hwm;
 } cue_reader_t;
 
+#if defined(I3_L0_PROBE)
+/* High RAM, same window as jam.c's unbounded cue cache. A 24 MiB .bss
+ * table would blow the qemu-virt 24 MiB admitted BSS window. */
+static bounded_cache_entry_t *const g_bounded_cache =
+    (bounded_cache_entry_t *)(uintptr_t)PLATFORM_CUE_CACHE_BASE;
+#else
 static bounded_cache_entry_t g_bounded_cache[BOUNDED_CACHE_MAX];
+#endif
 static uint64_t g_bounded_atom_limbs[BOUNDED_ATOM_LIMBS_MAX];
 
 const cue_bounded_limits_t cue_i2_limits = {
@@ -303,7 +319,8 @@ cue_bounded_status_t cue_bounded_bytes(const uint8_t *bytes, uint64_t len,
     for (uint32_t i = 0; i < BOUNDED_CACHE_MAX; i++)
         g_bounded_cache[i].used = 0;
     g_i2_admission_metrics.cue_clear_count++;
-    g_i2_admission_metrics.cue_clear_bytes += sizeof g_bounded_cache;
+    g_i2_admission_metrics.cue_clear_bytes +=
+        (uint64_t)BOUNDED_CACHE_MAX * sizeof(bounded_cache_entry_t);
     cue_reader_t r = {
         .bytes = bytes,
         .bits = len * 8,

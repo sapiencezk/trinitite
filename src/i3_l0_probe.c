@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "bounded_cue.h"
+#include "i2_admission_envelope.h"
 #include "i2_admission_metrics.h"
 #include "i3_l0_probe.h"
 #include "memory.h"
@@ -11,17 +12,24 @@
 #include "uart.h"
 
 /*
- * I3 L0 measurement probe. Admission constants here are probe-local and do
- * not change production i2_admission_envelope.h.
+ * I3 L0 / L0.1 measurement probe. Admission constants here are probe-local
+ * and do not change production i2_admission_envelope.h.
  *
  * Slam formula is the NockApp shape from nockapp noun/ops.rs:
  *   [8 [9 23 0 2] 9 2 10 [6 0 7] 0 2]  over  [kernel job]
- * Job encoding is I3-PLAN.md §1: [wire [eny our now cause]].
+ * Job encoding (L0.1): [num [wire [eny our now cause]]].
  */
 #define POLICY_MAX_OPS 2000000ULL
 #define POLICY_MAX_CELLS 128000ULL
 #define POLICY_MAX_STACK 1024ULL
 #define SLAM_FORMULA_TEXT "[8 [9 23 0 2] 9 2 10 [6 0 7] 0 2]"
+/* Probe table in bounded_cue.c; cue caches unique nodes plus backref sites. */
+#define PROBE_MAX_CACHE_ENTRIES 1048576u
+#define PROBE_MAX_WORK 200000000ULL
+#define PROBE_MAX_BACKREFS 600000u
+#define PROBE_MAX_DEPTH 1024u
+#define PROBE_MAX_NODES 1200000u
+#define PROBE_MAX_CELLS 600000u
 
 extern uint8_t _pill_embed_start[];
 extern uint8_t _pill_embed_end[];
@@ -110,6 +118,13 @@ static int slam_formula(noun *out)
     return tuple(fol_xs, 8, out);
 }
 
+static int kick_formula(noun *out)
+{
+    /* serf boot: *[trap 9 2 0 1] */
+    noun xs[4] = {direct(9), direct(2), direct(0), direct(1)};
+    return tuple(xs, 4, out);
+}
+
 static int path3(const char *a, const char *b, noun *out)
 {
     noun rest;
@@ -118,10 +133,10 @@ static int path3(const char *a, const char *b, noun *out)
     return nest(tas(a), rest, out);
 }
 
-static int ovum_job(noun cause, noun *out)
+static int ovum_job(uint64_t num, noun cause, noun *out)
 {
-    /* I3-PLAN.md §1: +poke takes [wire [eny our now cause]]. */
-    noun wire, input_xs[4], input;
+    /* [num [wire [eny our now cause]]], num 1 = %init, 2 = [%tick 5]. */
+    noun wire, input_xs[4], input, ovum;
     if (!path3("poke", "l0", &wire))
         return 0;
     input_xs[0] = direct(0); /* eny */
@@ -130,7 +145,29 @@ static int ovum_job(noun cause, noun *out)
     input_xs[3] = cause;
     if (!tuple(input_xs, 4, &input))
         return 0;
-    return nest(wire, input, out);
+    if (!nest(wire, input, &ovum))
+        return 0;
+    return nest(direct(num), ovum, out);
+}
+
+static uint64_t effect_list_len(noun effects)
+{
+    uint64_t n = 0;
+    while (noun_is_cell(effects)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(effects);
+        effects = c->tail;
+        n++;
+        if (n > 1000000ULL)
+            break;
+    }
+    return n;
+}
+
+static const char *production_would_hit_first(void)
+{
+    /* L0 refused at production cache 98304 with cells 49296, nodes 98549,
+     * work 1559683 — still under production cells/nodes/work. */
+    return "cache";
 }
 
 static void print_cue(cue_bounded_status_t status, uint64_t ticks)
@@ -148,6 +185,10 @@ static void print_cue(cue_bounded_status_t status, uint64_t ticks)
     put_u64(ticks);
     uart_puts(" first_bound=");
     uart_puts(status == CUE_BOUNDED_OK ? "none" : cue_bounded_status_name(status));
+    uart_puts(" production_first_bound=");
+    uart_puts(production_would_hit_first());
+    uart_puts(" production_cache=");
+    put_u64(I2_CUE_CACHE_ADMITTED);
     uart_puts(" work=");
     put_u64(g_i2_admission_metrics.cue_work_hwm);
     uart_puts(" nodes=");
@@ -164,7 +205,8 @@ static void print_cue(cue_bounded_status_t status, uint64_t ticks)
 }
 
 static void print_poke(const char *name, uint64_t ops, uint64_t cells,
-                       uint64_t stack, uint64_t ticks, int parse, uint64_t abort_reason)
+                       uint64_t stack, uint64_t ticks, int parse,
+                       uint64_t effect_len, uint64_t abort_reason)
 {
     uart_puts("I3L0 poke name=");
     uart_puts(name);
@@ -178,6 +220,8 @@ static void print_poke(const char *name, uint64_t ops, uint64_t cells,
     put_u64(ticks);
     uart_puts(" parse=");
     uart_puts(parse ? "yes" : "no");
+    uart_puts(" effect_len=");
+    put_u64(effect_len);
     uart_puts(" abort=");
     put_u64(abort_reason);
     uart_puts(" policy_ops=");
@@ -191,14 +235,15 @@ static void print_poke(const char *name, uint64_t ops, uint64_t cells,
     uart_puts("\r\n");
 }
 
-static int slam_poke(noun kernel, noun formula, noun cause, const char *name,
-                     noun *new_core)
+static int slam_poke(noun kernel, noun formula, uint64_t num, noun cause,
+                     const char *name, noun *new_core)
 {
     noun job, subject, product;
     uint64_t t0, t1;
     int parse = 0;
-    if (!ovum_job(cause, &job) || !nest(kernel, job, &subject)) {
-        print_poke(name, 0, 0, 0, 0, 0, 0);
+    uint64_t effects = 0;
+    if (!ovum_job(num, cause, &job) || !nest(kernel, job, &subject)) {
+        print_poke(name, 0, 0, 0, 0, 0, 0, 0);
         return 0;
     }
     nock_budget_set(0);
@@ -208,9 +253,12 @@ static int slam_poke(noun kernel, noun formula, noun cause, const char *name,
     t0 = cntvct();
     int jumped = setjmp(nock_abort);
     if (jumped != 0) {
+        uint64_t reason = nock_budget_abort_reason();
+        if (reason == 0)
+            reason = (uint64_t)jumped;
         t1 = cntvct();
         print_poke(name, nock_ops_used(), nock_cells_used(),
-                   nock_eval_stack_peak(), t1 - t0, 0, nock_budget_abort_reason());
+                   nock_eval_stack_peak(), t1 - t0, 0, 0, reason);
         nock_budget_finish();
         __builtin_memcpy(nock_abort, saved, sizeof saved);
         return 0;
@@ -218,12 +266,14 @@ static int slam_poke(noun kernel, noun formula, noun cause, const char *name,
     product = nock(subject, formula);
     t1 = cntvct();
     parse = noun_is_cell(product);
-    if (parse && new_core) {
+    if (parse) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
-        *new_core = c->tail;
+        effects = effect_list_len(c->head);
+        if (new_core)
+            *new_core = c->tail;
     }
     print_poke(name, nock_ops_used(), nock_cells_used(),
-               nock_eval_stack_peak(), t1 - t0, parse, 0);
+               nock_eval_stack_peak(), t1 - t0, parse, effects, 0);
     nock_budget_finish();
     __builtin_memcpy(nock_abort, saved, sizeof saved);
     return parse;
@@ -263,23 +313,30 @@ void i3_l0_probe_boot(void)
     uart_puts("I3L0 start\r\n");
     cue_bounded_limits_t limits;
     limits.max_input_bytes = cue_i2_limits.max_input_bytes;
-    limits.max_depth = cue_i2_limits.max_depth;
-    limits.max_backrefs = cue_i2_limits.max_backrefs;
-    limits.max_cache_entries = cue_i2_limits.max_cache_entries;
     limits.max_atom_bytes = cue_i2_limits.max_atom_bytes;
     limits.max_total_atom_bytes = cue_i2_limits.max_total_atom_bytes;
-    limits.max_work = cue_i2_limits.max_work;
-    limits.max_nodes = 1200000;
-    limits.max_cells = 600000;
+    limits.max_cache_entries = PROBE_MAX_CACHE_ENTRIES;
+    limits.max_work = PROBE_MAX_WORK;
+    limits.max_backrefs = PROBE_MAX_BACKREFS;
+    limits.max_depth = PROBE_MAX_DEPTH;
+    limits.max_nodes = PROBE_MAX_NODES;
+    limits.max_cells = PROBE_MAX_CELLS;
 
     if (!jam_bytes(&bytes, &len)) {
-        uart_puts("I3L0 cue status=input cells=0 atoms=0 ticks=0 first_bound=input\r\n");
+        uart_puts("I3L0 cue status=input cells=0 atoms=0 ticks=0 first_bound=input production_first_bound=cache production_cache=");
+        put_u64(I2_CUE_CACHE_ADMITTED);
+        uart_puts("\r\n");
         uart_puts("I3L0 terminal=cue-refuse\r\n");
         return;
     }
     uart_puts("I3L0 jam bytes=");
     put_u64(len);
     uart_puts("\r\n");
+
+    /* honk's source jam appends zero padding (mini.jam 817176 vs canonical
+     * 817170). Bounded cue allows at most 7 leftover bits, not extra bytes. */
+    while (len > 1 && bytes[len - 1] == 0)
+        len--;
 
     uint64_t t0 = cntvct();
     cue_bounded_status_t status =
@@ -291,7 +348,59 @@ void i3_l0_probe_boot(void)
         return;
     }
     noun_tx_commit();
-    kernel = root;
+
+    heap_set_mode(HEAP_MODE_PERSIST);
+    {
+        noun kick_fol;
+        uint64_t kt0, kt1;
+        if (!kick_formula(&kick_fol)) {
+            uart_puts("I3L0 terminal=formula-fail\r\n");
+            return;
+        }
+        nock_budget_set(0);
+        nock_eval_stack_set_limit(0);
+        jmp_buf saved;
+        __builtin_memcpy(saved, nock_abort, sizeof saved);
+        kt0 = cntvct();
+        int jumped = setjmp(nock_abort);
+        if (jumped != 0) {
+            kt1 = cntvct();
+            uart_puts("I3L0 kick nock_ops_used=");
+            put_u64(nock_ops_used());
+            uart_puts(" nock_cells_used=");
+            put_u64(nock_cells_used());
+            uart_puts(" nock_eval_stack_peak=");
+            put_u64(nock_eval_stack_peak());
+            uart_puts(" ticks=");
+            put_u64(kt1 - kt0);
+            uart_puts(" parse=no abort=");
+            put_u64(nock_budget_abort_reason());
+            uart_puts("\r\n");
+            nock_budget_finish();
+            __builtin_memcpy(nock_abort, saved, sizeof saved);
+            uart_puts("I3L0 terminal=kick-fail\r\n");
+            return;
+        }
+        kernel = nock(root, kick_fol);
+        kt1 = cntvct();
+        uart_puts("I3L0 kick nock_ops_used=");
+        put_u64(nock_ops_used());
+        uart_puts(" nock_cells_used=");
+        put_u64(nock_cells_used());
+        uart_puts(" nock_eval_stack_peak=");
+        put_u64(nock_eval_stack_peak());
+        uart_puts(" ticks=");
+        put_u64(kt1 - kt0);
+        uart_puts(" parse=");
+        uart_puts(noun_is_cell(kernel) ? "yes" : "no");
+        uart_puts(" abort=0\r\n");
+        nock_budget_finish();
+        __builtin_memcpy(nock_abort, saved, sizeof saved);
+        if (!noun_is_cell(kernel)) {
+            uart_puts("I3L0 terminal=kick-fail\r\n");
+            return;
+        }
+    }
 
     heap_set_mode(HEAP_MODE_PERSIST);
     if (!slam_formula(&formula)) {
@@ -301,17 +410,23 @@ void i3_l0_probe_boot(void)
 
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (!nest(tas("init"), NOUN_ZERO, &cause)) {
+        persist_copy(root);
         uart_puts("I3L0 terminal=cause-fail\r\n");
         return;
     }
-    if (slam_poke(kernel, formula, cause, "init", &new_core))
+    if (slam_poke(kernel, formula, 1, cause, "init", &new_core))
         kernel = new_core;
+    else {
+        heap_scratch_reset();
+        heap_set_mode(HEAP_MODE_SCRATCH);
+    }
 
     if (!nest(tas("tick"), direct(5), &cause)) {
+        persist_copy(root);
         uart_puts("I3L0 terminal=cause-fail\r\n");
         return;
     }
-    (void)slam_poke(kernel, formula, cause, "tick", &new_core);
+    (void)slam_poke(kernel, formula, 2, cause, "tick", &new_core);
 
     persist_copy(root);
     uart_puts("I3L0 terminal=done\r\n");
