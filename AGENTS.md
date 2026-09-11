@@ -538,7 +538,7 @@ core = run_nomm1(subject, c_nomm1, ...)  // %ds2 already resolved to jet_fn_t
 | Atom tag scheme | bit 63 = 0 → direct; bits 63:62 = 10 → indirect; bits 63:62 = 11 → cell | Direct atoms are raw integers; only 3 tags needed; no separate content-atom tag |
 | Large atom identity | BLAKE3 content hash (62 bits) | O(1) equality, structural sharing, SD-card backing for 4GB+ atoms |
 | Memory model | Arena + refcount heap | No stop-world GC; event arena reset after each +poke |
-| Jets | `%wild` + SKA, hot state in C binary | Stateless registration; no cold-state accumulation; `%fast` intentionally NOT implemented |
+| Jets | `%wild` + SKA, plus L1 `%fast` battery match | `%wild` stays first. honk `%fast` registers the first battery per hot label (no Vere `++ka.rout`). |
 | SKA loop detection | Heuristic stack scan + frond validation + redo | Matches skan.hoon; no Tarjan SCC needed for main flow |
 | Loom/road | REJECTED | 32-bit legacy; replaced by 64-bit arena+refcount |
 | Bignum | Roll our own (Phase 4) | FSL bignum is wrong license; other options unsuitable |

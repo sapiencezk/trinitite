@@ -235,12 +235,16 @@ static void noun_print(noun n, int depth) {
 /* ── Hint tag constants (Urbit cord encoding: LSB = first char) ──────────── */
 
 #define HINT_WILD  0x646C6977ULL   /* %wild */
+#define HINT_FAST  0x74736166ULL   /* %fast */
 #define HINT_SLOG  0x676F6C73ULL   /* %slog */
 #define HINT_XRAY  0x79617278ULL   /* %xray */
 #define HINT_MEAN  0x6E61656DULL   /* %mean */
 #define HINT_MEMO  0x6F6D656DULL   /* %memo */
 #define HINT_BOUT  0x74756F62ULL   /* %bout */
 #define HINT_TAME  0x656D6174ULL   /* %tame = 't'+'a'<<8+'m'<<16+'e'<<24 */
+
+static noun nock_eval(noun subject, noun formula, const wilt_t *jets, sky_fn_t sky);
+static noun hax(uint64_t a, noun new_val, noun target);
 
 /* ── Wilt parsing ────────────────────────────────────────────────────────── */
 
@@ -553,11 +557,139 @@ static noun jet_weld(noun core, const wilt_t *jets, sky_fn_t sky) {
     return out;
 }
 
+/* Slam a gate: edit axis 6 with sample, kick axis 2. */
+static noun slam_gate(noun gate, noun sample, const wilt_t *jets, sky_fn_t sky)
+{
+    noun core = hax(6, sample, gate);
+    return nock_eval(core, slot(direct(2), core), jets, sky);
+}
+
+/* %snag — list index. sample [i list] */
+static noun jet_snag(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    uint64_t i = jet_atom_u64(slot(direct(12), core), "jet snag: bad index");
+    noun list = slot(direct(13), core);
+    while (noun_is_cell(list)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(list);
+        if (i == 0)
+            return c->head;
+        i--;
+        list = c->tail;
+    }
+    nock_crash("jet snag: index out of range");
+    return NOUN_ZERO;
+}
+
+/* %scag — prefix of list. sample [n list] */
+static noun jet_scag(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    uint64_t n = jet_atom_u64(slot(direct(12), core), "jet scag: bad count");
+    noun list = slot(direct(13), core);
+    noun rev = NOUN_ZERO;
+    uint64_t took = 0;
+    while (n > 0 && noun_is_cell(list)) {
+        if (++took > 1000000ULL)
+            nock_crash("jet scag: list too long");
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(list);
+        rev = nock_alloc_cell(c->head, rev);
+        list = c->tail;
+        n--;
+    }
+    noun out = NOUN_ZERO;
+    while (noun_is_cell(rev)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(rev);
+        out = nock_alloc_cell(c->head, out);
+        rev = c->tail;
+    }
+    return out;
+}
+
+/* %need — unwrap a unit. sample (unit) */
+static noun jet_need(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    noun sample = slot(direct(6), core);
+    if (!noun_is_cell(sample))
+        nock_crash("jet need: ~");
+    return ((cell_t *)(uintptr_t)cell_ptr(sample))->tail;
+}
+
+/* %some — wrap as unit. sample a → [~ a] */
+static noun jet_some(noun core, const wilt_t *jets, sky_fn_t sky) {
+    (void)jets; (void)sky;
+    return nock_alloc_cell(NOUN_ZERO, slot(direct(6), core));
+}
+
+/* %turn — map gate over list. sample [list gate] */
+static noun jet_turn(noun core, const wilt_t *jets, sky_fn_t sky) {
+    noun list = slot(direct(12), core);
+    noun gate = slot(direct(13), core);
+    noun rev = NOUN_ZERO;
+    uint64_t n = 0;
+    while (noun_is_cell(list)) {
+        if (++n > 1000000ULL)
+            nock_crash("jet turn: list too long");
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(list);
+        noun item = slam_gate(gate, c->head, jets, sky);
+        rev = nock_alloc_cell(item, rev);
+        list = c->tail;
+    }
+    noun out = NOUN_ZERO;
+    while (noun_is_cell(rev)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(rev);
+        out = nock_alloc_cell(c->head, out);
+        rev = c->tail;
+    }
+    return out;
+}
+
+/* %mink — virtual nock. sample [[subject formula] scry]. scry unused (op 12
+ * still crashes the inner eval, which this jet reports as a %2 tone). */
+static noun jet_mink(noun core, const wilt_t *jets, sky_fn_t sky) {
+    noun sample = slot(direct(6), core);
+    noun pair = slot(direct(2), sample);
+    noun v_subject = slot(direct(2), pair);
+    noun v_formula = slot(direct(3), pair);
+    uint64_t saved_stack = g_eval_stack_current;
+    jmp_buf saved;
+    __builtin_memcpy(saved, nock_abort, sizeof saved);
+    int jumped = setjmp(nock_abort);
+    if (jumped != 0) {
+        g_eval_stack_current = saved_stack;
+        __builtin_memcpy(nock_abort, saved, sizeof saved);
+        return nock_alloc_cell(direct(2), NOUN_ZERO);
+    }
+    noun product = nock_eval(v_subject, v_formula, jets, sky);
+    __builtin_memcpy(nock_abort, saved, sizeof saved);
+    return nock_alloc_cell(NOUN_ZERO, product);
+}
+
+/* %mole — run a trap; ~ on crash, [~ product] on success. */
+static noun jet_mole(noun core, const wilt_t *jets, sky_fn_t sky) {
+    noun tap = slot(direct(6), core);
+    noun kick_fol = nock_alloc_cell(direct(9),
+                    nock_alloc_cell(direct(2),
+                    nock_alloc_cell(direct(0), direct(1))));
+    uint64_t saved_stack = g_eval_stack_current;
+    jmp_buf saved;
+    __builtin_memcpy(saved, nock_abort, sizeof saved);
+    int jumped = setjmp(nock_abort);
+    if (jumped != 0) {
+        g_eval_stack_current = saved_stack;
+        __builtin_memcpy(nock_abort, saved, sizeof saved);
+        return NOUN_ZERO;
+    }
+    noun product = nock_eval(tap, kick_fol, jets, sky);
+    __builtin_memcpy(nock_abort, saved, sizeof saved);
+    return nock_alloc_cell(NOUN_ZERO, product);
+}
+
 /* ── Hot state ────────────────────────────────────────────────────────────── */
 
 /*
  * Keyed on Urbit cord values (LSB = first char of name).
- * Jets are matched against label atoms registered via %wild hints.
+ * Jets are matched against label atoms registered via %wild hints, and
+ * against batteries registered by honk's %fast clues (first battery per
+ * label; later same-name cores keep running as Nock).
  * Cord values: each char contributes 8 bits, LSB = first character.
  *   e.g. %dec = 'd' + 'e'<<8 + 'c'<<16 = 100 + 101*256 + 99*65536 = 6514020
  *
@@ -565,34 +697,42 @@ static noun jet_weld(noun core, const wilt_t *jets, sky_fn_t sky) {
  * SKA nock_op9_continue: Forth dictionary (find_by_cord) first, then C.
  * Prefer C jets for production KERNEL path; Forth may shadow in REPL/SKA.
  */
-typedef struct { uint64_t label_cord; jet_fn_t fn; } hot_entry_t;
+typedef struct { uint64_t label_cord; jet_fn_t fn; uint64_t hits; } hot_entry_t;
 
-static const hot_entry_t hot_state[] = {
+static hot_entry_t hot_state[] = {
     /* arithmetic (Phase 5b) */
-    { 6514020, jet_dec },   /* %dec */
-    { 6579297, jet_add },   /* %add */
-    { 6452595, jet_sub },   /* %sub */
-    { 7107949, jet_mul },   /* %mul */
-    { 6845548, jet_lth },   /* %lth */
-    { 6845543, jet_gth },   /* %gth */
-    { 6648940, jet_lte },   /* %lte */
-    { 6648935, jet_gte },   /* %gte */
-    { 7760228, jet_div },   /* %div */
-    { 6582125, jet_mod },   /* %mod */
+    { 6514020, jet_dec, 0 },   /* %dec */
+    { 6579297, jet_add, 0 },   /* %add */
+    { 6452595, jet_sub, 0 },   /* %sub */
+    { 7107949, jet_mul, 0 },   /* %mul */
+    { 6845548, jet_lth, 0 },   /* %lth */
+    { 6845543, jet_gth, 0 },   /* %gth */
+    { 6648940, jet_lte, 0 },   /* %lte */
+    { 6648935, jet_gte, 0 },   /* %gte */
+    { 7760228, jet_div, 0 },   /* %div */
+    { 6582125, jet_mod, 0 },   /* %mod */
     /* WP3 structural / list / bit */
-    { 29029,       jet_eq   },  /* %eq   */
-    { 6845292,     jet_lsh  },  /* %lsh  */
-    { 6845298,     jet_rsh  },  /* %rsh  */
-    { 7237475,     jet_con  },  /* %con  */
-    { 7563620,     jet_dis  },  /* %dis  */
-    { 7891309,     jet_mix  },  /* %mix  */
-    { 7364963,     jet_cap  },  /* %cap  */
-    { 7561581,     jet_mas  },  /* %mas  */
-    { 6776176,     jet_peg  },  /* %peg  */
-    { 1953391980,  jet_lent },  /* %lent */
-    { 1886350438,  jet_flop },  /* %flop */
-    { 1684825463,  jet_weld },  /* %weld */
-    { 0, NULL }                 /* sentinel */
+    { 29029,       jet_eq,   0 },  /* %eq   */
+    { 6845292,     jet_lsh,  0 },  /* %lsh  */
+    { 6845298,     jet_rsh,  0 },  /* %rsh  */
+    { 7237475,     jet_con,  0 },  /* %con  */
+    { 7563620,     jet_dis,  0 },  /* %dis  */
+    { 7891309,     jet_mix,  0 },  /* %mix  */
+    { 7364963,     jet_cap,  0 },  /* %cap  */
+    { 7561581,     jet_mas,  0 },  /* %mas  */
+    { 6776176,     jet_peg,  0 },  /* %peg  */
+    { 1953391980,  jet_lent, 0 },  /* %lent */
+    { 1886350438,  jet_flop, 0 },  /* %flop */
+    { 1684825463,  jet_weld, 0 },  /* %weld */
+    /* L1: honk %fast labels the R1 jam actually takes */
+    { 1734438515,  jet_snag, 0 },  /* %snag */
+    { 1734435699,  jet_scag, 0 },  /* %scag */
+    { 1684366702,  jet_need, 0 },  /* %need */
+    { 1701670771,  jet_some, 0 },  /* %some */
+    { 1852994932,  jet_turn, 0 },  /* %turn */
+    { 1802398061,  jet_mink, 0 },  /* %mink */
+    { 1701605229,  jet_mole, 0 },  /* %mole */
+    { 0, NULL, 0 }                 /* sentinel */
 };
 
 jet_fn_t hot_lookup(noun label) {
@@ -611,6 +751,139 @@ uint64_t hot_reverse_label(jet_fn_t fn) {
             return hot_state[i].label_cord;
     }
     return 0;
+}
+
+static void hot_hit(jet_fn_t fn)
+{
+    for (int i = 0; hot_state[i].fn != NULL; i++) {
+        if (hot_state[i].fn == fn) {
+            hot_state[i].hits++;
+            return;
+        }
+    }
+}
+
+int hot_entry_count(void)
+{
+    int n = 0;
+    while (hot_state[n].fn != NULL)
+        n++;
+    return n;
+}
+
+uint64_t hot_entry_label(int i)
+{
+    return hot_state[i].label_cord;
+}
+
+uint64_t hot_entry_hits(int i)
+{
+    return hot_state[i].hits;
+}
+
+void hot_hits_reset(void)
+{
+    for (int i = 0; hot_state[i].fn != NULL; i++)
+        hot_state[i].hits = 0;
+}
+
+/* ── %fast battery registry (stateless; no Vere ++ka.rout) ─────────────── */
+
+#define FAST_REG_MAX 256
+
+typedef struct {
+    noun battery;
+    uint64_t label_cord;
+    jet_fn_t fn;
+} fast_reg_t;
+
+static fast_reg_t g_fast_reg[FAST_REG_MAX];
+static int g_fast_len;
+static uint64_t g_fast_clues;
+static noun g_fast_first_clue;
+static int g_fast_first_ok;
+#define FAST_CHUM_LOG 64
+static noun g_fast_chums[FAST_CHUM_LOG];
+static int g_fast_chum_n;
+
+void fast_reset(void)
+{
+    g_fast_len = 0;
+    g_fast_clues = 0;
+    g_fast_first_clue = NOUN_ZERO;
+    g_fast_first_ok = 0;
+    g_fast_chum_n = 0;
+    hot_hits_reset();
+}
+
+uint64_t fast_clue_count(void) { return g_fast_clues; }
+int fast_reg_count(void) { return g_fast_len; }
+int fast_first_clue_ok(void) { return g_fast_first_ok; }
+noun fast_first_clue(void) { return g_fast_first_clue; }
+
+/*
+ * honk %fast clue after evaluation is [chum parent-formula hooks].
+ * Register the constructed core's battery against chum if chum is hot.
+ * First battery per label wins, so later same-name cores (rs/rd add, …)
+ * are not stolen by the integer jet.
+ */
+int fast_chum_count(void) { return g_fast_chum_n; }
+noun fast_chum_at(int i) { return g_fast_chums[i]; }
+
+static void fast_register(noun core, noun clue)
+{
+    g_fast_clues++;
+    if (!g_fast_first_ok) {
+        g_fast_first_clue = clue;
+        g_fast_first_ok = 1;
+    }
+    if (!noun_is_cell(clue) || !noun_is_cell(core))
+        return;
+    noun chum = slot(direct(2), clue);
+    if (g_fast_chum_n < FAST_CHUM_LOG) {
+        int seen = 0, i;
+        for (i = 0; i < g_fast_chum_n; i++) {
+            if (g_fast_chums[i] == chum || noun_eq(g_fast_chums[i], chum)) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen)
+            g_fast_chums[g_fast_chum_n++] = chum;
+    }
+    jet_fn_t fn = hot_lookup(chum);
+    if (fn == NULL)
+        return;
+    uint64_t cord = direct_val(chum);
+    noun battery = slot(direct(2), core);
+    int i;
+    for (i = 0; i < g_fast_len; i++) {
+        if (g_fast_reg[i].label_cord == cord)
+            return;
+        if (g_fast_reg[i].battery == battery
+            || noun_eq(g_fast_reg[i].battery, battery))
+            return;
+    }
+    if (g_fast_len >= FAST_REG_MAX)
+        return;
+    g_fast_reg[g_fast_len].battery = battery;
+    g_fast_reg[g_fast_len].label_cord = cord;
+    g_fast_reg[g_fast_len].fn = fn;
+    g_fast_len++;
+}
+
+static jet_fn_t fast_match(noun core)
+{
+    if (!noun_is_cell(core) || g_fast_len == 0)
+        return NULL;
+    noun battery = slot(direct(2), core);
+    int i;
+    for (i = 0; i < g_fast_len; i++) {
+        if (g_fast_reg[i].battery == battery
+            || noun_eq(g_fast_reg[i].battery, battery))
+            return g_fast_reg[i].fn;
+    }
+    return NULL;
 }
 
 /* ── Hax  (#[axis val target]) ──────────────────────────────────────────── */
@@ -821,9 +1094,19 @@ loop:
                 if (sock_match(jets->e[i].sock.cape,
                                jets->e[i].sock.data, core)) {
                     jet_fn_t fn = hot_lookup(jets->e[i].label);
-                    if (fn != NULL)
+                    if (fn != NULL) {
+                        hot_hit(fn);
                         return fn(core, jets, sky);
+                    }
                 }
+            }
+        }
+        /* %fast: battery match on the $ arm (axis 2). %wild stays first. */
+        if (noun_is_direct(b) && direct_val(b) == 2) {
+            jet_fn_t fn = fast_match(core);
+            if (fn != NULL) {
+                hot_hit(fn);
+                return fn(core, jets, sky);
             }
         }
 
@@ -911,6 +1194,7 @@ loop:
      *
      * Supported dynamic hint tags:
      *   %wild  — parse $wilt clue, scope jet registrations into *[a d]
+     *   %fast  — post-hint: eval d (the core), register battery→hot label
      *   %slog  — print clue noun to UART (bare-metal printf)
      *   %xray  — print clue noun tree to UART (noun inspector)
      *   %mean  — stub (stack trace, Phase 8)
@@ -967,6 +1251,13 @@ loop:
             parse_wilt(clue, wild_buf);
             jets = wild_buf;
             break;
+
+        case HINT_FAST: {
+            /* Post-nock: construct the core, then match its battery. */
+            noun core = nock_eval(subject, d, jets, sky);
+            fast_register(core, clue);
+            return core;
+        }
 
         case HINT_SLOG:
             uart_puts("\r\nslog: ");
@@ -1042,9 +1333,18 @@ noun nock_op9_continue(noun core, noun ax,
                         return forth_call_jet(fe, core);
                 }
                 jet_fn_t fn = hot_lookup(label);
-                if (fn != NULL)
+                if (fn != NULL) {
+                    hot_hit(fn);
                     return fn(core, jets, sky);
+                }
             }
+        }
+    }
+    if (noun_is_direct(ax) && direct_val(ax) == 2) {
+        jet_fn_t fn = fast_match(core);
+        if (fn != NULL) {
+            hot_hit(fn);
+            return fn(core, jets, sky);
         }
     }
     /* no jet — evaluate arm as Nock formula */

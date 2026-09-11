@@ -11,7 +11,10 @@
  * Jet pack (C hot_state, pure — no MMIO): arithmetic + WP3 structural/list/bit
  *   %dec %add %sub %mul %lth %gth %lte %gte %div %mod
  *   %eq %lsh %rsh %con %dis %mix %cap %mas %peg %lent %flop %weld
+ *   L1 %fast: %snag %scag %need %some %turn %mink %mole
  * KERNEL path (nock_eval op9): C only. SKA nock_op9_continue: Forth then C.
+ * honk %fast clues register the first battery per hot label; op 9 axis 2
+ * matches that battery. %wild is unchanged and still wins when present.
  */
 
 /* ── Scry handler (Nock 12) ────────────────────────────────────────────── */
@@ -105,6 +108,19 @@ jet_fn_t hot_lookup(noun label);
  * the name of a C hot_state jet at a jetted call site.
  */
 uint64_t hot_reverse_label(jet_fn_t fn);
+
+int      hot_entry_count(void);
+uint64_t hot_entry_label(int i);
+uint64_t hot_entry_hits(int i);
+void     hot_hits_reset(void);
+
+void     fast_reset(void);
+uint64_t fast_clue_count(void);
+int      fast_reg_count(void);
+int      fast_first_clue_ok(void);
+noun     fast_first_clue(void);
+int      fast_chum_count(void);
+noun     fast_chum_at(int i);
 
 /*
  * sock_match: structural pattern match against a (cape, data, subject) triple.
