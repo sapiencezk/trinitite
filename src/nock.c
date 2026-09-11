@@ -746,6 +746,16 @@ static int g_fast_first_ok;
 #define FAST_CHUM_LOG 64   /* diagnostic ring; stops recording past 64 */
 static noun g_fast_chums[FAST_CHUM_LOG];
 static int g_fast_chum_n;
+#if defined(I3_L1_PROBE)
+static noun g_fast_first_core;
+typedef struct { uint64_t label_cord; noun core; } fast_core_t;
+static fast_core_t g_fast_cores[FAST_REG_MAX];
+static int g_fast_core_n;
+static noun g_fast_walk[FAST_CHUM_LOG];
+static int g_fast_walk_n;
+static int g_pull_n;
+#define PULL_MAX 4096
+#endif
 
 void fast_reset(void)
 {
@@ -754,6 +764,12 @@ void fast_reset(void)
     g_fast_first_clue = NOUN_ZERO;
     g_fast_first_ok = 0;
     g_fast_chum_n = 0;
+#if defined(I3_L1_PROBE)
+    g_fast_first_core = NOUN_ZERO;
+    g_fast_core_n = 0;
+    g_fast_walk_n = 0;
+    g_pull_n = 0;
+#endif
     hot_hits_reset();
 }
 
@@ -777,6 +793,9 @@ static void fast_register(noun core, noun clue)
     if (!g_fast_first_ok) {
         g_fast_first_clue = clue;
         g_fast_first_ok = 1;
+#if defined(I3_L1_PROBE)
+        g_fast_first_core = core;
+#endif
     }
     if (!noun_is_cell(clue) || !noun_is_cell(core))
         return;
@@ -789,14 +808,39 @@ static void fast_register(noun core, noun clue)
                 break;
             }
         }
-        if (!seen)
+        if (!seen) {
+#if defined(I3_L1_PROBE)
+            g_fast_walk[g_fast_chum_n] = core;
+            g_fast_walk_n = g_fast_chum_n + 1;
+#endif
             g_fast_chums[g_fast_chum_n++] = chum;
+        }
     }
     jet_fn_t fn = hot_lookup(chum);
     if (fn == NULL)
         return;
     uint64_t cord = direct_val(chum);
     noun battery = slot(direct(2), core);
+#if defined(I3_L1_PROBE)
+    {
+        int have = 0, i;
+        for (i = 0; i < g_fast_core_n; i++) {
+            if (g_fast_cores[i].label_cord == cord) {
+                have = 1;
+                break;
+            }
+        }
+        if (!have && g_fast_core_n < FAST_REG_MAX) {
+            g_fast_cores[g_fast_core_n].label_cord = cord;
+            g_fast_cores[g_fast_core_n].core = core;
+            g_fast_core_n++;
+        }
+    }
+#endif
+#if defined(I3_UNJETTED)
+    (void)battery;
+    return;
+#else
     int i;
     for (i = 0; i < g_fast_len; i++) {
         if (g_fast_reg[i].label_cord == cord)
@@ -811,6 +855,7 @@ static void fast_register(noun core, noun clue)
     g_fast_reg[g_fast_len].label_cord = cord;
     g_fast_reg[g_fast_len].fn = fn;
     g_fast_len++;
+#endif
 }
 
 static jet_fn_t fast_match(noun core)
@@ -826,6 +871,145 @@ static jet_fn_t fast_match(noun core)
     }
     return NULL;
 }
+
+#if defined(I3_L1_PROBE)
+noun fast_core_lookup(noun label)
+{
+    int i;
+    uint64_t cord;
+    if (!noun_is_direct(label))
+        return NOUN_ZERO;
+    cord = direct_val(label);
+    for (i = 0; i < g_fast_core_n; i++) {
+        if (g_fast_cores[i].label_cord == cord)
+            return g_fast_cores[i].core;
+    }
+    return NOUN_ZERO;
+}
+
+int fast_core_count(void)
+{
+    return g_fast_core_n;
+}
+
+uint64_t fast_core_label(int i)
+{
+    return g_fast_cores[i].label_cord;
+}
+
+static int formula_is_fast(noun fol)
+{
+    cell_t *c, *args, *hc;
+    if (!noun_is_cell(fol))
+        return 0;
+    c = (cell_t *)(uintptr_t)cell_ptr(fol);
+    if (!noun_is_direct(c->head) || direct_val(c->head) != 11)
+        return 0;
+    if (!noun_is_cell(c->tail))
+        return 0;
+    args = (cell_t *)(uintptr_t)cell_ptr(c->tail);
+    if (!noun_is_cell(args->head))
+        return 0;
+    hc = (cell_t *)(uintptr_t)cell_ptr(args->head);
+    return noun_is_direct(hc->head) && direct_val(hc->head) == HINT_FAST;
+}
+
+static int formula_contains_fast(noun fol, int depth)
+{
+    cell_t *c;
+    if (depth > 12 || !noun_is_cell(fol))
+        return 0;
+    if (formula_is_fast(fol))
+        return 1;
+    c = (cell_t *)(uintptr_t)cell_ptr(fol);
+    return formula_contains_fast(c->head, depth + 1)
+        || formula_contains_fast(c->tail, depth + 1);
+}
+
+static int battery_leaf(noun node)
+{
+    cell_t *c;
+    if (!noun_is_cell(node))
+        return 1;
+    c = (cell_t *)(uintptr_t)cell_ptr(node);
+    return noun_is_atom(c->head);
+}
+
+static void pull_walk(noun core, int depth);
+
+static void pull_arm(noun core, uint64_t axis, int depth)
+{
+    noun fol, product;
+    jmp_buf saved;
+    int jumped;
+    if (g_pull_n >= PULL_MAX || axis == 0)
+        return;
+    g_pull_n++;
+    if (!alloc_cell_checked(direct(0), direct(1), &fol)
+        || !alloc_cell_checked(direct(axis), fol, &fol)
+        || !alloc_cell_checked(direct(9), fol, &fol))
+        return;
+    __builtin_memcpy(saved, nock_abort, sizeof saved);
+    jumped = setjmp(nock_abort);
+    if (jumped != 0) {
+        __builtin_memcpy(nock_abort, saved, sizeof saved);
+        return;
+    }
+    product = nock(core, fol);
+    __builtin_memcpy(nock_abort, saved, sizeof saved);
+    if (noun_is_cell(product) && depth < 8)
+        pull_walk(product, depth + 1);
+}
+
+static void pull_tree(noun core, uint64_t axis, noun node, int depth)
+{
+    cell_t *c;
+    if (g_pull_n >= PULL_MAX || axis == 0)
+        return;
+    if (battery_leaf(node)) {
+        if (formula_is_fast(node) || formula_contains_fast(node, 0))
+            pull_arm(core, axis, depth);
+        return;
+    }
+    if (axis > (UINT64_MAX / 2))
+        return;
+    c = (cell_t *)(uintptr_t)cell_ptr(node);
+    pull_tree(core, axis << 1, c->head, depth);
+    pull_tree(core, (axis << 1) | 1, c->tail, depth);
+}
+
+static void pull_walk(noun core, int depth)
+{
+    jmp_buf saved;
+    int jumped;
+    if (!noun_is_cell(core) || depth > 8)
+        return;
+    __builtin_memcpy(saved, nock_abort, sizeof saved);
+    jumped = setjmp(nock_abort);
+    if (jumped != 0) {
+        __builtin_memcpy(nock_abort, saved, sizeof saved);
+        return;
+    }
+    pull_tree(core, 2, slot(direct(2), core), depth);
+    __builtin_memcpy(nock_abort, saved, sizeof saved);
+}
+
+int fast_pull_hot(void)
+{
+    int i;
+    g_pull_n = 0;
+    nock_budget_set(0);
+    nock_eval_stack_set_limit(1024);
+    if (noun_is_cell(g_fast_first_core))
+        pull_walk(g_fast_first_core, 0);
+    for (i = 0; i < g_fast_walk_n; i++) {
+        if (noun_is_cell(g_fast_walk[i]))
+            pull_walk(g_fast_walk[i], 0);
+    }
+    nock_budget_finish();
+    return g_fast_core_n > 0;
+}
+#endif
 
 /* ── Hax  (#[axis val target]) ──────────────────────────────────────────── */
 

@@ -6,6 +6,7 @@
 #include "i3_l1_probe.h"
 #include "nock.h"
 #include "noun.h"
+#include "setjmp.h"
 #include "uart.h"
 
 /*
@@ -118,6 +119,60 @@ static void print_name(noun n)
     uint32_t i;
     for (i = 0; i < (uint32_t)len; i++)
         uart_putc(buf[i]);
+}
+
+static uint64_t cntvct(void)
+{
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+
+static int edit_sample(noun core, noun sample, noun *out)
+{
+    cell_t *c, *payload;
+    noun new_payload;
+    if (!noun_is_cell(core))
+        return 0;
+    c = (cell_t *)(uintptr_t)cell_ptr(core);
+    if (!noun_is_cell(c->tail))
+        return 0;
+    payload = (cell_t *)(uintptr_t)cell_ptr(c->tail);
+    if (!nest(sample, payload->tail, &new_payload))
+        return 0;
+    return nest(c->head, new_payload, out);
+}
+
+static void print_unjetted(void)
+{
+#if defined(I3_UNJETTED)
+    uart_puts("I3L1 unjetted=yes\r\n");
+#else
+    uart_puts("I3L1 unjetted=no\r\n");
+#endif
+}
+
+static void print_pulled(void)
+{
+    int i, n = fast_core_count();
+    int hot = hot_entry_count();
+    uart_puts("I3L1 pulled count=");
+    put_u64((uint64_t)n);
+    uart_puts(" hot=");
+    put_u64((uint64_t)hot);
+    uart_puts("\r\n");
+    for (i = 0; i < n; i++) {
+        uart_puts("I3L1 pulled_label noun=");
+        print_name(direct(fast_core_label(i)));
+        uart_puts("\r\n");
+    }
+    for (i = 0; i < hot; i++) {
+        if (fast_core_lookup(direct(hot_entry_label(i))) != NOUN_ZERO)
+            continue;
+        uart_puts("I3L1 missing_label noun=");
+        print_name(direct(hot_entry_label(i)));
+        uart_puts("\r\n");
+    }
 }
 
 static void print_jet_hits(void)
@@ -241,6 +296,81 @@ static int do_poke(noun cause, const char *name)
     return ok;
 }
 
+static void fill_call_result(i3_host_result_t *r, int jumped, uint64_t ticks)
+{
+    r->parse = jumped == 0;
+    r->jumped = jumped;
+    r->ops = nock_ops_used();
+    r->cells = nock_cells_used();
+    r->stack = nock_eval_stack_peak();
+    r->ticks = ticks;
+    r->effect_len = 0;
+    r->abort_reason = nock_budget_abort_reason();
+    r->effects = NOUN_ZERO;
+    r->product = NOUN_ZERO;
+    r->persist_ok = 0;
+    r->persist_ticks = 0;
+    r->persist_copy_map_hwm = 0;
+    r->persist_copy_map_capacity = 0;
+}
+
+static int do_call(noun label, noun sample, const char *name)
+{
+    i3_host_result_t r;
+    noun gate, edited, product, fol;
+    jmp_buf saved;
+    uint64_t t0, t1;
+    int jumped;
+    gate = fast_core_lookup(label);
+    if (gate == NOUN_ZERO || !noun_is_cell(gate)) {
+        uart_puts("I3L1 call name=");
+        uart_puts(name);
+        uart_puts(" missing=yes abort=none\r\n");
+        return 0;
+    }
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    if (!edit_sample(gate, sample, &edited)
+        || !nest(direct(0), direct(1), &fol)
+        || !nest(direct(2), fol, &fol)
+        || !nest(direct(9), fol, &fol)) {
+        uart_puts("I3L1 call name=");
+        uart_puts(name);
+        uart_puts(" missing=yes abort=none\r\n");
+        heap_scratch_reset();
+        return 0;
+    }
+    nock_budget_set_limits(I3_SLAM_MAX_OPS, I3_SLAM_MAX_CELLS);
+    nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
+    __builtin_memcpy(saved, nock_abort, sizeof saved);
+    t0 = cntvct();
+    jumped = setjmp(nock_abort);
+    if (jumped != 0) {
+        t1 = cntvct();
+        __builtin_memcpy(nock_abort, saved, sizeof saved);
+        fill_call_result(&r, jumped, t1 - t0);
+        print_nock_line("call", name, &r);
+        print_jet_hits();
+        heap_scratch_reset();
+        nock_budget_finish();
+        return 0;
+    }
+    product = nock(edited, fol);
+    t1 = cntvct();
+    __builtin_memcpy(nock_abort, saved, sizeof saved);
+    fill_call_result(&r, 0, t1 - t0);
+    r.product = product;
+    uart_puts("I3L1 call name=");
+    uart_puts(name);
+    uart_puts(" noun=");
+    print_noun(product, 0);
+    uart_puts("\r\n");
+    print_nock_line("call", name, &r);
+    print_jet_hits();
+    heap_scratch_reset();
+    nock_budget_finish();
+    return 1;
+}
+
 static int do_peek(noun path, const char *name)
 {
     i3_host_result_t r;
@@ -292,6 +422,11 @@ static int run_plan(noun plan)
             (void)do_peek(payload, name);
         } else if (tag_is(tag, "persist")) {
             (void)do_persist(name);
+        } else if (tag_is(tag, "call")) {
+            if (noun_is_cell(payload)) {
+                cell_t *p = (cell_t *)(uintptr_t)cell_ptr(payload);
+                (void)do_call(p->head, p->tail, name);
+            }
         } else {
             uart_puts("I3L1 skip tag=");
             print_name(tag);
@@ -312,6 +447,21 @@ static int mini_plan(void)
         return 0;
     (void)do_poke(cause, "tick");
     return do_persist("state");
+}
+
+static int plan_has_call(noun plan)
+{
+    while (noun_is_cell(plan)) {
+        cell_t *cons = (cell_t *)(uintptr_t)cell_ptr(plan);
+        noun step = cons->head;
+        plan = cons->tail;
+        if (!noun_is_cell(step))
+            continue;
+        cell_t *s = (cell_t *)(uintptr_t)cell_ptr(step);
+        if (tag_is(s->head, "call"))
+            return 1;
+    }
+    return 0;
 }
 
 static int read_plan(const uint8_t **plan, uint64_t *plan_len)
@@ -341,6 +491,7 @@ void i3_l1_probe_boot(void)
     noun plan = NOUN_ZERO;
 
     uart_puts("I3L1 start\r\n");
+    print_unjetted();
     if (!i3_host_ready()) {
         uart_puts("I3L1 terminal=host-not-ready\r\n");
         return;
@@ -355,6 +506,20 @@ void i3_l1_probe_boot(void)
     uart_puts("I3L1 plan_bytes=");
     put_u64(plan_len);
     uart_puts("\r\n");
+    if (plan_len != 0) {
+        heap_set_mode(HEAP_MODE_PERSIST);
+        if (!i3_host_cue_bytes(plan_bytes, plan_len, &plan)) {
+            uart_puts("I3L1 terminal=plan-cue-refuse\r\n");
+            return;
+        }
+    }
+
+    if (plan_has_call(plan)) {
+        heap_set_mode(HEAP_MODE_PERSIST);
+        (void)fast_pull_hot();
+        print_pulled();
+        print_fast();
+    }
 
     if (plan_len == 0) {
         if (!mini_plan()) {
@@ -363,10 +528,6 @@ void i3_l1_probe_boot(void)
             return;
         }
     } else {
-        if (!i3_host_cue_bytes(plan_bytes, plan_len, &plan)) {
-            uart_puts("I3L1 terminal=plan-cue-refuse\r\n");
-            return;
-        }
         run_plan(plan);
         (void)do_persist("final");
     }

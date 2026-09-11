@@ -121,6 +121,12 @@ int      fast_first_clue_ok(void);
 noun     fast_first_clue(void);
 int      fast_chum_count(void);
 noun     fast_chum_at(int i);
+#if defined(I3_L1_PROBE)
+noun     fast_core_lookup(noun label);
+int      fast_core_count(void);
+uint64_t fast_core_label(int i);
+int      fast_pull_hot(void);
+#endif
 
 /*
  * sock_match: structural pattern match against a (cape, data, subject) triple.
