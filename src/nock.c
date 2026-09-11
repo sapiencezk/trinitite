@@ -564,61 +564,6 @@ static noun slam_gate(noun gate, noun sample, const wilt_t *jets, sky_fn_t sky)
     return nock_eval(core, slot(direct(2), core), jets, sky);
 }
 
-/* %snag — list index. sample [i list] */
-static noun jet_snag(noun core, const wilt_t *jets, sky_fn_t sky) {
-    (void)jets; (void)sky;
-    uint64_t i = jet_atom_u64(slot(direct(12), core), "jet snag: bad index");
-    noun list = slot(direct(13), core);
-    while (noun_is_cell(list)) {
-        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(list);
-        if (i == 0)
-            return c->head;
-        i--;
-        list = c->tail;
-    }
-    nock_crash("jet snag: index out of range");
-    return NOUN_ZERO;
-}
-
-/* %scag — prefix of list. sample [n list] */
-static noun jet_scag(noun core, const wilt_t *jets, sky_fn_t sky) {
-    (void)jets; (void)sky;
-    uint64_t n = jet_atom_u64(slot(direct(12), core), "jet scag: bad count");
-    noun list = slot(direct(13), core);
-    noun rev = NOUN_ZERO;
-    uint64_t took = 0;
-    while (n > 0 && noun_is_cell(list)) {
-        if (++took > 1000000ULL)
-            nock_crash("jet scag: list too long");
-        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(list);
-        rev = nock_alloc_cell(c->head, rev);
-        list = c->tail;
-        n--;
-    }
-    noun out = NOUN_ZERO;
-    while (noun_is_cell(rev)) {
-        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(rev);
-        out = nock_alloc_cell(c->head, out);
-        rev = c->tail;
-    }
-    return out;
-}
-
-/* %need — unwrap a unit. sample (unit) */
-static noun jet_need(noun core, const wilt_t *jets, sky_fn_t sky) {
-    (void)jets; (void)sky;
-    noun sample = slot(direct(6), core);
-    if (!noun_is_cell(sample))
-        nock_crash("jet need: ~");
-    return ((cell_t *)(uintptr_t)cell_ptr(sample))->tail;
-}
-
-/* %some — wrap as unit. sample a → [~ a] */
-static noun jet_some(noun core, const wilt_t *jets, sky_fn_t sky) {
-    (void)jets; (void)sky;
-    return nock_alloc_cell(NOUN_ZERO, slot(direct(6), core));
-}
-
 /* %turn — map gate over list. sample [list gate] */
 static noun jet_turn(noun core, const wilt_t *jets, sky_fn_t sky) {
     noun list = slot(direct(12), core);
@@ -640,27 +585,6 @@ static noun jet_turn(noun core, const wilt_t *jets, sky_fn_t sky) {
         rev = c->tail;
     }
     return out;
-}
-
-/* %mink — virtual nock. sample [[subject formula] scry]. scry unused (op 12
- * still crashes the inner eval, which this jet reports as a %2 tone). */
-static noun jet_mink(noun core, const wilt_t *jets, sky_fn_t sky) {
-    noun sample = slot(direct(6), core);
-    noun pair = slot(direct(2), sample);
-    noun v_subject = slot(direct(2), pair);
-    noun v_formula = slot(direct(3), pair);
-    uint64_t saved_stack = g_eval_stack_current;
-    jmp_buf saved;
-    __builtin_memcpy(saved, nock_abort, sizeof saved);
-    int jumped = setjmp(nock_abort);
-    if (jumped != 0) {
-        g_eval_stack_current = saved_stack;
-        __builtin_memcpy(nock_abort, saved, sizeof saved);
-        return nock_alloc_cell(direct(2), NOUN_ZERO);
-    }
-    noun product = nock_eval(v_subject, v_formula, jets, sky);
-    __builtin_memcpy(nock_abort, saved, sizeof saved);
-    return nock_alloc_cell(NOUN_ZERO, product);
 }
 
 /* %mole — run a trap; ~ on crash, [~ product] on success. */
@@ -724,13 +648,8 @@ static hot_entry_t hot_state[] = {
     { 1953391980,  jet_lent, 0 },  /* %lent */
     { 1886350438,  jet_flop, 0 },  /* %flop */
     { 1684825463,  jet_weld, 0 },  /* %weld */
-    /* L1: honk %fast labels the R1 jam actually takes */
-    { 1734438515,  jet_snag, 0 },  /* %snag */
-    { 1734435699,  jet_scag, 0 },  /* %scag */
-    { 1684366702,  jet_need, 0 },  /* %need */
-    { 1701670771,  jet_some, 0 },  /* %some */
+    /* L1: honk %fast labels the R1 jam actually takes (deliverable 2) */
     { 1852994932,  jet_turn, 0 },  /* %turn */
-    { 1802398061,  jet_mink, 0 },  /* %mink */
     { 1701605229,  jet_mole, 0 },  /* %mole */
     { 0, NULL, 0 }                 /* sentinel */
 };
@@ -787,9 +706,9 @@ void hot_hits_reset(void)
         hot_state[i].hits = 0;
 }
 
-/* ── %fast battery registry (stateless; no Vere ++ka.rout) ─────────────── */
+/* ── %fast battery registry (per-boot; no Vere ++ka.rout) ─────────────── */
 
-#define FAST_REG_MAX 256
+#define FAST_REG_MAX 256   /* bounded in practice by hot_entry_count() */
 
 typedef struct {
     noun battery;
@@ -802,7 +721,7 @@ static int g_fast_len;
 static uint64_t g_fast_clues;
 static noun g_fast_first_clue;
 static int g_fast_first_ok;
-#define FAST_CHUM_LOG 64
+#define FAST_CHUM_LOG 64   /* diagnostic ring; stops recording past 64 */
 static noun g_fast_chums[FAST_CHUM_LOG];
 static int g_fast_chum_n;
 

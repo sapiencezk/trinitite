@@ -11,7 +11,7 @@
  * Jet pack (C hot_state, pure — no MMIO): arithmetic + WP3 structural/list/bit
  *   %dec %add %sub %mul %lth %gth %lte %gte %div %mod
  *   %eq %lsh %rsh %con %dis %mix %cap %mas %peg %lent %flop %weld
- *   L1 %fast: %snag %scag %need %some %turn %mink %mole
+ *   L1 %fast: %turn %mole
  * KERNEL path (nock_eval op9): C only. SKA nock_op9_continue: Forth then C.
  * honk %fast clues register the first battery per hot label; op 9 axis 2
  * matches that battery. %wild is unchanged and still wins when present.
