@@ -68,7 +68,9 @@
  *   PERSIST  HEAP_BASE .. HEAP_PERSIST_TOP  — live gate, event queue, tokens
  *   SCRATCH  HEAP_SCRATCH_BASE .. HEAP_TOP  — per-slam Nock product; reset
  *                                            after each event (host ArenaHost)
- * HEAP_TOP ≤ ATOM_INDEX_BASE (hard ceiling; silent overrun stomped atom index).
+ * Production: HEAP_TOP ≤ ATOM_INDEX_BASE (silent overrun stomped atom index).
+ * I3_UNJETTED relocates scratch to high qemu RAM; persist still precedes
+ * the atom index.
  */
 #define HEAP_BASE           PLATFORM_HEAP_BASE
 #define HEAP_SIZE           0x04000000  /* 64MB total */
@@ -82,6 +84,21 @@
 #define HEAP_PERSIST_HALF   (HEAP_PERSIST_SIZE / 2)
 #define HEAP_SCRATCH_BASE   HEAP_PERSIST_TOP
 #define HEAP_SCRATCH_SIZE   (HEAP_TOP - HEAP_SCRATCH_BASE)  /* 32MB */
+#if defined(I3_UNJETTED)
+/*
+ * Diagnostic image only (I3_UNJETTED requires qemu-virt). Production
+ * persist stays put; scratch moves to high RAM past pill (0x50000000)
+ * and the I3 plan blob (0x51000000). In-place 32MB scratch holds only
+ * 1.398M 24-byte cells and crashed (`scratch exhausted`) before the
+ * 2.048M diagnostic budget. 64MB holds 2.796M cells.
+ */
+#undef HEAP_SCRATCH_BASE
+#undef HEAP_SCRATCH_SIZE
+#undef HEAP_TOP
+#define HEAP_SCRATCH_BASE (PLATFORM_DRAM_BASE + 0x20000000ULL)
+#define HEAP_SCRATCH_SIZE 0x04000000ULL
+#define HEAP_TOP (HEAP_SCRATCH_BASE + HEAP_SCRATCH_SIZE)
+#endif
 
 /*
  * Atom store: content-addressed (type-10) atom cache.
@@ -102,9 +119,20 @@
  */
 #define STACK_CANARY        0xDEADF0C4
 
-/* Layout: heap → atom index → atom data → … → MMIO. No silent overlap. */
+/* Layout: heap → atom index → atom data → … → MMIO. No silent overlap.
+ * I3_UNJETTED relocates scratch to high qemu RAM; persist still ends at
+ * HEAP_PERSIST_TOP, which stays ≤ ATOM_INDEX_BASE. */
+#if !defined(I3_UNJETTED)
 #if HEAP_TOP > ATOM_INDEX_BASE
 #error "noun heap overlaps atom index (HEAP_TOP > ATOM_INDEX_BASE)"
+#endif
+#else
+#if HEAP_PERSIST_TOP > ATOM_INDEX_BASE
+#error "persist heap overlaps atom index"
+#endif
+#if HEAP_SCRATCH_BASE < (PLATFORM_PILL_BASE + 0x02000000ULL)
+#error "unjetted scratch overlaps pill/plan"
+#endif
 #endif
 #if (ATOM_INDEX_BASE + ATOM_INDEX_SIZE) > ATOM_DATA_BASE
 #error "atom index overlaps atom data"

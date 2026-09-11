@@ -810,6 +810,10 @@ $(OBJDIR)/forth.o: $(SRCDIR)/forth.s | $(OBJDIR)
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(OBJDIR)/noun.o: $(SRCDIR)/memory.h $(SRCDIR)/noun.h
+$(OBJDIR)/i3_host.o: $(SRCDIR)/i3_admission.h $(SRCDIR)/memory.h
+$(OBJDIR)/i3_l1_probe.o: $(SRCDIR)/i3_admission.h $(SRCDIR)/memory.h
+
 ifeq ($(M44_TWO_RESOURCE),1)
 $(OBJDIR)/m44_two_resource_supervisor.o $(OBJDIR)/m44_device_witness.o: \
 	$(SRCDIR)/m44_two_resource_supervisor.h $(SRCDIR)/m44_resource_transaction.h $(SRCDIR)/m47_device_witness.inc

@@ -22,3 +22,16 @@
 #define I3_SLAM_MAX_OPS 2000000ULL
 #define I3_SLAM_MAX_CELLS 128000ULL
 #define I3_SLAM_MAX_STACK 1024ULL
+#if defined(I3_UNJETTED)
+/*
+ * Diagnostic image only (I3_UNJETTED requires I3_L1_PROBE=1). Production
+ * numbers above stay 2e6 / 128000 / 1024. 16× cells (2.048M) and ops
+ * (32M) is the diagnostic budget; scratch is sized to match in memory.h.
+ * Stack 1024 already covers the unjetted peak. Kernel pokes still abort
+ * at this cap — recorded, not raised further.
+ */
+#undef I3_SLAM_MAX_OPS
+#undef I3_SLAM_MAX_CELLS
+#define I3_SLAM_MAX_OPS (2000000ULL * 16)
+#define I3_SLAM_MAX_CELLS (128000ULL * 16)
+#endif
