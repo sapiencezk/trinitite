@@ -402,6 +402,28 @@ static uint64_t jet_atom_u64(noun a, const char *who)
     return at->limbs[0];
 }
 
+/*
+ * Hoon $bite: bloq or [bloq step], step bunt 1.
+ * Bit count is (bex bloq) * step, i.e. step << bloq.
+ */
+static uint64_t bite_bits(noun bite, const char *who)
+{
+    uint64_t bloq;
+    uint64_t step = 1;
+    if (noun_is_atom(bite)) {
+        bloq = jet_atom_u64(bite, who);
+    } else {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(bite);
+        bloq = jet_atom_u64(c->head, who);
+        step = jet_atom_u64(c->tail, who);
+    }
+    if (bloq >= 64)
+        nock_crash(who);
+    if (step != 0 && (1ULL << bloq) > (UINT64_MAX / step))
+        nock_crash(who);
+    return step << bloq;
+}
+
 /* %eq — structural equality (same as Nock op5 / noun_eq). sample [a b] */
 static noun jet_eq(noun core, const wilt_t *jets, sky_fn_t sky) {
     (void)jets; (void)sky;
@@ -410,22 +432,22 @@ static noun jet_eq(noun core, const wilt_t *jets, sky_fn_t sky) {
     return noun_eq(a, b) ? NOUN_YES : NOUN_NO;
 }
 
-/* %lsh — left shift: sample [k a] → a << k */
+/* %lsh — left shift: sample [bite a] → a << ((bex bloq)*step) */
 static noun jet_lsh(noun core, const wilt_t *jets, sky_fn_t sky) {
     (void)jets; (void)sky;
-    noun k = slot(direct(12), core);
+    noun bite = slot(direct(12), core);
     noun a = slot(direct(13), core);
     if (!noun_is_atom(a)) nock_crash("jet lsh: non-atom");
-    return bn_lsh(a, jet_atom_u64(k, "jet lsh: bad shift"));
+    return bn_lsh(a, bite_bits(bite, "jet lsh: bad bite"));
 }
 
-/* %rsh — right shift: sample [k a] → a >> k */
+/* %rsh — right shift: sample [bite a] → a >> ((bex bloq)*step) */
 static noun jet_rsh(noun core, const wilt_t *jets, sky_fn_t sky) {
     (void)jets; (void)sky;
-    noun k = slot(direct(12), core);
+    noun bite = slot(direct(12), core);
     noun a = slot(direct(13), core);
     if (!noun_is_atom(a)) nock_crash("jet rsh: non-atom");
-    return bn_rsh(a, jet_atom_u64(k, "jet rsh: bad shift"));
+    return bn_rsh(a, bite_bits(bite, "jet rsh: bad bite"));
 }
 
 /* %con — bitwise OR (Hoon con) */
