@@ -135,18 +135,22 @@ static int kick_formula(noun *out)
     return tuple(xs, 4, out);
 }
 
-static int path3(const char *a, const char *b, noun *out)
+static int system_wire(noun *out)
 {
+    /* [%poke %sys 1 ~] — NockApp SystemWire. The kernel only matches the
+     * %poke head; the source label is no longer L0. */
     noun rest;
-    if (!nest(tas(b), NOUN_ZERO, &rest))
+    if (!nest(direct(1), NOUN_ZERO, &rest))
         return 0;
-    return nest(tas(a), rest, out);
+    if (!nest(tas("sys"), rest, &rest))
+        return 0;
+    return nest(tas("poke"), rest, out);
 }
 
 static int ovum_job(uint64_t num, noun cause, noun *out)
 {
     noun wire, input_xs[4], input, ovum;
-    if (!path3("poke", "l0", &wire))
+    if (!system_wire(&wire))
         return 0;
     input_xs[0] = direct(0);
     input_xs[1] = direct(0);
@@ -551,10 +555,9 @@ void i3_host_boot(void)
         halt();
     }
 
+    uart_puts("I3H ready\r\n");
 #if defined(I3_L1_PROBE)
     i3_l1_probe_boot();
-#else
-    uart_puts("I3H ready\r\n");
 #endif
     halt();
 }
