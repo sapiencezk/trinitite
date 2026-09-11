@@ -117,6 +117,7 @@ DIGITAL_IN_BACKEND ?= bcm2838
 endif
 M8_EVIDENCE ?= 0
 I2_OPERATOR ?= 0
+I3_HOST ?= 0
 I3_L0_PROBE ?= 0
 I3_L1_PROBE ?= 0
 M21_SINK_EMBED ?= 0
@@ -449,25 +450,24 @@ ifeq ($(I2_OPERATOR),1)
 CFLAGS += -DI2_OPERATOR=1
 endif
 ifeq ($(I3_L0_PROBE),1)
-ifneq ($(PLATFORM),qemu-virt)
-$(error I3_L0_PROBE=1 requires PLATFORM=qemu-virt)
+$(error I3_L0_PROBE was removed in T1; use I3_HOST=1 (I3_L1_PROBE=1 is the diagnostic))
 endif
-ifneq ($(filter 1,$(M38_C) $(M38_D5_NATIVE) $(M38_D7_NATIVE) $(M38_D8_NATIVE) $(M38_D8_WAVE_A) $(M39_RESOURCE_WITNESS) $(I2_OPERATOR) $(I3_L1_PROBE)),)
-$(error I3_L0_PROBE=1 cannot be combined with other boot selectors)
+ifeq ($(I3_HOST),1)
+ifneq ($(PLATFORM),qemu-virt)
+$(error I3_HOST=1 requires PLATFORM=qemu-virt; the board is T2)
+endif
+ifneq ($(filter 1,$(M38_C) $(M38_D5_NATIVE) $(M38_D7_NATIVE) $(M38_D8_NATIVE) $(M38_D8_WAVE_A) $(M39_RESOURCE_WITNESS) $(I2_OPERATOR)),)
+$(error I3_HOST=1 cannot be combined with M38_C M38_D5_NATIVE M38_D7_NATIVE M38_D8_NATIVE M38_D8_WAVE_A M39_RESOURCE_WITNESS I2_OPERATOR)
 endif
 # qemu-virt boots with the MMU off. Same as M44: do not combine adjacent
 # 32-bit fields into unaligned wide accesses.
-CFLAGS += -DI3_L0_PROBE=1 -mstrict-align
+CFLAGS += -DI3_HOST=1 -mstrict-align
 endif
 ifeq ($(I3_L1_PROBE),1)
-ifneq ($(PLATFORM),qemu-virt)
-$(error I3_L1_PROBE=1 requires PLATFORM=qemu-virt)
+ifneq ($(I3_HOST),1)
+$(error I3_L1_PROBE=1 requires I3_HOST=1)
 endif
-ifneq ($(filter 1,$(M38_C) $(M38_D5_NATIVE) $(M38_D7_NATIVE) $(M38_D8_NATIVE) $(M38_D8_WAVE_A) $(M39_RESOURCE_WITNESS) $(I2_OPERATOR) $(I3_L0_PROBE)),)
-$(error I3_L1_PROBE=1 cannot be combined with other boot selectors)
-endif
-# qemu-virt boots with the MMU off. Same as M44 / L0: -mstrict-align.
-CFLAGS += -DI3_L1_PROBE=1 -mstrict-align
+CFLAGS += -DI3_L1_PROBE=1
 endif
 
 ifeq ($(M21_SINK_EMBED),1)
@@ -662,16 +662,16 @@ M38_D8_B3_OBJS =
 ifeq ($(M38_D8_WAVE_B_SCENARIO),b3)
 M38_D8_B3_OBJS = m38_resource_b3_witness.o
 endif
-I3_L0_OBJS =
-ifeq ($(I3_L0_PROBE),1)
-I3_L0_OBJS = i3_l0_probe.o
+I3_HOST_OBJS =
+ifeq ($(I3_HOST),1)
+I3_HOST_OBJS = i3_host.o
 endif
 I3_L1_OBJS =
 ifeq ($(I3_L1_PROBE),1)
 I3_L1_OBJS = i3_l1_probe.o
 endif
-OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) $(M38_D8_B1_OBJS) $(M38_D8_B2_OBJS) $(M38_D8_B3_OBJS) $(I3_L0_OBJS) $(I3_L1_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
-OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) $(M38_D8_B1_OBJS) $(M38_D8_B2_OBJS) $(M38_D8_B3_OBJS) $(I3_L0_OBJS) $(I3_L1_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) $(M38_D8_B1_OBJS) $(M38_D8_B2_OBJS) $(M38_D8_B3_OBJS) $(I3_HOST_OBJS) $(I3_L1_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
+OBJ_NAMES = boot.o uart.o freestanding.o noun.o bignum.o blake3.o nock.o setjmp.o jam.o bounded_cue.o runtime_identity.o runtime_stats.o i2_admission_metrics.o i2_ingress.o i2_operator.o i2_admission_policy.o i2_application_surface.o m25_admission.o m25_plan_record.o m25_target_core.o $(M26_OBJS) $(M27_OBJS) $(M28_OBJS) $(M29_OBJS) $(M36_OBJS) $(M37_OBJS) $(M37_R_OBJS) $(M37_SERVICE_OBJS) $(M38_C_OBJS) $(M38_D5_NATIVE_OBJS) $(M38_D7_NATIVE_OBJS) $(M38_D8_NATIVE_OBJS) $(M38_D8_WAVE_A_OBJS) $(M38_D8_B1_OBJS) $(M38_D8_B2_OBJS) $(M38_D8_B3_OBJS) $(I3_HOST_OBJS) $(I3_L1_OBJS) i2_closed_process.o $(DIGITAL_OUT_OBJS) $(DIGITAL_IN_OBJS) kernel.o m7_supervisor.o m21_device.o m22_provider_core.o m23_session_core.o core.o cold.o $(MEDIA_OBJS) trace.o net.o $(NATIVE_OBJS) $(M36_NATIVE_OBJS) $(M37_NATIVE_OBJS) $(M37_R_NATIVE_OBJS) ska.o forth.o pill_embed.o m21_sink_embed.o main.o
 ifneq ($(filter 1,$(M26_DUPLEX) $(M27_COMMISSION) $(M28_COMMISSION) $(M29_COMMISSION)),)
 OBJ_NAMES := $(filter-out m25_plan_record.o m25_target_core.o,$(OBJ_NAMES))
 endif
@@ -679,8 +679,8 @@ CONFIG_KEY = $(PLATFORM)-$(COLD_MEDIA)-$(DIGITAL_IN_BACKEND)-$(DIGITAL_OUT_BACKE
 ifeq ($(M39_RESOURCE_WITNESS),1)
 CONFIG_KEY := $(CONFIG_KEY)-m39
 endif
-ifeq ($(I3_L0_PROBE),1)
-CONFIG_KEY := $(CONFIG_KEY)-i3l0
+ifeq ($(I3_HOST),1)
+CONFIG_KEY := $(CONFIG_KEY)-i3host
 endif
 ifeq ($(I3_L1_PROBE),1)
 CONFIG_KEY := $(CONFIG_KEY)-i3l1

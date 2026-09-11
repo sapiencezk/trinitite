@@ -6,10 +6,8 @@
 #include "i2_ingress.h"
 #include "i2_admission_metrics.h"
 #include "digital_out.h"
-#if defined(I3_L1_PROBE)
-#include "i3_l1_probe.h"
-#elif defined(I3_L0_PROBE)
-#include "i3_l0_probe.h"
+#if defined(I3_HOST)
+#include "i3_host.h"
 #elif defined(M38_D8_WAVE_A)
 #include "m38_resource_runtime.h"
 #include "m38_resource_wave_a_witness.h"
@@ -40,10 +38,8 @@ void main(void) {
     /* M6 fixed bank is configured and cleared before ordinary app enable. */
     (void)digital_out_boot_safe();
     uart_init();
-#if defined(I3_L1_PROBE)
-    uart_puts("I3L1 boot\r\n");
-#elif defined(I3_L0_PROBE)
-    uart_puts("I3L0 boot\r\n");
+#if defined(I3_HOST)
+    uart_puts("I3H boot\r\n");
 #endif
 
     /* Write stack canary */
@@ -54,10 +50,8 @@ void main(void) {
     i2_rx_init();
     cold_init();
 
-#if defined(I3_L1_PROBE)
-    i3_l1_probe_boot();
-#elif defined(I3_L0_PROBE)
-    i3_l0_probe_boot();
+#if defined(I3_HOST)
+    i3_host_boot();
 #elif defined(M38_D8_WAVE_A)
 #if defined(M39_RESOURCE_WITNESS)
     m39_resource_boot();

@@ -3,11 +3,11 @@
 #include "bounded_cue.h"
 #include "i2_admission_envelope.h"
 #include "i2_admission_metrics.h"
-#if defined(I3_L0_PROBE) || defined(I3_L1_PROBE)
+#if defined(I3_HOST)
 #include "memory.h"
 #endif
 
-#if defined(I3_L0_PROBE) || defined(I3_L1_PROBE)
+#if defined(I3_HOST)
 /* High-RAM table. mini.jam unique graph nodes 283416; cue also caches
  * backref sites, ~550k entries. Production M12 table is 131072 in .bss. */
 #define BOUNDED_CACHE_MAX       1048576u
@@ -38,7 +38,7 @@ typedef struct {
     uint32_t probe_hwm;
 } cue_reader_t;
 
-#if defined(I3_L0_PROBE) || defined(I3_L1_PROBE)
+#if defined(I3_HOST)
 /* High RAM, same window as jam.c's unbounded cue cache. A 24 MiB .bss
  * table would blow the qemu-virt 24 MiB admitted BSS window. */
 static bounded_cache_entry_t *const g_bounded_cache =

@@ -10,12 +10,12 @@ Arguments:
     -n <decimal>  Jam atom as a decimal integer (paste directly from Dojo output,
                   dots as thousands separators are stripped automatically).
     jam-file      Raw jam bytes from Urbit (binary file).
-    shape         Kernel shape: 'arvo' (0) or 'shrine' (1)
+    shape         Kernel shape: 'arvo' (0), 'shrine' (1), or 'nockapp' (2)
     output.bin    Output PILL v2 file
 
 PILL v2 format:
     bytes  0-7:   uint64_t LE = byte count of jam data
-    byte   8:     kernel shape (0=Arvo, 1=Shrine)
+    byte   8:     kernel shape (0=Arvo, 1=Shrine, 2=nockapp)
     bytes  9-12:  uint32_t LE version (0 = unversioned)
     bytes 13-15:  reserved (zeros)
     bytes  16+:   raw jam bytes (little-endian atom, no leading zero bytes)
@@ -27,7 +27,7 @@ Optional:
 import sys
 import struct
 
-SHAPES = {'arvo': 0, 'shrine': 1}
+SHAPES = {'arvo': 0, 'shrine': 1, 'nockapp': 2}
 
 
 def atom_to_bytes(n: int) -> bytes:
@@ -86,7 +86,7 @@ def main():
         sys.exit(1)
 
     if shape_arg not in SHAPES:
-        print(f"error: shape must be 'arvo' or 'shrine', got {shape_arg!r}", file=sys.stderr)
+        print(f"error: shape must be 'arvo', 'shrine', or 'nockapp', got {shape_arg!r}", file=sys.stderr)
         sys.exit(1)
 
     pill = build_pill(jam_data, SHAPES[shape_arg], version)
