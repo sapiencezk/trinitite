@@ -1065,7 +1065,10 @@ extern uint8_t _pill_embed_end[];
 
 noun pill_load(void) {
     /*
-     * Priority 1: QEMU loader at PILL_BASE.  Priority 2: embedded pill.bin.
+     * Priority 1: loader at PILL_BASE (QEMU -device loader, or the Pi
+     * firmware initramfs). Priority 2: embedded pill.bin (M12 only).
+     *
+     * I3_HOST never falls back to .rodata: the jam is at PILL_BASE.
      *
      * Do NOT put large scratch in .bss (overlays FORTH_BASE ~0x90000).
      * Small pills: stack buffer. Large: high RAM at PILL_SCRATCH_BASE.
@@ -1077,6 +1080,11 @@ noun pill_load(void) {
         nbytes |= (uint64_t)q[i] << (i * 8);
 
     const volatile uint8_t *base;
+#if defined(I3_HOST)
+    if (nbytes == 0)
+        return 0;
+    base = q;
+#else
     if (nbytes > 0) {
         base = q;
     } else {
@@ -1087,6 +1095,7 @@ noun pill_load(void) {
         for (i = 0; i < 8; i++)
             nbytes |= (uint64_t)base[i] << (i * 8);
     }
+#endif
 
     if (nbytes == 0)
         return 0;

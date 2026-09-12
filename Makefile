@@ -454,13 +454,11 @@ ifeq ($(I3_L0_PROBE),1)
 $(error I3_L0_PROBE was removed in T1; use I3_HOST=1 (I3_L1_PROBE=1 is the diagnostic))
 endif
 ifeq ($(I3_HOST),1)
-ifneq ($(PLATFORM),qemu-virt)
-$(error I3_HOST=1 requires PLATFORM=qemu-virt; the board is T2)
-endif
+# I3_HOST builds for qemu-virt and rpi4b (T2). I3_UNJETTED stays qemu-virt only.
 ifneq ($(filter 1,$(M38_C) $(M38_D5_NATIVE) $(M38_D7_NATIVE) $(M38_D8_NATIVE) $(M38_D8_WAVE_A) $(M39_RESOURCE_WITNESS) $(I2_OPERATOR)),)
 $(error I3_HOST=1 cannot be combined with M38_C M38_D5_NATIVE M38_D7_NATIVE M38_D8_NATIVE M38_D8_WAVE_A M39_RESOURCE_WITNESS I2_OPERATOR)
 endif
-# qemu-virt boots with the MMU off. Same as M44: do not combine adjacent
+# Both platforms boot with the MMU off. Same as M44: do not combine adjacent
 # 32-bit fields into unaligned wide accesses.
 CFLAGS += -DI3_HOST=1 -mstrict-align
 endif
@@ -473,6 +471,9 @@ endif
 ifeq ($(I3_UNJETTED),1)
 ifneq ($(I3_L1_PROBE),1)
 $(error I3_UNJETTED=1 requires I3_L1_PROBE=1)
+endif
+ifneq ($(PLATFORM),qemu-virt)
+$(error I3_UNJETTED=1 requires PLATFORM=qemu-virt; unjetted scratch is qemu-virt only)
 endif
 CFLAGS += -DI3_UNJETTED=1
 endif
@@ -843,8 +844,21 @@ pill.bin:
 	@echo "No pill.bin found; creating empty stub (KERNEL will return no-pill)"
 	python3 -c "import struct; open('pill.bin','wb').write(struct.pack('<Q',0)+bytes(8))"
 
+ifeq ($(I3_HOST),1)
+# I3 forbids a kernel jam in .rodata. Assemble the empty stub regardless of
+# whatever pill.bin is sitting in the worktree (M12 still embeds via the
+# other arm of this rule).
+$(OBJDIR)/pill_embed.o: src/pill_embed_empty.s | $(OBJDIR)
+	$(CC) $(CFLAGS) -c src/pill_embed_empty.s -o $@
+	@sz=$$(wc -c < $@ | tr -d ' '); \
+	if [ "$$sz" -ge 4096 ]; then \
+		echo "I3_HOST pill_embed.o is $$sz bytes; jam must not be in .rodata" >&2; \
+		exit 1; \
+	fi
+else
 $(OBJDIR)/pill_embed.o: src/pill_embed.s pill.bin | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+endif
 
 $(CONFIG_IMG): $(CONFIG_ELF)
 	$(OBJCOPY) -O binary $< $@

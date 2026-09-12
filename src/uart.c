@@ -18,7 +18,32 @@ static uint64_t uart_counter(void)
     return v;
 }
 
+#if defined(I3_HOST) && defined(TRINITITE_PLATFORM_RPI4B)
+/*
+ * Route PL011 (UART0) onto GPIO 14/15 (ALT0). enable_uart=1 clocks the
+ * block; on a wireless CM4 the firmware otherwise leaves UART0 on the
+ * Bluetooth pins. Compiled only into I3_HOST rpi4b images.
+ */
+#define BCM2838_GPIO_BASE 0xFE200000ULL
+#define BCM2838_GPFSEL1   0x04u
+#define GPIO_ALT0         4u
+
+static void mux_pl011_gpio(void)
+{
+    volatile uint32_t *gpfsel1 =
+        (volatile uint32_t *)(uintptr_t)(BCM2838_GPIO_BASE + BCM2838_GPFSEL1);
+    uint32_t v = *gpfsel1;
+    v &= ~((7u << 12) | (7u << 15));
+    v |= (GPIO_ALT0 << 12) | (GPIO_ALT0 << 15);
+    *gpfsel1 = v;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+#endif
+
 void uart_init(void) {
+#if defined(I3_HOST) && defined(TRINITITE_PLATFORM_RPI4B)
+    mux_pl011_gpio();
+#endif
     UART_CR   = 0;
     UART_IBRD = 26;
     UART_FBRD = 3;

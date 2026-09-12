@@ -1,0 +1,1 @@
+Pi 1–3 era boot files (`bootcode.bin`, `fixup.dat`). Pi 4 / CM4 boots from EEPROM and needs `start4.elf` + `fixup4.dat` from `tools/i3/t2/boot-manifest.json`.

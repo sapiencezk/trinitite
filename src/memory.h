@@ -85,6 +85,9 @@
 #define HEAP_SCRATCH_BASE   HEAP_PERSIST_TOP
 #define HEAP_SCRATCH_SIZE   (HEAP_TOP - HEAP_SCRATCH_BASE)  /* 32MB */
 #if defined(I3_UNJETTED)
+#if !defined(TRINITITE_PLATFORM_QEMU_VIRT)
+#error I3_UNJETTED requires PLATFORM=qemu-virt
+#endif
 /*
  * Diagnostic image only (I3_UNJETTED requires qemu-virt). Production
  * persist stays put; scratch moves to high RAM past pill (0x50000000)
