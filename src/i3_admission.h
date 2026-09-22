@@ -8,7 +8,11 @@
  * Per-slam numbers are the jetted R1 golden with headroom; I3_HOST enforces
  * them via nock_budget_set_limits / nock_eval_stack_set_limit.
  */
-#define I3_CUE_MAX_INPUT_BYTES 1048576u
+/* Decision 77. The plan blob is at PILL_BASE + 0x01000000 (i3_host.h).
+ * The pill header is 16 bytes, so a jam of this length ends on the last
+ * byte before the plan. The other ceilings stay: each sizes a fixed buffer
+ * or the C stack. */
+#define I3_CUE_MAX_INPUT_BYTES (0x01000000u - 16u)
 #define I3_CUE_MAX_ATOM_BYTES 262144u
 #define I3_CUE_MAX_TOTAL_ATOM_BYTES 2097152u
 #define I3_CUE_CACHE_ENTRIES 1048576u
