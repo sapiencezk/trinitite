@@ -413,9 +413,24 @@ noun noun_copy(noun n)
     return noun_copy_rec(n);
 }
 
+/* A cell already in the live persist half is the noun we keep. Copying
+ * it again would duplicate the kernel on every poke. Scratch cells, and
+ * cells in the other semispace, are still copied. */
+static int cell_in_live_persist(uint32_t ptr)
+{
+    uintptr_t p = (uintptr_t)ptr;
+    uintptr_t base = (uintptr_t)persist_base(persist_sel);
+    uintptr_t bump = (uintptr_t)persist_ptr;
+    return p >= base && p < bump;
+}
+
 static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
 {
     if (!noun_is_cell(n)) {
+        *out = n;
+        return 1;
+    }
+    if (cell_in_live_persist(cell_ptr(n))) {
         *out = n;
         return 1;
     }
