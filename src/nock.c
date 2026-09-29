@@ -622,6 +622,11 @@ static noun jet_mole(noun core, const wilt_t *jets, sky_fn_t sky) {
     if (jumped != 0) {
         g_eval_stack_current = saved_stack;
         __builtin_memcpy(nock_abort, saved, sizeof saved);
+        /* Only a crash is the trap's result (~). A budget or wall abort
+         * belongs to the whole call: re-raise it, as the unjetted +mole
+         * would never see it either. */
+        if (jumped != NOCK_ABORT_CRASH)
+            longjmp(nock_abort, jumped);
         return NOUN_ZERO;
     }
     noun product = nock_eval(tap, kick_fol, jets, sky);
