@@ -353,6 +353,74 @@ int i3_host_cue_bytes(const uint8_t *bytes, uint64_t len, noun *out)
     return 1;
 }
 
+/* KP2 crash re-entry: the de-moled fast path lets a deterministic $exit bail
+ * escape to the host as NOCK_ABORT_CRASH. Reproduce the NockApp/web-node
+ * `poke_swap` re-poke: run the same event again through the wire ~[/arvo]
+ * with a [%exit ~] goof, so the outer keep core's %crud branch (wrapper.hoon)
+ * re-runs it in isolation and re-emits the planted [%block-crash …] effects
+ * byte-identically.
+ *
+ *   wire      = [0 %arvo 0]                 (path ~[/arvo])
+ *   goof      = [%exit ~]
+ *   job_input = [eny our now cause] = [0 0 0 cause]   (as ovum_job builds)
+ *   ovo       = [event_num [wire [goof job_input]]]
+ *
+ * The trinitite nock reports every consistence bail as a bare `nock_crash`
+ * C string — it has no [mote tang] bail noun — and the only bail the lite
+ * node exercises is the planted `~|(%planted-crash !!)`, i.e. %exit. A
+ * budget failure is NOCK_ABORT_BUDGET and never reaches this path. The
+ * goof's tang is consumed only by the wrapper's slog-on-refusal branch and
+ * does not affect the %exit re-run's bytes, so tang = ~ here. */
+static int crud_repoke(noun cause, i3_host_result_t *out)
+{
+    noun input_xs[4] = {direct(0), direct(0), direct(0), cause};
+    noun job_input, goof, wire, arvo_rest, crud, ovum, ovo, subject, product;
+    uint64_t t0, t1;
+    int jumped;
+
+    if (!tuple(input_xs, 4, &job_input))
+        return 0;
+    if (!nest(tas("exit"), NOUN_ZERO, &goof))
+        return 0;
+    if (!nest(tas("arvo"), NOUN_ZERO, &arvo_rest))
+        return 0;
+    if (!nest(direct(0), arvo_rest, &wire))
+        return 0;
+    if (!nest(goof, job_input, &crud))
+        return 0;
+    if (!nest(wire, crud, &ovum))
+        return 0;
+    if (!nest(direct(g_event_num), ovum, &ovo))
+        return 0;
+    if (!nest(g_kernel, ovo, &subject))
+        return 0;
+
+    host_budget();
+    t0 = cntvct();
+    jumped = host_nock(subject, g_poke_fol, &product);
+    t1 = cntvct();
+    fill_eval(out, jumped, t1 - t0);
+    if (jumped != 0) {
+        nock_budget_finish();
+        return 0;
+    }
+    if (noun_is_cell(product)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
+        if (out) {
+            out->parse = 1;
+            out->effects = c->head;
+            out->effect_len = effect_list_len(c->head);
+        }
+        g_kernel = c->tail;
+        g_event_num++;
+        (void)i3_host_persist(out);
+        nock_budget_finish();
+        return 1;
+    }
+    nock_budget_finish();
+    return 0;
+}
+
 int i3_host_poke(noun cause, i3_host_result_t *out)
 {
     noun job, subject, product;
@@ -372,6 +440,11 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
     t1 = cntvct();
     fill_eval(out, jumped, t1 - t0);
     if (jumped != 0) {
+        /* A deterministic $exit bail propagates here from the de-moled fast
+         * path (NOCK_ABORT_CRASH). Re-poke through ~[/arvo]; a budget abort
+         * (NOCK_ABORT_BUDGET) is not a bail and gets no %crud re-entry. */
+        if (jumped == NOCK_ABORT_CRASH)
+            return crud_repoke(cause, out);
         nock_budget_finish();
         return 0;
     }
