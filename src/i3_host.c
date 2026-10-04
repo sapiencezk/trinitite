@@ -11,6 +11,7 @@
 #endif
 #include "nock.h"
 #include "setjmp.h"
+#include "sha256.h"
 #include "uart.h"
 
 #define KICK_FORMULA_TEXT "[9 2 0 1]"
@@ -351,6 +352,84 @@ int i3_host_cue_bytes(const uint8_t *bytes, uint64_t len, noun *out)
         return 0;
     noun_tx_commit();
     return 1;
+}
+
+static int hex_nibble(char c, uint8_t *nib)
+{
+    if (c >= '0' && c <= '9') { *nib = (uint8_t)(c - '0'); return 1; }
+    if (c >= 'a' && c <= 'f') { *nib = (uint8_t)(c - 'a' + 10); return 1; }
+    if (c >= 'A' && c <= 'F') { *nib = (uint8_t)(c - 'A' + 10); return 1; }
+    return 0;
+}
+
+/* Parse a 64-char ASCII hex digest (case-insensitive). Returns 0 on a
+ * malformed char. Sets *is_zero when every byte is zero (the "no gate" mark). */
+static int parse_sha256_hex(const char *hex, uint8_t out[32], int *is_zero)
+{
+    uint32_t i;
+    *is_zero = 1;
+    if (!hex)
+        return 0;
+    for (i = 0; i < 32; i++) {
+        uint8_t hi, lo;
+        if (!hex_nibble(hex[2 * i], &hi) || !hex_nibble(hex[2 * i + 1], &lo))
+            return 0;
+        out[i] = (uint8_t)((hi << 4) | lo);
+        if (out[i] != 0)
+            *is_zero = 0;
+    }
+    return 1;
+}
+
+/* Decision 151/152 admission gate (lite-node mirror of full-node
+ * `--app-sha256`): hash the jammed bundle natively, refuse before cue/poke on
+ * mismatch, lowercase-hex digest with the same `sha256 {actual} != expected
+ * {expected}` naming. An all-zero expected digest is the "no gate" sentinel. */
+int i3_host_load_app(const uint8_t *jam, uint64_t jam_len,
+                     const char *expected_sha256, i3_host_result_t *out)
+{
+    uint8_t digest[32], want[32];
+    int is_zero = 0, gated, match = 0;
+    uint32_t i;
+    noun app_noun, cause;
+
+    clear_result(out);
+    if (!jam || jam_len == 0 || jam_len > I3_CUE_MAX_INPUT_BYTES)
+        return 0;
+
+    sha256_hash(jam, jam_len, digest);
+    gated = expected_sha256 != 0
+        && parse_sha256_hex(expected_sha256, want, &is_zero)
+        && !is_zero;
+    if (gated) {
+        match = 1;
+        for (i = 0; i < 32; i++) {
+            if (digest[i] != want[i]) {
+                match = 0;
+                break;
+            }
+        }
+    }
+
+    if (gated && !match) {
+        uart_puts("I3H app-sha256 sha256 ");
+        put_hex(digest, 32);
+        uart_puts(" != expected ");
+        for (i = 0; i < I3_APP_SHA256_HEX_LEN; i++)
+            uart_putc(expected_sha256[i]);
+        uart_puts("\r\n");
+        return 0;
+    }
+    uart_puts("I3H app-sha256 sha256 ");
+    put_hex(digest, 32);
+    uart_puts(gated ? " match=yes\r\n" : " gate=no\r\n");
+
+    if (!i3_host_cue_bytes(jam, jam_len, &app_noun))
+        return 0;
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    if (!nest(tas("load-bundle"), app_noun, &cause))
+        return 0;
+    return i3_host_poke(cause, out);
 }
 
 /* KP2 crash re-entry: the de-moled fast path lets a deterministic $exit bail

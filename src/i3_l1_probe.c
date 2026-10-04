@@ -397,6 +397,52 @@ static int do_persist(const char *name)
     return ok;
 }
 
+static int read_app(const uint8_t **jam, uint64_t *jam_len, const char **hex)
+{
+    volatile const uint8_t *base =
+        (volatile const uint8_t *)(uintptr_t)I3_APP_BASE;
+    uint64_t n = 0;
+    uint32_t i;
+    for (i = 0; i < 8; i++)
+        n |= (uint64_t)base[i] << (8u * i);
+    if (n == 0 || n > I3_CUE_MAX_INPUT_BYTES)
+        return 0;
+    *jam_len = n;
+    *hex = (const char *)(uintptr_t)(I3_APP_BASE + 8u);
+    *jam = (const uint8_t *)(uintptr_t)(I3_APP_BASE + 8u + I3_APP_SHA256_HEX_LEN);
+    return 1;
+}
+
+static int do_load_app(const char *name)
+{
+    i3_host_result_t r;
+    const uint8_t *jam;
+    const char *hex;
+    uint64_t jam_len;
+    int ok;
+    if (!read_app(&jam, &jam_len, &hex)) {
+        uart_puts("I3L1 load-app name=");
+        uart_puts(name);
+        uart_puts(" missing=yes abort=none\r\n");
+        return 0;
+    }
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    ok = i3_host_load_app(jam, jam_len, hex, &r);
+    if (ok) {
+        uart_puts("I3L1 effects name=");
+        uart_puts(name);
+        uart_puts(" noun=");
+        print_noun(r.effects, 0);
+        uart_puts("\r\n");
+    }
+    print_nock_line("load-app", name, &r);
+    print_jet_hits();
+    if (ok)
+        print_persist(name, &r);
+    heap_scratch_reset();
+    return ok;
+}
+
 static int run_plan(noun plan)
 {
     while (noun_is_cell(plan)) {
@@ -427,6 +473,8 @@ static int run_plan(noun plan)
                 cell_t *p = (cell_t *)(uintptr_t)cell_ptr(payload);
                 (void)do_call(p->head, p->tail, name);
             }
+        } else if (tag_is(tag, "load-app")) {
+            (void)do_load_app(name);
         } else {
             uart_puts("I3L1 skip tag=");
             print_name(tag);
