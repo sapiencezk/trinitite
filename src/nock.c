@@ -782,7 +782,9 @@ typedef struct {
 } fast_cold_t;
 static fast_cold_t g_fast_cold[FAST_COLD_MAX];
 static int g_fast_cold_n;
-static uint64_t g_fast_cold_dropped;   /* full table, or parent unknown */
+static uint64_t g_fast_cold_dropped;   /* full table, parent unknown, scratch */
+static uint64_t g_fast_heap_gen;       /* heap_persist_generation() at fill */
+static uint64_t g_fast_invalidations;  /* tables dropped on a heap change */
 static fast_reg_t g_fast_reg[FAST_REG_MAX];
 #if defined(I3_L1_PROBE)
 static uint64_t g_fast_epoch;
@@ -810,6 +812,8 @@ void fast_reset(void)
     g_fast_len = 0;
     g_fast_cold_n = 0;
     g_fast_cold_dropped = 0;
+    g_fast_invalidations = 0;
+    g_fast_heap_gen = heap_persist_generation();
     g_fast_clues = 0;
     g_fast_first_clue = NOUN_ZERO;
     g_fast_first_ok = 0;
@@ -843,6 +847,51 @@ noun fast_chum_at(int i) { return g_fast_chums[i]; }
 
 
 int fast_cold_count(void) { return g_fast_cold_n; }
+uint64_t fast_invalidations(void) { return g_fast_invalidations; }
+
+#if defined(I3_HOST)
+static void fast_put_u64(uint64_t n)
+{
+    char b[20];
+    int k = 0;
+    do { b[k++] = (char)('0' + n % 10); n /= 10; } while (n);
+    while (k) uart_putc(b[--k]);
+}
+#define uart_put_u64 fast_put_u64
+#endif
+
+/* T1: a dropped core loses its jet silently, so say so in every build.
+ * Printed on the 1st, 2nd, 4th, 8th, ... drop. */
+static void fast_drop(const char *why)
+{
+    g_fast_cold_dropped++;
+#if defined(I3_HOST)
+    if ((g_fast_cold_dropped & (g_fast_cold_dropped - 1)) == 0) {
+        uart_puts("I3H fast_cold_dropped n=");
+        uart_put_u64(g_fast_cold_dropped);
+        uart_puts(" reason=");
+        uart_puts(why);
+        uart_puts("\r\n");
+    }
+#else
+    (void)why;
+#endif
+}
+
+/* T3: the cold/hot tables hold battery and chum pointers. Scratch cells are
+ * never stored (fast_register refuses them); persist cells are trusted only
+ * while the persist heap's generation is the one the tables were filled in. */
+static void fast_tables_check(void)
+{
+    uint64_t gen = heap_persist_generation();
+    if (gen == g_fast_heap_gen)
+        return;
+    if (g_fast_cold_n != 0 || g_fast_len != 0)
+        g_fast_invalidations++;
+    g_fast_cold_n = 0;
+    g_fast_len = 0;
+    g_fast_heap_gen = gen;
+}
 int fast_cold_entry(int i, noun *chum, int *parent, uint64_t *axis)
 {
     if (i < 0 || i >= g_fast_cold_n)
@@ -920,6 +969,11 @@ static int fast_hot_for(int e)
             cur = g_fast_cold[cur].parent;
             k++;
         }
+#if defined(I3_PLANT_LABEL_ONLY)
+        /* test plant: the pre-fix rule, label only (T2's check must fire) */
+        if (k >= 1)
+            return h;
+#endif
         if (k == HOT_PATH_MAX || p[k] != 0)
             continue;
         if (cur >= 0 && g_fast_cold[cur].parent == -1
@@ -977,7 +1031,12 @@ static void fast_register(noun core, noun clue)
     }
 
     /* cold: this core and its parent */
+    fast_tables_check();
     noun battery = slot(direct(2), core);
+    if (heap_ptr_in_scratch(battery) || heap_ptr_in_scratch(chum)) {
+        fast_drop("scratch");   /* would dangle after heap_scratch_reset */
+        return;
+    }
     noun pfol, ptail;
     int parent = -1, e = -1, i;
     uint64_t paxis = 0;
@@ -993,12 +1052,12 @@ static void fast_register(noun core, noun clue)
             noun up;
             paxis = direct_val(ptail);
             if (!fast_slot(paxis, core, &up) || !noun_is_cell(up)) {
-                g_fast_cold_dropped++;
+                fast_drop("axis");
                 return;
             }
             parent = fast_cold_find(((cell_t *)(uintptr_t)cell_ptr(up))->head);
             if (parent < 0) {                   /* parent never registered */
-                g_fast_cold_dropped++;
+                fast_drop("parent");
                 return;
             }
         } else {
@@ -1023,7 +1082,7 @@ static void fast_register(noun core, noun clue)
     }
     if (e < 0) {
         if (g_fast_cold_n >= FAST_COLD_MAX) {
-            g_fast_cold_dropped++;
+            fast_drop("full");
             return;
         }
         e = g_fast_cold_n++;
@@ -1062,6 +1121,16 @@ static void fast_register(noun core, noun clue)
     for (i = 0; i < g_fast_len; i++) {
         if (g_fast_reg[i].cold == e)
             return;
+        /* T2: a hot label binds exactly once. Two cores on one hot path
+         * means the path no longer identifies the arm: stop, don't guess. */
+        if (g_fast_reg[i].label_cord == cord) {
+#if defined(I3_HOST)
+            uart_puts("I3H fast_dup label=");
+            uart_put_u64(cord);
+            uart_puts("\r\n");
+#endif
+            nock_crash("%fast: hot label bound twice");
+        }
     }
     if (g_fast_len >= FAST_REG_MAX)
         return;
@@ -1096,6 +1165,7 @@ int fast_reg_entry(int i, uint64_t *label, noun *core)
 
 static jet_fn_t fast_match(noun core)
 {
+    fast_tables_check();
     if (!noun_is_cell(core) || g_fast_len == 0)
         return NULL;
     noun battery = slot(direct(2), core);
