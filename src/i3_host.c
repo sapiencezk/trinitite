@@ -694,6 +694,8 @@ void i3_host_boot(void)
     put_u64((uint64_t)fast_reg_count());
     uart_puts(" invalidations=");
     put_u64(fast_invalidations());
+    uart_puts(" dups=");
+    put_u64(fast_dups());
     uart_puts("\r\n");
     if (jumped != 0 || !noun_is_cell(g_kernel)) {
         uart_puts("I3H terminal=kick-fail\r\n");

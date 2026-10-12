@@ -206,6 +206,10 @@ static void print_fast(void)
     put_u64((uint64_t)fast_cold_count());
     uart_puts(" cold_dropped=");
     put_u64(fast_cold_dropped());
+    uart_puts(" invalidations=");
+    put_u64(fast_invalidations());
+    uart_puts(" dups=");
+    put_u64(fast_dups());
     uart_puts("\r\n");
     if (fast_first_clue_ok()) {
         uart_puts("I3L1 fast_clue noun=");

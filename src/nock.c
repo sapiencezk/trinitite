@@ -785,6 +785,7 @@ static int g_fast_cold_n;
 static uint64_t g_fast_cold_dropped;   /* full table, parent unknown, scratch */
 static uint64_t g_fast_heap_gen;       /* heap_persist_generation() at fill */
 static uint64_t g_fast_invalidations;  /* tables dropped on a heap change */
+static uint64_t g_fast_dups;           /* refused second bindings of a hot label */
 static fast_reg_t g_fast_reg[FAST_REG_MAX];
 #if defined(I3_L1_PROBE)
 static uint64_t g_fast_epoch;
@@ -813,6 +814,7 @@ void fast_reset(void)
     g_fast_cold_n = 0;
     g_fast_cold_dropped = 0;
     g_fast_invalidations = 0;
+    g_fast_dups = 0;
     g_fast_heap_gen = heap_persist_generation();
     g_fast_clues = 0;
     g_fast_first_clue = NOUN_ZERO;
@@ -848,6 +850,7 @@ noun fast_chum_at(int i) { return g_fast_chums[i]; }
 
 int fast_cold_count(void) { return g_fast_cold_n; }
 uint64_t fast_invalidations(void) { return g_fast_invalidations; }
+uint64_t fast_dups(void) { return g_fast_dups; }
 
 #if defined(I3_HOST)
 static void fast_put_u64(uint64_t n)
@@ -1127,15 +1130,23 @@ static void fast_register(noun core, noun clue)
     for (i = 0; i < g_fast_len; i++) {
         if (g_fast_reg[i].cold == e)
             return;
-        /* T2: a hot label binds exactly once. Two cores on one hot path
-         * means the path no longer identifies the arm: stop, don't guess. */
+        /* T2/B1: a hot label binds exactly once. A second core on the same
+         * hot path (e.g. two hoon.hoon copies after a kernel upgrade) is
+         * refused, not crashed on: the first stays bound, the second runs
+         * unjetted, and the refusal is counted (reason=dup). */
         if (g_fast_reg[i].label_cord == cord) {
+            g_fast_dups++;
 #if defined(I3_HOST)
-            uart_puts("I3H fast_dup label=");
-            uart_put_u64(cord);
-            uart_puts("\r\n");
+            if ((g_fast_dups & (g_fast_dups - 1)) == 0) {
+                uart_puts("I3H fast_dup label=");
+                uart_put_u64(cord);
+                uart_puts(" n=");
+                uart_put_u64(g_fast_dups);
+                uart_puts("\r\n");
+            }
 #endif
-            nock_crash("%fast: hot label bound twice");
+            fast_drop("dup");
+            return;
         }
     }
     if (g_fast_len >= FAST_REG_MAX)

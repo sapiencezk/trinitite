@@ -121,6 +121,7 @@ int      fast_cold_count(void);
 int      fast_cold_entry(int i, noun *chum, int *parent, uint64_t *axis);
 uint64_t fast_cold_dropped(void);
 uint64_t fast_invalidations(void);
+uint64_t fast_dups(void);
 int      fast_first_clue_ok(void);
 noun     fast_first_clue(void);
 int      fast_chum_count(void);
