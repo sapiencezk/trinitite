@@ -10,7 +10,7 @@ products must be equal.
 
   python3 tests/jetcheck/run.py            # expect: PASS
   python3 tests/jetcheck/run.py --plant-rsh  # rebuild with L3's raw-count rsh; expect: FAIL
-  python3 tests/jetcheck/run.py --plant-label-only  # pre-fix label-only rule; expect: FAIL (fast_dup)
+  python3 tests/jetcheck/run.py --plant-label-only  # pre-fix label-only rule; expect: FAIL (dup bindings refused and counted, no crash)
   python3 tests/jetcheck/run.py --expect-fail ...
 
 Fails if any vector mismatches or is inconclusive (budget), or if a hot label
@@ -131,7 +131,7 @@ def main():
     problems = []
     if not summ:
         problems.append("no jetcheck_summary (terminal=%s)" % re.findall(r"terminal=(\S+)", text))
-    dups = re.findall(r"I3H fast_dup label=(\d+)", text)
+    dups = sorted(set(re.findall(r"I3H fast_dup label=(\d+)", text)))
     if dups:
         problems.append("duplicate hot label bound: " + " ".join(
             int(d).to_bytes(8, "little").rstrip(b"\0").decode("ascii", "replace") for d in dups))
