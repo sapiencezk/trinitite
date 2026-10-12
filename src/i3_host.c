@@ -684,6 +684,17 @@ void i3_host_boot(void)
     uart_puts(KICK_FORMULA_TEXT);
     uart_puts("\r\n");
     nock_budget_finish();
+    uart_puts("I3H fast clues=");
+    put_u64(fast_clue_count());
+    uart_puts(" cold=");
+    put_u64((uint64_t)fast_cold_count());
+    uart_puts(" cold_dropped=");
+    put_u64(fast_cold_dropped());
+    uart_puts(" registered=");
+    put_u64((uint64_t)fast_reg_count());
+    uart_puts(" invalidations=");
+    put_u64(fast_invalidations());
+    uart_puts("\r\n");
     if (jumped != 0 || !noun_is_cell(g_kernel)) {
         uart_puts("I3H terminal=kick-fail\r\n");
         halt();

@@ -59,6 +59,22 @@ static uint64_t g_b3_atom_index_probe_depth_hwm;
 
 void noun_heap_init(void);   /* forward — also inits atom store */
 
+/* Bumped whenever persist-heap memory can be reused or rolled back (reset,
+ * flip, aborted tx, re-init). Anything that caches persist pointers across
+ * calls (the %fast cold table, nock.c) compares it and drops its cache. */
+static uint64_t g_heap_generation;
+uint64_t heap_persist_generation(void) { return g_heap_generation; }
+
+int heap_ptr_in_scratch(noun n)
+{
+    uint64_t a;
+    if (!noun_is_cell(n))
+        return 0;
+    a = (uint64_t)(uintptr_t)cell_ptr(n);
+    return a >= (uint64_t)HEAP_SCRATCH_BASE
+        && a < (uint64_t)HEAP_SCRATCH_BASE + (uint64_t)HEAP_SCRATCH_SIZE;
+}
+
 static uint8_t *persist_base(int sel)
 {
     return (uint8_t *)(uintptr_t)(HEAP_BASE + (uint64_t)sel * HEAP_PERSIST_HALF);
@@ -99,12 +115,14 @@ int heap_scratch_rewind(uint64_t mark)
 
 void heap_persist_reset(void)
 {
+    g_heap_generation++;
     persist_ptr = persist_base(persist_sel);
 }
 
 void heap_persist_flip(void)
 {
     /* Allocate into the other half; leave the old half readable until next flip */
+    g_heap_generation++;
     persist_sel ^= 1;
     persist_ptr  = persist_base(persist_sel);
 }
@@ -126,6 +144,7 @@ void heap_persist_abort_tx(void)
 {
     if (!persist_tx_active)
         return;
+    g_heap_generation++;
     persist_ptr = persist_tx_saved_ptr;
     persist_sel = persist_tx_saved_sel;
     persist_tx_active = 0;
@@ -1023,6 +1042,7 @@ size_t cord_to_cstr(noun n, char *buf, size_t bufsz)
 }
 
 void noun_heap_init(void) {
+    g_heap_generation++;
     persist_sel = 0;
     persist_ptr = persist_base(0);
     persist_tx_active = 0;

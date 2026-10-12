@@ -121,6 +121,8 @@ I3_HOST ?= 0
 I3_L0_PROBE ?= 0
 I3_L1_PROBE ?= 0
 I3_UNJETTED ?= 0
+I3_PLANT_RSH_RAW ?= 0
+I3_PLANT_LABEL_ONLY ?= 0
 M21_SINK_EMBED ?= 0
 M23_TEST_CONTROLS ?= 0
 M24_NATIVE ?= 0
@@ -477,6 +479,22 @@ $(error I3_UNJETTED=1 requires PLATFORM=qemu-virt; unjetted scratch is qemu-virt
 endif
 CFLAGS += -DI3_UNJETTED=1
 endif
+# Test-only plant: re-introduce L3's raw-bit-count rsh jet so the jetcheck
+# test can show it catches that class. Never set for a shipped image.
+ifeq ($(I3_PLANT_RSH_RAW),1)
+ifneq ($(I3_L1_PROBE),1)
+$(error I3_PLANT_RSH_RAW=1 requires I3_L1_PROBE=1)
+endif
+CFLAGS += -DI3_PLANT_RSH_RAW=1
+endif
+# Test-only plant: the pre-fix label-only %fast rule, so the duplicate-label
+# assertion can be shown to fire. Never set for a shipped image.
+ifeq ($(I3_PLANT_LABEL_ONLY),1)
+ifneq ($(I3_L1_PROBE),1)
+$(error I3_PLANT_LABEL_ONLY=1 requires I3_L1_PROBE=1)
+endif
+CFLAGS += -DI3_PLANT_LABEL_ONLY=1
+endif
 
 ifeq ($(M21_SINK_EMBED),1)
 CFLAGS += -DM21_SINK_EMBED=1
@@ -695,6 +713,12 @@ CONFIG_KEY := $(CONFIG_KEY)-i3l1
 endif
 ifeq ($(I3_UNJETTED),1)
 CONFIG_KEY := $(CONFIG_KEY)-i3unjet
+endif
+ifeq ($(I3_PLANT_RSH_RAW),1)
+CONFIG_KEY := $(CONFIG_KEY)-plantrsh
+endif
+ifeq ($(I3_PLANT_LABEL_ONLY),1)
+CONFIG_KEY := $(CONFIG_KEY)-plantlabel
 endif
 ifeq ($(M44_TWO_RESOURCE),1)
 CONFIG_KEY := $(CONFIG_KEY)-m44-strict

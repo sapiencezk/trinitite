@@ -90,6 +90,8 @@ void  heap_persist_begin_tx(void);
 void  heap_persist_commit_tx(void);
 void  heap_persist_abort_tx(void);
 uint64_t heap_persist_selector(void);
+uint64_t heap_persist_generation(void);   /* see noun.c */
+int   heap_ptr_in_scratch(noun n);       /* cell allocated in the scratch heap */
 /* Activation guard: I2 publish enables this around the final effect pass.
  * Any accidental heap allocation is a deterministic host-integrity failure. */
 void  heap_noalloc_begin(void);
