@@ -654,37 +654,56 @@ static noun jet_mole(noun core, const wilt_t *jets, sky_fn_t sky) {
  * SKA nock_op9_continue: Forth dictionary (find_by_cord) first, then C.
  * Prefer C jets for production KERNEL path; Forth may shadow in REPL/SKA.
  */
-typedef struct { uint64_t label_cord; jet_fn_t fn; uint64_t hits; } hot_entry_t;
+/*
+ * %fast binding is by label *and* parent path, as NockVM's hot state
+ * (nockvm jets/hot.rs URBIT_HOT_STATE, cold.rs Batteries): `path` lists the
+ * chums from the arm's core up to, not including, the root core [%k 138],
+ * which every path ends in. %wild dispatch (hot_lookup) stays label-keyed:
+ * it is already gated by sock_match.
+ */
+#define HOT_PATH_MAX 6
+#define C_ONE 6647407ULL   /* %one */
+#define C_TWO 7305076ULL   /* %two */
+#define C_TRI 6910580ULL   /* %tri */
+#define C_QUA 6387057ULL   /* %qua */
+#define HOT_K 107ULL       /* root chum [%k 138] */
+#define HOT_K_VER 138ULL
+typedef struct {
+    uint64_t label_cord;
+    jet_fn_t fn;
+    uint64_t hits;
+    uint64_t path[HOT_PATH_MAX];   /* leaf first: label, parents…; 0-terminated */
+} hot_entry_t;
 
 static hot_entry_t hot_state[] = {
     /* arithmetic (Phase 5b) */
-    { 6514020, jet_dec, 0 },   /* %dec */
-    { 6579297, jet_add, 0 },   /* %add */
-    { 6452595, jet_sub, 0 },   /* %sub */
-    { 7107949, jet_mul, 0 },   /* %mul */
-    { 6845548, jet_lth, 0 },   /* %lth */
-    { 6845543, jet_gth, 0 },   /* %gth */
-    { 6648940, jet_lte, 0 },   /* %lte */
-    { 6648935, jet_gte, 0 },   /* %gte */
-    { 7760228, jet_div, 0 },   /* %div */
-    { 6582125, jet_mod, 0 },   /* %mod */
+    { 6514020, jet_dec, 0, { 6514020, C_ONE, 0 } },   /* %dec */
+    { 6579297, jet_add, 0, { 6579297, C_ONE, 0 } },   /* %add */
+    { 6452595, jet_sub, 0, { 6452595, C_ONE, 0 } },   /* %sub */
+    { 7107949, jet_mul, 0, { 7107949, C_ONE, 0 } },   /* %mul */
+    { 6845548, jet_lth, 0, { 6845548, C_ONE, 0 } },   /* %lth */
+    { 6845543, jet_gth, 0, { 6845543, C_ONE, 0 } },   /* %gth */
+    { 6648940, jet_lte, 0, { 6648940, C_ONE, 0 } },   /* %lte */
+    { 6648935, jet_gte, 0, { 6648935, C_ONE, 0 } },   /* %gte */
+    { 7760228, jet_div, 0, { 7760228, C_ONE, 0 } },   /* %div */
+    { 6582125, jet_mod, 0, { 6582125, C_ONE, 0 } },   /* %mod */
     /* WP3 structural / list / bit */
-    { 29029,       jet_eq,   0 },  /* %eq   */
-    { 6845292,     jet_lsh,  0 },  /* %lsh  */
-    { 6845298,     jet_rsh,  0 },  /* %rsh  */
-    { 7237475,     jet_con,  0 },  /* %con  */
-    { 7563620,     jet_dis,  0 },  /* %dis  */
-    { 7891309,     jet_mix,  0 },  /* %mix  */
-    { 7364963,     jet_cap,  0 },  /* %cap  */
-    { 7561581,     jet_mas,  0 },  /* %mas  */
-    { 6776176,     jet_peg,  0 },  /* %peg  */
-    { 1953391980,  jet_lent, 0 },  /* %lent */
-    { 1886350438,  jet_flop, 0 },  /* %flop */
-    { 1684825463,  jet_weld, 0 },  /* %weld */
+    { 29029, jet_eq, 0, { 0 } },  /* %eq   */
+    { 6845292, jet_lsh, 0, { 6845292, C_TWO, C_ONE, 0 } },  /* %lsh  */
+    { 6845298, jet_rsh, 0, { 6845298, C_TWO, C_ONE, 0 } },  /* %rsh  */
+    { 7237475, jet_con, 0, { 7237475, C_TWO, C_ONE, 0 } },  /* %con  */
+    { 7563620, jet_dis, 0, { 7563620, C_TWO, C_ONE, 0 } },  /* %dis  */
+    { 7891309, jet_mix, 0, { 7891309, C_TWO, C_ONE, 0 } },  /* %mix  */
+    { 7364963, jet_cap, 0, { 7364963, C_ONE, 0 } },  /* %cap  */
+    { 7561581, jet_mas, 0, { 7561581, C_ONE, 0 } },  /* %mas  */
+    { 6776176, jet_peg, 0, { 6776176, C_ONE, 0 } },  /* %peg  */
+    { 1953391980, jet_lent, 0, { 1953391980, C_TWO, C_ONE, 0 } },  /* %lent */
+    { 1886350438, jet_flop, 0, { 1886350438, C_TWO, C_ONE, 0 } },  /* %flop */
+    { 1684825463, jet_weld, 0, { 1684825463, C_TWO, C_ONE, 0 } },  /* %weld */
     /* L1: honk %fast labels the R1 jam actually takes (deliverable 2) */
-    { 1852994932,  jet_turn, 0 },  /* %turn */
-    { 1701605229,  jet_mole, 0 },  /* %mole */
-    { 0, NULL, 0 }                 /* sentinel */
+    { 1852994932, jet_turn, 0, { 1852994932, C_TWO, C_ONE, 0 } },  /* %turn */
+    { 1701605229, jet_mole, 0, { 1701605229, C_QUA, C_TRI, C_TWO, C_ONE, 0 } },  /* %mole */
+    { 0, NULL, 0, { 0 } }          /* sentinel */
 };
 
 jet_fn_t hot_lookup(noun label) {
@@ -747,12 +766,23 @@ typedef struct {
     noun battery;
     uint64_t label_cord;
     jet_fn_t fn;
+    int cold;      /* g_fast_cold entry: parent path for the dispatch check */
 #if defined(I3_L1_PROBE)
     noun core;     /* the core that registered: jetcheck calls it */
     uint64_t epoch; /* probe poke in which it registered (core lifetime) */
 #endif
 } fast_reg_t;
 
+#define FAST_COLD_MAX 1024
+typedef struct {
+    noun battery;
+    noun chum;
+    int parent;            /* index into g_fast_cold, -1 for a root */
+    uint64_t parent_axis;  /* 0 for a root */
+} fast_cold_t;
+static fast_cold_t g_fast_cold[FAST_COLD_MAX];
+static int g_fast_cold_n;
+static uint64_t g_fast_cold_dropped;   /* full table, or parent unknown */
 static fast_reg_t g_fast_reg[FAST_REG_MAX];
 #if defined(I3_L1_PROBE)
 static uint64_t g_fast_epoch;
@@ -778,6 +808,8 @@ static int g_pull_n;
 void fast_reset(void)
 {
     g_fast_len = 0;
+    g_fast_cold_n = 0;
+    g_fast_cold_dropped = 0;
     g_fast_clues = 0;
     g_fast_first_clue = NOUN_ZERO;
     g_fast_first_ok = 0;
@@ -797,13 +829,122 @@ int fast_first_clue_ok(void) { return g_fast_first_ok; }
 noun fast_first_clue(void) { return g_fast_first_clue; }
 
 /*
- * honk %fast clue after evaluation is [chum parent-formula hooks].
- * Register the constructed core's battery against chum if chum is hot.
- * First battery per label wins, so later same-name cores (rs/rd add, …)
- * are not stolen by the integer jet.
+ * honk %fast clue after evaluation is [chum parent-formula hooks], with
+ * parent-formula [0 axis] (the parent core at that axis of this core) or
+ * [1 0] for a root. Like NockVM's cold state, every %fast core is recorded
+ * with its parent; a core whose parent was never registered gets no entry.
+ * A core binds a hot jet only when its chum *and* its whole parent path
+ * equal a hot_state path, so a same-label arm in another door (rs/rd add,
+ * ld add, ave weld, …) can never take the integer jet, whichever core is
+ * built first. Dispatch re-checks the parent batteries (NockVM warm state).
  */
 int fast_chum_count(void) { return g_fast_chum_n; }
 noun fast_chum_at(int i) { return g_fast_chums[i]; }
+
+
+int fast_cold_count(void) { return g_fast_cold_n; }
+int fast_cold_entry(int i, noun *chum, int *parent, uint64_t *axis)
+{
+    if (i < 0 || i >= g_fast_cold_n)
+        return 0;
+    *chum = g_fast_cold[i].chum;
+    *parent = g_fast_cold[i].parent;
+    *axis = g_fast_cold[i].parent_axis;
+    return 1;
+}
+uint64_t fast_cold_dropped(void) { return g_fast_cold_dropped; }
+
+/* slot without crashing: 0 if the axis leaves the tree */
+static int fast_slot(uint64_t a, noun subject, noun *out)
+{
+    int depth = 0, i;
+    uint64_t t = a;
+    if (a == 0)
+        return 0;
+    while (t > 1) { t >>= 1; depth++; }
+    for (i = depth - 1; i >= 0; i--) {
+        cell_t *c;
+        if (!noun_is_cell(subject))
+            return 0;
+        c = (cell_t *)(uintptr_t)cell_ptr(subject);
+        subject = ((a >> i) & 1) ? c->tail : c->head;
+    }
+    *out = subject;
+    return 1;
+}
+
+static int fast_battery_is(noun a, noun b)
+{
+    return a == b || noun_eq(a, b);
+}
+
+/* index of the cold entry whose battery is `battery`, or -1 */
+static int fast_cold_find(noun battery)
+{
+    int i;
+    for (i = g_fast_cold_n - 1; i >= 0; i--)   /* pointer pass first */
+        if (g_fast_cold[i].battery == battery)
+            return i;
+    for (i = g_fast_cold_n - 1; i >= 0; i--)
+        if (noun_eq(g_fast_cold[i].battery, battery))
+            return i;
+    return -1;
+}
+
+static int fast_is_root_chum(noun chum)
+{
+    cell_t *c;
+    if (!noun_is_cell(chum))
+        return 0;
+    c = (cell_t *)(uintptr_t)cell_ptr(chum);
+    return noun_is_direct(c->head) && direct_val(c->head) == HOT_K
+        && noun_is_direct(c->tail) && direct_val(c->tail) == HOT_K_VER;
+}
+
+/* hot_state index whose path is exactly cold entry e's path, or -1 */
+static int fast_hot_for(int e)
+{
+    int h;
+    for (h = 0; hot_state[h].fn != NULL; h++) {
+        const uint64_t *p = hot_state[h].path;
+        int k = 0, cur = e;
+        if (p[0] == 0)
+            continue;
+        while (k < HOT_PATH_MAX && p[k] != 0) {
+            noun ch;
+            if (cur < 0)
+                break;
+            ch = g_fast_cold[cur].chum;
+            if (!noun_is_direct(ch) || direct_val(ch) != p[k])
+                break;
+            cur = g_fast_cold[cur].parent;
+            k++;
+        }
+        if (k == HOT_PATH_MAX || p[k] != 0)
+            continue;
+        if (cur >= 0 && g_fast_cold[cur].parent == -1
+            && fast_is_root_chum(g_fast_cold[cur].chum))
+            return h;
+    }
+    return -1;
+}
+
+/* NockVM warm-state check: the core's parents, by axis, have the batteries
+ * the cold entry recorded, all the way to the root. */
+static int fast_parents_match(noun core, int e)
+{
+    while (g_fast_cold[e].parent >= 0) {
+        noun up;
+        if (!fast_slot(g_fast_cold[e].parent_axis, core, &up) || !noun_is_cell(up))
+            return 0;
+        e = g_fast_cold[e].parent;
+        if (!fast_battery_is(((cell_t *)(uintptr_t)cell_ptr(up))->head,
+                             g_fast_cold[e].battery))
+            return 0;
+        core = up;
+    }
+    return 1;
+}
 
 static void fast_register(noun core, noun clue)
 {
@@ -834,14 +975,73 @@ static void fast_register(noun core, noun clue)
             g_fast_chums[g_fast_chum_n++] = chum;
         }
     }
-    jet_fn_t fn = hot_lookup(chum);
-    if (fn == NULL)
-        return;
-    uint64_t cord = direct_val(chum);
+
+    /* cold: this core and its parent */
     noun battery = slot(direct(2), core);
+    noun pfol, ptail;
+    int parent = -1, e = -1, i;
+    uint64_t paxis = 0;
+    if (!fast_slot(6, clue, &pfol) || !noun_is_cell(pfol))
+        return;
+    {
+        cell_t *pf = (cell_t *)(uintptr_t)cell_ptr(pfol);
+        ptail = pf->tail;
+        if (noun_is_direct(pf->head) && direct_val(pf->head) == 1) {
+            parent = -1;                        /* root: [1 …] */
+        } else if (noun_is_direct(pf->head) && direct_val(pf->head) == 0
+                   && noun_is_direct(ptail) && direct_val(ptail) != 0) {
+            noun up;
+            paxis = direct_val(ptail);
+            if (!fast_slot(paxis, core, &up) || !noun_is_cell(up)) {
+                g_fast_cold_dropped++;
+                return;
+            }
+            parent = fast_cold_find(((cell_t *)(uintptr_t)cell_ptr(up))->head);
+            if (parent < 0) {                   /* parent never registered */
+                g_fast_cold_dropped++;
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+    for (i = g_fast_cold_n - 1; i >= 0; i--) {
+        if (g_fast_cold[i].battery == battery && g_fast_cold[i].parent == parent
+            && g_fast_cold[i].parent_axis == paxis) {
+            e = i;
+            break;
+        }
+    }
+    if (e < 0) {
+        for (i = g_fast_cold_n - 1; i >= 0; i--) {
+            if (g_fast_cold[i].parent == parent && g_fast_cold[i].parent_axis == paxis
+                && noun_eq(g_fast_cold[i].battery, battery)) {
+                e = i;
+                break;
+            }
+        }
+    }
+    if (e < 0) {
+        if (g_fast_cold_n >= FAST_COLD_MAX) {
+            g_fast_cold_dropped++;
+            return;
+        }
+        e = g_fast_cold_n++;
+        g_fast_cold[e].battery = battery;
+        g_fast_cold[e].chum = chum;
+        g_fast_cold[e].parent = parent;
+        g_fast_cold[e].parent_axis = paxis;
+    }
+
+    /* hot: label and full parent path */
+    int h = fast_hot_for(e);
+    if (h < 0)
+        return;
+    uint64_t cord = hot_state[h].label_cord;
+    jet_fn_t fn = hot_state[h].fn;
 #if defined(I3_L1_PROBE)
     {
-        int have = 0, i;
+        int have = 0;
         for (i = 0; i < g_fast_core_n; i++) {
             if (g_fast_cores[i].label_cord == cord) {
                 have = 1;
@@ -856,15 +1056,11 @@ static void fast_register(noun core, noun clue)
     }
 #endif
 #if defined(I3_UNJETTED)
-    (void)battery;
+    (void)fn;
     return;
 #else
-    int i;
     for (i = 0; i < g_fast_len; i++) {
-        if (g_fast_reg[i].label_cord == cord)
-            return;
-        if (g_fast_reg[i].battery == battery
-            || noun_eq(g_fast_reg[i].battery, battery))
+        if (g_fast_reg[i].cold == e)
             return;
     }
     if (g_fast_len >= FAST_REG_MAX)
@@ -872,6 +1068,7 @@ static void fast_register(noun core, noun clue)
     g_fast_reg[g_fast_len].battery = battery;
     g_fast_reg[g_fast_len].label_cord = cord;
     g_fast_reg[g_fast_len].fn = fn;
+    g_fast_reg[g_fast_len].cold = e;
 #if defined(I3_L1_PROBE)
     g_fast_reg[g_fast_len].core = core;
     g_fast_reg[g_fast_len].epoch = g_fast_epoch;
@@ -908,8 +1105,9 @@ static jet_fn_t fast_match(noun core)
         if (i == g_fast_suppress)
             continue;
 #endif
-        if (g_fast_reg[i].battery == battery
-            || noun_eq(g_fast_reg[i].battery, battery))
+        if ((g_fast_reg[i].battery == battery
+             || noun_eq(g_fast_reg[i].battery, battery))
+            && fast_parents_match(core, g_fast_reg[i].cold))
             return g_fast_reg[i].fn;
     }
     return NULL;

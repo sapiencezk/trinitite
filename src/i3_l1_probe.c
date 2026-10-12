@@ -202,10 +202,29 @@ static void print_fast(void)
     put_u64(fast_clue_count());
     uart_puts(" registered=");
     put_u64((uint64_t)fast_reg_count());
+    uart_puts(" cold=");
+    put_u64((uint64_t)fast_cold_count());
+    uart_puts(" cold_dropped=");
+    put_u64(fast_cold_dropped());
     uart_puts("\r\n");
     if (fast_first_clue_ok()) {
         uart_puts("I3L1 fast_clue noun=");
         print_noun(fast_first_clue(), 0);
+        uart_puts("\r\n");
+    }
+    n = fast_cold_count();
+    for (i = 0; i < n; i++) {
+        noun ch; int par; uint64_t ax;
+        if (!fast_cold_entry(i, &ch, &par, &ax))
+            continue;
+        uart_puts("I3L1 fast_cold i=");
+        put_u64((uint64_t)i);
+        uart_puts(" parent=");
+        if (par < 0) uart_puts("root"); else put_u64((uint64_t)par);
+        uart_puts(" axis=");
+        put_u64(ax);
+        uart_puts(" chum=");
+        print_noun(ch, 0);
         uart_puts("\r\n");
     }
     n = fast_chum_count();
