@@ -275,11 +275,14 @@ static void print_persist(const char *name, const i3_host_result_t *r)
     uart_puts("\r\n");
 }
 
-static int do_poke(noun cause, const char *name)
+static void do_jetcheck(noun payload, const char *name);
+
+static int do_poke_with(noun cause, const char *name, noun jetcheck, int check)
 {
     i3_host_result_t r;
     int ok;
     heap_set_mode(HEAP_MODE_SCRATCH);
+    fast_epoch_bump();
     ok = i3_host_poke(cause, &r);
     if (ok) {
         uart_puts("I3L1 effects name=");
@@ -292,8 +295,15 @@ static int do_poke(noun cause, const char *name)
     print_jet_hits();
     if (ok)
         print_persist(name, &r);
+    if (check)
+        do_jetcheck(jetcheck, name);   /* before the scratch reset: cores live */
     heap_scratch_reset();
     return ok;
+}
+
+static int do_poke(noun cause, const char *name)
+{
+    return do_poke_with(cause, name, NOUN_ZERO, 0);
 }
 
 static void fill_call_result(i3_host_result_t *r, int jumped, uint64_t ticks)
@@ -369,6 +379,148 @@ static int do_call(noun label, noun sample, const char *name)
     heap_scratch_reset();
     nock_budget_finish();
     return 1;
+}
+
+/*
+ * jetcheck: every registered %fast jet against the Hoon it replaces.
+ * payload = list of [label (list sample)]. For each registered entry whose
+ * label has vectors, slam the registered core on each sample twice: once
+ * with dispatch as normal (the jet) and once with that entry suppressed
+ * (its own Nock battery; other jets stay on). Products must be equal; both
+ * crashing counts as equal; a budget abort on either side is inconclusive.
+ */
+#define JC_OK 0
+#define JC_CRASH 1
+#define JC_BUDGET 2
+
+static int jc_slam(noun core, noun sample, noun *out)
+{
+    noun edited, fol, product;
+    jmp_buf saved;
+    int jumped;
+    if (!edit_sample(core, sample, &edited)
+        || !nest(direct(0), direct(1), &fol)
+        || !nest(direct(2), fol, &fol)
+        || !nest(direct(9), fol, &fol))
+        return JC_CRASH;
+    nock_budget_set_limits(I3_SLAM_MAX_OPS, I3_SLAM_MAX_CELLS);
+    nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
+    __builtin_memcpy(saved, nock_abort, sizeof saved);
+    jumped = setjmp(nock_abort);
+    if (jumped != 0) {
+        int budget = nock_budget_abort_reason() != 0;
+        __builtin_memcpy(nock_abort, saved, sizeof saved);
+        nock_budget_finish();
+        return budget ? JC_BUDGET : JC_CRASH;
+    }
+    product = nock(edited, fol);
+    __builtin_memcpy(nock_abort, saved, sizeof saved);
+    nock_budget_finish();
+    *out = product;
+    return JC_OK;
+}
+
+static void jc_print(int st, noun n)
+{
+    if (st == JC_OK)
+        print_noun(n, 0);
+    else
+        uart_puts(st == JC_CRASH ? "crash" : "budget");
+}
+
+static noun jc_vectors(noun payload, uint64_t cord)
+{
+    while (noun_is_cell(payload)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(payload);
+        payload = c->tail;
+        if (!noun_is_cell(c->head))
+            continue;
+        cell_t *e = (cell_t *)(uintptr_t)cell_ptr(c->head);
+        if (noun_is_direct(e->head) && direct_val(e->head) == cord)
+            return e->tail;
+    }
+    return NOUN_ZERO;
+}
+
+static void do_jetcheck(noun payload, const char *name)
+{
+    int i, n = fast_reg_count();
+    uint64_t checked = 0, match = 0, mismatch = 0, inconclusive = 0, bare = 0;
+    for (i = 0; i < n; i++) {
+        uint64_t cord;
+        noun core, vec;
+        if (!fast_reg_entry(i, &cord, &core)) {
+            uart_puts("I3L1 jetcheck_stale entry=");
+            put_u64((uint64_t)i);
+            uart_puts("\r\n");
+            continue;
+        }
+        vec = jc_vectors(payload, cord);
+        if (!noun_is_cell(vec)) {
+            bare++;
+            uart_puts("I3L1 jetcheck_unvectored label=");
+            print_name(direct(cord));
+            uart_puts("\r\n");
+            continue;
+        }
+        while (noun_is_cell(vec)) {
+            cell_t *v = (cell_t *)(uintptr_t)cell_ptr(vec);
+            noun jet_p = NOUN_ZERO, hoon_p = NOUN_ZERO;
+            int sj, sh;
+            const char *verdict;
+            vec = v->tail;
+            uint64_t mark;
+            heap_set_mode(HEAP_MODE_SCRATCH);
+            mark = heap_scratch_mark();
+            fast_suppress(-1);
+            sj = jc_slam(core, v->head, &jet_p);
+            fast_suppress(i);
+            sh = jc_slam(core, v->head, &hoon_p);
+            fast_suppress(-1);
+            checked++;
+            if (sj == JC_BUDGET || sh == JC_BUDGET) {
+                inconclusive++;
+                verdict = "inconclusive";
+            } else if (sj == sh && (sj == JC_CRASH || noun_eq(jet_p, hoon_p))) {
+                match++;
+                verdict = "match";
+            } else {
+                mismatch++;
+                verdict = "mismatch";
+            }
+            uart_puts("I3L1 jetcheck name=");
+            uart_puts(name);
+            uart_puts(" label=");
+            print_name(direct(cord));
+            uart_puts(" entry=");
+            put_u64((uint64_t)i);
+            uart_puts(" verdict=");
+            uart_puts(verdict);
+            uart_puts(" sample=");
+            print_noun(v->head, 0);
+            uart_puts(" jet=");
+            jc_print(sj, jet_p);
+            uart_puts(" hoon=");
+            jc_print(sh, hoon_p);
+            uart_puts("\r\n");
+            (void)heap_scratch_rewind(mark);
+        }
+    }
+    uart_puts("I3L1 jetcheck_summary name=");
+    uart_puts(name);
+    uart_puts(" entries=");
+    put_u64((uint64_t)n);
+    uart_puts(" checked=");
+    put_u64(checked);
+    uart_puts(" match=");
+    put_u64(match);
+    uart_puts(" mismatch=");
+    put_u64(mismatch);
+    uart_puts(" inconclusive=");
+    put_u64(inconclusive);
+    uart_puts(" unvectored=");
+    put_u64(bare);
+    uart_puts("\r\n");
 }
 
 static int do_peek(noun path, const char *name)
@@ -472,6 +624,11 @@ static int run_plan(noun plan)
             if (noun_is_cell(payload)) {
                 cell_t *p = (cell_t *)(uintptr_t)cell_ptr(payload);
                 (void)do_call(p->head, p->tail, name);
+            }
+        } else if (tag_is(tag, "poke-jetcheck")) {
+            if (noun_is_cell(payload)) {
+                cell_t *p = (cell_t *)(uintptr_t)cell_ptr(payload);
+                (void)do_poke_with(p->head, name, p->tail, 1);
             }
         } else if (tag_is(tag, "load-app")) {
             (void)do_load_app(name);

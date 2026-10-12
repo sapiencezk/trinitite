@@ -126,6 +126,9 @@ noun     fast_core_lookup(noun label);
 int      fast_core_count(void);
 uint64_t fast_core_label(int i);
 int      fast_pull_hot(void);
+void     fast_suppress(int i);
+void     fast_epoch_bump(void);
+int      fast_reg_entry(int i, uint64_t *label, noun *core);
 #endif
 
 /*

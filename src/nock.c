@@ -447,7 +447,13 @@ static noun jet_rsh(noun core, const wilt_t *jets, sky_fn_t sky) {
     noun bite = slot(direct(12), core);
     noun a = slot(direct(13), core);
     if (!noun_is_atom(a)) nock_crash("jet rsh: non-atom");
+#if defined(I3_PLANT_RSH_RAW)
+    /* test plant (L3's defect): the bite's bloq taken as a raw bit count */
+    return bn_rsh(a, jet_atom_u64(noun_is_cell(bite) ? slot(direct(2), bite) : bite,
+                                  "jet rsh: bad bite"));
+#else
     return bn_rsh(a, bite_bits(bite, "jet rsh: bad bite"));
+#endif
 }
 
 /* %con — bitwise OR (Hoon con) */
@@ -741,9 +747,16 @@ typedef struct {
     noun battery;
     uint64_t label_cord;
     jet_fn_t fn;
+#if defined(I3_L1_PROBE)
+    noun core;     /* the core that registered: jetcheck calls it */
+    uint64_t epoch; /* probe poke in which it registered (core lifetime) */
+#endif
 } fast_reg_t;
 
 static fast_reg_t g_fast_reg[FAST_REG_MAX];
+#if defined(I3_L1_PROBE)
+static uint64_t g_fast_epoch;
+#endif
 static int g_fast_len;
 static uint64_t g_fast_clues;
 static noun g_fast_first_clue;
@@ -859,9 +872,30 @@ static void fast_register(noun core, noun clue)
     g_fast_reg[g_fast_len].battery = battery;
     g_fast_reg[g_fast_len].label_cord = cord;
     g_fast_reg[g_fast_len].fn = fn;
+#if defined(I3_L1_PROBE)
+    g_fast_reg[g_fast_len].core = core;
+    g_fast_reg[g_fast_len].epoch = g_fast_epoch;
+#endif
     g_fast_len++;
 #endif
 }
+
+#if defined(I3_L1_PROBE)
+/* jetcheck: while set, this one registered entry dispatches as plain Nock */
+static int g_fast_suppress = -1;
+void fast_suppress(int i) { g_fast_suppress = i; }
+void fast_epoch_bump(void) { g_fast_epoch++; }
+/* Only entries registered in the current probe poke still own a live core
+ * (an earlier poke's scratch heap has been reset). */
+int fast_reg_entry(int i, uint64_t *label, noun *core)
+{
+    if (i < 0 || i >= g_fast_len || g_fast_reg[i].epoch != g_fast_epoch)
+        return 0;
+    *label = g_fast_reg[i].label_cord;
+    *core = g_fast_reg[i].core;
+    return 1;
+}
+#endif
 
 static jet_fn_t fast_match(noun core)
 {
@@ -870,6 +904,10 @@ static jet_fn_t fast_match(noun core)
     noun battery = slot(direct(2), core);
     int i;
     for (i = 0; i < g_fast_len; i++) {
+#if defined(I3_L1_PROBE)
+        if (i == g_fast_suppress)
+            continue;
+#endif
         if (g_fast_reg[i].battery == battery
             || noun_eq(g_fast_reg[i].battery, battery))
             return g_fast_reg[i].fn;
