@@ -10,6 +10,7 @@ products must be equal.
 
   python3 tests/jetcheck/run.py            # expect: PASS
   python3 tests/jetcheck/run.py --plant-rsh  # rebuild with L3's raw-count rsh; expect: FAIL
+  python3 tests/jetcheck/run.py --plant-label-only  # pre-fix label-only rule; expect: FAIL (fast_dup)
   python3 tests/jetcheck/run.py --expect-fail ...
 
 Fails if any vector mismatches or is inconclusive (budget), or if a hot label
@@ -65,10 +66,12 @@ UNVECTORED_OK = {"turn", "mole"}
 REQUIRED = set(VECTORS)
 
 
-def build(plant):
+def build(plant, label_only=False):
     args = ["make", "-C", str(ROOT), "PLATFORM=qemu-virt", "I3_HOST=1", "I3_L1_PROBE=1"]
     if plant:
         args.append("I3_PLANT_RSH_RAW=1")
+    if label_only:
+        args.append("I3_PLANT_LABEL_ONLY=1")
     pill = ROOT / "pill.bin"
     prev = pill.read_bytes() if pill.exists() else None
     pill.write_bytes(bytes(16))
@@ -82,11 +85,12 @@ def build(plant):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plant-rsh", action="store_true")
+    ap.add_argument("--plant-label-only", action="store_true")
     ap.add_argument("--expect-fail", action="store_true")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--log", type=Path)
     a = ap.parse_args()
-    image = ROOT / "kernel8.img" if a.no_build else build(a.plant_rsh)
+    image = ROOT / "kernel8.img" if a.no_build else build(a.plant_rsh, a.plant_label_only)
     kjam = gzip.decompress((ROOT / "tests/jetcheck/jetcheck.jam.gz").read_bytes())
     vec = lst(*[(cord(k), lst(*v)) for k, v in VECTORS.items()])
     cause = (cord("go"), 0)
@@ -127,6 +131,10 @@ def main():
     problems = []
     if not summ:
         problems.append("no jetcheck_summary (terminal=%s)" % re.findall(r"terminal=(\S+)", text))
+    dups = re.findall(r"I3H fast_dup label=(\d+)", text)
+    if dups:
+        problems.append("duplicate hot label bound: " + " ".join(
+            int(d).to_bytes(8, "little").rstrip(b"\0").decode("ascii", "replace") for d in dups))
     else:
         f = dict(re.findall(r"(\w+)=(\d+)", summ[0]))
         if int(f["mismatch"]):
