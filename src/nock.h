@@ -133,6 +133,9 @@ void     fast_reset(void);
 void     nock_host_roots(void (*f)(noun, int)); /* row 221, I3_COMPACT only */
 uint64_t fast_clue_count(void);
 int      fast_reg_count(void);
+int      fast_cold_count(void);
+int      fast_cold_entry(int i, noun *chum, int *parent, uint64_t *axis);
+uint64_t fast_cold_dropped(void);
 int      fast_first_clue_ok(void);
 noun     fast_first_clue(void);
 int      fast_chum_count(void);
