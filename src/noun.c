@@ -924,7 +924,6 @@ void noun_tx_abort(void)
             atom_index_occupancy--;
     }
     atom_data_ptr = atom_tx_data_mark;
-    g_heap_generation++;   /* atom store and maybe persist cells roll back */
     if (noun_tx_mode == HEAP_MODE_SCRATCH)
         scratch_ptr = noun_tx_cell_mark;
     else

@@ -879,8 +879,10 @@ static void fast_drop(const char *why)
 }
 
 /* T3: the cold/hot tables hold battery and chum pointers. Scratch cells are
- * never stored (fast_register refuses them); persist cells are trusted only
- * while the persist heap's generation is the one the tables were filled in. */
+ * never stored, nor cells made inside a noun_tx (fast_register refuses
+ * both); persist cells are trusted only while the persist heap's generation
+ * (noun.c: reset, flip, persist-tx abort, init) is the one the tables were
+ * filled in. */
 static void fast_tables_check(void)
 {
     uint64_t gen = heap_persist_generation();
@@ -1035,6 +1037,10 @@ static void fast_register(noun core, noun clue)
     noun battery = slot(direct(2), core);
     if (heap_ptr_in_scratch(battery) || heap_ptr_in_scratch(chum)) {
         fast_drop("scratch");   /* would dangle after heap_scratch_reset */
+        return;
+    }
+    if (noun_tx_active()) {
+        fast_drop("tx");        /* noun_tx_abort could roll these cells back */
         return;
     }
     noun pfol, ptail;
