@@ -198,6 +198,8 @@ Multi-arm `%tset` → host enqueues `[%ei id %TICK 0]` while idle (**no second U
 
 Hard clear of tarms: after a structural crash, re-arm periods from Nock state on the next cold event rather than firing TICKs into a half-broken gate.
 
+I3 `%crud` carries the bail's goof `[mote tang]` as the full node does; a trap `%mean` frame renders as `"####"` on the lite node (the full node's own fallback for an unrenderable trap; Trinitite has no printing jets).
+
 ### 5.1 Noun heap / atom store ceilings
 
 | Region | Range | On exhaust |
