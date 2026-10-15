@@ -8,6 +8,7 @@
 #include "i3_host.h"
 #if defined(I3_L1_PROBE)
 #include "i3_l1_probe.h"
+#include "jam.h"
 #endif
 #include "nock.h"
 #include "setjmp.h"
@@ -202,6 +203,7 @@ static int host_nock(noun subject, noun formula, noun *product)
 {
     jmp_buf saved;
     __builtin_memcpy(saved, nock_abort, sizeof saved);
+    nock_trace_set(NOUN_ZERO);
     int jumped = setjmp(nock_abort);
     if (jumped != 0) {
         __builtin_memcpy(nock_abort, saved, sizeof saved);
@@ -432,25 +434,53 @@ int i3_host_load_app(const uint8_t *jam, uint64_t jam_len,
     return i3_host_poke(cause, out);
 }
 
-/* KP2 crash re-entry: the de-moled fast path lets a deterministic $exit bail
- * escape to the host as NOCK_ABORT_CRASH. Reproduce the NockApp/web-node
- * `poke_swap` re-poke: run the same event again through the wire ~[/arvo]
- * with a [%exit ~] goof, so the outer keep core's %crud branch (wrapper.hoon)
- * re-runs it in isolation and re-emits the planted [%block-crash …] effects
- * byte-identically.
+/* KP2 crash re-entry: the de-moled fast path lets a bail escape to the
+ * host as NOCK_ABORT_CRASH. Reproduce the NockApp serf's `poke_swap` re-poke
+ * (form.rs): run the same event again through the wire ~[/arvo] carrying the
+ * bail's goof, so the outer keep core's %crud branch (wrapper.hoon) handles it.
  *
  *   wire      = [0 %arvo 0]                 (path ~[/arvo])
- *   goof      = [%exit ~]
+ *   goof      = [mote tang]                 (form.rs goof: mote, +mook trace)
  *   job_input = [eny our now cause] = [0 0 0 cause]   (as ovum_job builds)
  *   ovo       = [event_num [wire [goof job_input]]]
  *
- * The trinitite nock reports every consistence bail as a bare `nock_crash`
- * C string — it has no [mote tang] bail noun — and the only bail the lite
- * node exercises is the planted `~|(%planted-crash !!)`, i.e. %exit. A
- * budget failure is NOCK_ABORT_BUDGET and never reaches this path. The
- * goof's tang is consumed only by the wrapper's slog-on-refusal branch and
- * does not affect the %exit re-run's bytes, so tang = ~ here. */
-static int crud_repoke(noun cause, i3_host_result_t *out)
+ * The mote is %exit, or %meme when the heap ran out; the tang is the
+ * crash-time trace of %hand/%hunk/%lose/%mean/%spot hints rendered by
+ * nock_mook. A budget failure is NOCK_ABORT_BUDGET and never reaches here. */
+static int mook_goof(uint64_t mote, noun trace, noun *goof)
+{
+    jmp_buf saved;
+    volatile noun tang = NOUN_ZERO;
+    __builtin_memcpy(saved, nock_abort, sizeof saved);
+    if (setjmp(nock_abort) == 0)
+        tang = nock_mook(trace);
+    __builtin_memcpy(nock_abort, saved, sizeof saved);
+    return nest(direct(mote), tang, goof);
+}
+
+/* Evidence line: the goof as a hex jam, so a host can compare it with the
+ * full node's logged %crud ovum. Long goofs report only their size. */
+static void put_goof(noun goof)
+{
+    const uint8_t *bytes;
+    uint64_t n;
+    if (jam_encode_bytes_checked(goof, &bytes, &n) != 0) {
+        uart_puts("I3H crud goof=unjammable\r\n");
+        return;
+    }
+    if (n > 4096) {
+        uart_puts("I3H crud goof-bytes=");
+        put_u64(n);
+        uart_puts("\r\n");
+        return;
+    }
+    uart_puts("I3H crud goof=");
+    put_hex(bytes, (uint32_t)n);
+    uart_puts("\r\n");
+}
+
+static int crud_repoke(noun cause, uint64_t mote, noun trace,
+                       i3_host_result_t *out)
 {
     noun input_xs[4] = {direct(0), direct(0), direct(0), cause};
     noun job_input, goof, wire, arvo_rest, crud, ovum, ovo, subject, product;
@@ -459,8 +489,10 @@ static int crud_repoke(noun cause, i3_host_result_t *out)
 
     if (!tuple(input_xs, 4, &job_input))
         return 0;
-    if (!nest(tas("exit"), NOUN_ZERO, &goof))
+    nock_budget_finish();
+    if (!mook_goof(mote, trace, &goof))
         return 0;
+    put_goof(goof);
     if (!nest(tas("arvo"), NOUN_ZERO, &arvo_rest))
         return 0;
     if (!nest(direct(0), arvo_rest, &wire))
@@ -519,11 +551,11 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
     t1 = cntvct();
     fill_eval(out, jumped, t1 - t0);
     if (jumped != 0) {
-        /* A deterministic $exit bail propagates here from the de-moled fast
+        /* A bail propagates here from the de-moled fast
          * path (NOCK_ABORT_CRASH). Re-poke through ~[/arvo]; a budget abort
          * (NOCK_ABORT_BUDGET) is not a bail and gets no %crud re-entry. */
         if (jumped == NOCK_ABORT_CRASH)
-            return crud_repoke(cause, out);
+            return crud_repoke(cause, nock_crash_mote(), nock_trace_get(), out);
         nock_budget_finish();
         return 0;
     }

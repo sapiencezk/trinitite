@@ -15,7 +15,26 @@ jmp_buf nock_abort;   /* established in QUIT's restart path */
 
 /* ── Crash ───────────────────────────────────────────────────────────────── */
 
+#define MOTE_EXIT 0x74697865ULL   /* %exit */
+#define MOTE_MEME 0x656D656DULL   /* %meme */
+
+static uint64_t g_crash_mote = MOTE_EXIT;
+static noun g_mean = 0;           /* trace: list of [tag clue], innermost first */
+
+uint64_t nock_crash_mote(void) { return g_crash_mote; }
+noun nock_trace_get(void) { return g_mean; }
+void nock_trace_set(noun trace) { g_mean = trace; }
+
+void nock_crash_meme(const char *msg) {
+    g_crash_mote = MOTE_MEME;
+    uart_puts("\r\nnock crash: ");
+    uart_puts(msg);
+    uart_puts("\r\n");
+    longjmp(nock_abort, NOCK_ABORT_CRASH);
+}
+
 void nock_crash(const char *msg) {
+    g_crash_mote = MOTE_EXIT;
     uart_puts("\r\nnock crash: ");
     uart_puts(msg);
     uart_puts("\r\n");
@@ -242,6 +261,10 @@ static void noun_print(noun n, int depth) {
 #define HINT_MEMO  0x6F6D656DULL   /* %memo */
 #define HINT_BOUT  0x74756F62ULL   /* %bout */
 #define HINT_TAME  0x656D6174ULL   /* %tame = 't'+'a'<<8+'m'<<16+'e'<<24 */
+#define HINT_HAND  0x646E6168ULL   /* %hand */
+#define HINT_HUNK  0x6B6E7568ULL   /* %hunk */
+#define HINT_LOSE  0x65736F6CULL   /* %lose */
+#define HINT_SPOT  0x746F7073ULL   /* %spot */
 
 static noun nock_eval(noun subject, noun formula, const wilt_t *jets, sky_fn_t sky);
 static noun hax(uint64_t a, noun new_val, noun target);
@@ -616,11 +639,13 @@ static noun jet_mole(noun core, const wilt_t *jets, sky_fn_t sky) {
                     nock_alloc_cell(direct(2),
                     nock_alloc_cell(direct(0), direct(1))));
     uint64_t saved_stack = g_eval_stack_current;
+    noun saved_mean = g_mean;
     jmp_buf saved;
     __builtin_memcpy(saved, nock_abort, sizeof saved);
     int jumped = setjmp(nock_abort);
     if (jumped != 0) {
         g_eval_stack_current = saved_stack;
+        g_mean = saved_mean;
         __builtin_memcpy(nock_abort, saved, sizeof saved);
         /* Only a crash is the trap's result (~). A budget or wall abort
          * belongs to the whole call: re-raise it, as the unjetted +mole
@@ -955,8 +980,10 @@ static void pull_arm(noun core, uint64_t axis, int depth)
         || !alloc_cell_checked(direct(9), fol, &fol))
         return;
     __builtin_memcpy(saved, nock_abort, sizeof saved);
+    noun saved_mean = g_mean;
     jumped = setjmp(nock_abort);
     if (jumped != 0) {
+        g_mean = saved_mean;
         __builtin_memcpy(nock_abort, saved, sizeof saved);
         return;
     }
@@ -1327,7 +1354,7 @@ loop:
      *   %fast  — post-hint: eval d (the core), register battery→hot label
      *   %slog  — print clue noun to UART (bare-metal printf)
      *   %xray  — print clue noun tree to UART (noun inspector)
-     *   %mean  — stub (stack trace, Phase 8)
+     *   %hand %hunk %lose %mean %spot — push [tag clue] on the trace for *[a d]
      *   %memo  — stub (memoization, Phase 5)
      *   %bout  — stub (timing, future)
      *   other  — silent no-op
@@ -1401,7 +1428,19 @@ loop:
             uart_puts("\r\n");
             break;
 
+        case HINT_HAND:
+        case HINT_HUNK:
+        case HINT_LOSE:
         case HINT_MEAN:
+        case HINT_SPOT: {
+            /* nockvm mean_push / mean_pop around the body. */
+            noun outer = g_mean;
+            g_mean = alloc_cell(alloc_cell(b, clue), outer);
+            noun r = nock_eval(subject, d, jets, sky);
+            g_mean = outer;
+            return r;
+        }
+
         case HINT_MEMO:
         case HINT_BOUT:
         default:
@@ -1480,4 +1519,179 @@ noun nock_op9_continue(noun core, noun ax,
     /* no jet — evaluate arm as Nock formula */
     noun arm = slot(ax, core);
     return nock_eval(core, arm, jets, sky);
+}
+
+/* ── +mook: trace → tang (nockvm jets/nock.rs mook, flop = false) ────────── */
+
+#define TAS_LEAF 0x6661656CULL   /* %leaf */
+#define TAS_ROSE 0x65736F72ULL   /* %rose */
+
+static noun mook_tape_c(const char *str)
+{
+    size_t n = 0;
+    while (str[n]) n++;
+    noun t = NOUN_ZERO;
+    while (n > 0) t = alloc_cell(direct((uint8_t)str[--n]), t);
+    return t;
+}
+
+/* rip 3: an atom's bytes, LSB first, as a tape. */
+static noun mook_trip(noun a)
+{
+    const uint64_t *limbs;
+    uint64_t one, size;
+    if (!noun_is_atom(a)) nock_crash("mook: trip: not an atom");
+    if (noun_is_direct(a)) { one = direct_val(a); limbs = &one; size = 1; }
+    else {
+        atom_t *at = atom_store_get(indirect_hash(a));
+        if (at == NULL) nock_crash("mook: trip: missing atom");
+        limbs = at->limbs; size = at->size;
+    }
+    uint64_t nbytes = size * 8;
+    while (nbytes > 0 && ((limbs[(nbytes - 1) / 8] >> (((nbytes - 1) % 8) * 8)) & 0xFF) == 0)
+        nbytes--;
+    noun t = NOUN_ZERO;
+    while (nbytes > 0) {
+        nbytes--;
+        t = alloc_cell(direct((limbs[nbytes / 8] >> ((nbytes % 8) * 8)) & 0xFF), t);
+    }
+    return t;
+}
+
+static noun mook_leaf(noun tape) { return alloc_cell(direct(TAS_LEAF), tape); }
+
+static noun mook_head(noun n)
+{
+    if (!noun_is_cell(n)) nock_crash("mook: expected cell");
+    return ((cell_t *)(uintptr_t)cell_ptr(n))->head;
+}
+
+static noun mook_tail(noun n)
+{
+    if (!noun_is_cell(n)) nock_crash("mook: expected cell");
+    return ((cell_t *)(uintptr_t)cell_ptr(n))->tail;
+}
+
+/* smyt: [%rose [/ / ~] (turn path |=(a=@ta leaf+(trip a)))] */
+static noun mook_smyt_help(noun path)
+{
+    if (path == NOUN_ZERO) return NOUN_ZERO;
+    noun tail = mook_smyt_help(mook_tail(path));
+    return alloc_cell(mook_leaf(mook_trip(mook_head(path))), tail);
+}
+
+static noun mook_smyt(noun path)
+{
+    noun sep = alloc_cell(direct('/'), NOUN_ZERO);
+    noun trel = alloc_cell(sep, alloc_cell(sep, NOUN_ZERO));
+    return alloc_cell(direct(TAS_ROSE), alloc_cell(trel, mook_smyt_help(path)));
+}
+
+/* scow %ud, prepended to tail: 1234 → "1.234". */
+static noun mook_ud(noun a, noun tail)
+{
+    if (!noun_is_direct(a)) nock_crash("mook: %ud: atom too large");
+    uint64_t v = direct_val(a);
+    int digits = 0;
+    do {
+        if (digits > 0 && digits % 3 == 0) tail = alloc_cell(direct('.'), tail);
+        tail = alloc_cell(direct('0' + v % 10), tail);
+        v /= 10;
+        digits++;
+    } while (v != 0);
+    return tail;
+}
+
+/* %spot [path [[l c] [l c]]] → [%rose [":" ~ ~] smyt leaf+"<[l c].[l c]>" ~] */
+static noun mook_spot(noun dat)
+{
+    noun pint = mook_tail(dat);
+    noun pstr = mook_head(pint), pend = mook_tail(pint);
+    noun t = mook_tape_c("]>");
+    t = mook_ud(mook_tail(pend), t);
+    t = alloc_cell(direct(' '), t);
+    t = mook_ud(mook_head(pend), t);
+    t = alloc_cell(direct(']'), alloc_cell(direct('.'), alloc_cell(direct('['), t)));
+    t = mook_ud(mook_tail(pstr), t);
+    t = alloc_cell(direct(' '), t);
+    t = mook_ud(mook_head(pstr), t);
+    t = alloc_cell(direct('<'), alloc_cell(direct('['), t));
+    noun colo = alloc_cell(direct(':'), NOUN_ZERO);
+    noun trel = alloc_cell(colo, alloc_cell(NOUN_ZERO, NOUN_ZERO));
+    noun smyt = mook_smyt(mook_head(dat));
+    return alloc_cell(direct(TAS_ROSE), alloc_cell(trel,
+           alloc_cell(smyt, alloc_cell(mook_leaf(t), NOUN_ZERO))));
+}
+
+/* %mean trap: +mink [dat -.dat]; a trap that crashes renders leaf+"####".
+ * The lite node has no printing jets, so a trap is also given up, as a crash,
+ * past MOOK_TRAP_OPS or when it fills the scratch heap; its scratch is
+ * rewound so the %crud re-poke still has room. */
+#define MOOK_TRAP_OPS 2000000u
+
+static noun mook_mean_trap(noun dat)
+{
+    jmp_buf saved;
+    volatile noun saved_mean = g_mean;
+    volatile uint64_t saved_stack = g_eval_stack_current;
+    volatile uint64_t saved_mote = g_crash_mote;
+    volatile int scratch = heap_get_mode() == HEAP_MODE_SCRATCH;
+    volatile uint64_t mark = scratch ? heap_scratch_mark() : 0;
+    noun tank;
+    __builtin_memcpy(saved, nock_abort, sizeof saved);
+    if (setjmp(nock_abort) != 0) {
+        nock_budget_finish();
+        g_mean = saved_mean;
+        g_eval_stack_current = saved_stack;
+        g_crash_mote = saved_mote;
+        __builtin_memcpy(nock_abort, saved, sizeof saved);
+        if (scratch)
+            (void)heap_scratch_rewind(mark);
+        return mook_leaf(mook_tape_c("####"));
+    }
+    nock_budget_set(MOOK_TRAP_OPS);
+    tank = nock_eval(dat, mook_head(dat), NULL, NULL);
+    nock_budget_finish();
+    __builtin_memcpy(nock_abort, saved, sizeof saved);
+    g_mean = saved_mean;
+    return tank;
+}
+
+noun nock_mook(noun trace)
+{
+    noun res = NOUN_ZERO;
+    noun *dest = &res;
+    if (noun_is_atom(trace)) {
+        if (trace != NOUN_ZERO) nock_crash("mook: trace is not a list");
+        return NOUN_ZERO;
+    }
+    while (trace != NOUN_ZERO) {
+        noun frame = mook_head(trace);
+        noun tag = mook_head(frame), dat = mook_tail(frame);
+        if (!noun_is_direct(tag)) nock_crash("mook: trace tag not direct");
+        noun tank;
+        switch (direct_val(tag)) {
+        case HINT_HUNK:
+            tank = noun_is_atom(dat) ? mook_leaf(mook_tape_c("mook.hunk"))
+                                     : mook_smyt(mook_tail(dat));
+            break;
+        case HINT_MEAN:
+            tank = noun_is_atom(dat) ? mook_leaf(mook_trip(dat))
+                                     : mook_mean_trap(dat);
+            break;
+        case HINT_SPOT:
+            tank = mook_spot(dat);
+            break;
+        default:   /* %hand, %lose: nockvm renders the tape "mook.<tag>" */
+            tank = alloc_cell(direct('m'), alloc_cell(direct('o'),
+                   alloc_cell(direct('o'), alloc_cell(direct('k'),
+                   alloc_cell(direct('.'), mook_trip(tag))))));
+            break;
+        }
+        noun cons = alloc_cell(tank, NOUN_ZERO);
+        *dest = cons;
+        dest = &((cell_t *)(uintptr_t)cell_ptr(cons))->tail;
+        trace = mook_tail(trace);
+    }
+    return res;
 }
