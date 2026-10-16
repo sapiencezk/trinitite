@@ -831,7 +831,13 @@ noun cold_log_at(uint64_t index)
  * aligned end. NOUN_ZERO at data_head or on any validate/cue error, with
  * g_last_result set as cold_log_at does. cold_log_at rescans from
  * COLD_DATA0 and re-selects the superblock (another full walk) per entry;
- * this reads the log in O(bytes) per boot. */
+ * this reads the log in O(bytes) per boot.
+ * Replay-only (one caller, replay_log). Cache rule: the cache is trusted
+ * only while the globals match it. An append that fails after its
+ * superblock already reached the media returns -1 without updating
+ * g_selected_generation / g_selected_data_head, so a later call with a
+ * nonzero cursor would read against the older head: less data, never torn.
+ * Any other caller must start every read at *cursor == 0. */
 static cold_super_t g_next_super;
 static int g_next_super_ok;
 

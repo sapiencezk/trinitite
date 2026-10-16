@@ -322,29 +322,36 @@ static int install_sample(noun template, noun sample, noun *out)
     return nest(battery, new_payload, out);
 }
 
-int i3_host_persist(i3_host_result_t *out)
+/* Copy the kept part of `kernel` into the persist heap and build the
+ * installed core there; nothing is committed. A live step calls this before
+ * log_append (row 200 persist stop): if it fails, the step appends nothing
+ * and g_kernel / g_event_num never move, so state never points into
+ * scratch. The cells of a prepared copy whose append then fails are left
+ * unreferenced in persist. The heap mode is restored for the caller. */
+static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_out)
 {
     noun sample, copy, installed;
     uint64_t t0, t1;
-    int ok;
+    int ok, mode = heap_get_mode();
     if (out) {
         out->persist_ok = 0;
         out->persist_ticks = 0;
         out->persist_copy_map_hwm = 0;
         out->persist_copy_map_capacity = noun_copy_map_capacity();
     }
-    if (!g_ready || !noun_is_cell(g_kernel))
+    if (!g_ready || !noun_is_cell(kernel))
         return 0;
-    sample = slot(direct(6), g_kernel);
+    sample = slot(direct(6), kernel);
     heap_set_mode(HEAP_MODE_PERSIST);
     noun_copy_map_hwm_reset();
     t0 = cntvct();
     ok = noun_copy_checked(sample, &copy);
     t1 = cntvct();
-    if (ok && install_sample(g_kernel, copy, &installed))
-        g_kernel = installed;
+    if (ok && install_sample(kernel, copy, &installed))
+        *installed_out = installed;
     else
         ok = 0;
+    heap_set_mode(mode);
     if (out) {
         out->persist_ok = ok;
         out->persist_ticks = t1 - t0;
@@ -352,6 +359,15 @@ int i3_host_persist(i3_host_result_t *out)
         out->persist_copy_map_capacity = noun_copy_map_capacity();
     }
     return ok;
+}
+
+int i3_host_persist(i3_host_result_t *out)
+{
+    noun installed;
+    if (!persist_prepare(g_kernel, out, &installed))
+        return 0;
+    g_kernel = installed;
+    return 1;
 }
 
 static void print_cue(cue_bounded_status_t status, uint64_t ticks)
@@ -581,6 +597,12 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
     }
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
+        noun next;
+        if (!persist_prepare(c->tail, out, &next)) {
+            host_stop("persist");
+            nock_budget_finish();
+            return 0;
+        }
         if (!log_append(ovo)) {
             nock_budget_finish();
             return 0;
@@ -590,9 +612,8 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
             out->effects = c->head;
             out->effect_len = effect_list_len(c->head);
         }
-        g_kernel = c->tail;
+        g_kernel = next;
         g_event_num++;
-        (void)i3_host_persist(out);
         nock_budget_finish();
         return 1;
     }
@@ -641,6 +662,15 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
     }
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
+        noun next;
+        /* Row 200 persist stop: persist before append, so a failed persist
+         * appends nothing, commits nothing, and stops the application
+         * (row 141 trip, as a crash past %crud). */
+        if (!persist_prepare(c->tail, out, &next)) {
+            host_stop("persist");
+            nock_budget_finish();
+            return 0;
+        }
         if (!log_append(job)) {
             nock_budget_finish();
             return 0;
@@ -650,9 +680,8 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
             out->effects = c->head;
             out->effect_len = effect_list_len(c->head);
         }
-        g_kernel = c->tail;
+        g_kernel = next;
         g_event_num++;
-        (void)i3_host_persist(out);
         nock_budget_finish();
         return 1;
     }
