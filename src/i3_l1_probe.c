@@ -389,6 +389,43 @@ static int do_peek(noun path, const char *name)
     return ok;
 }
 
+/* Row 199: the state hash, its event number and its cost. The jam runs in
+ * scratch; persist_free_delta shows whether it touched the persist heap. */
+static int do_state_hash(const char *name)
+{
+    static const char hexd[] = "0123456789abcdef";
+    i3_host_result_t r;
+    uint8_t hash[32];
+    uint64_t event = 0, scratch0, free0;
+    uint32_t i;
+    int ok;
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    scratch0 = heap_cells_used(HEAP_MODE_SCRATCH);
+    free0 = heap_persist_free_cells();
+    ok = i3_host_state_hash(&event, hash, &r);
+    uart_puts("I3L1 state-hash name=");
+    uart_puts(name);
+    if (ok) {
+        uart_puts(" event=");
+        put_u64(event);
+        uart_puts(" hash=");
+        for (i = 0; i < 32; i++) {
+            uart_putc(hexd[hash[i] >> 4]);
+            uart_putc(hexd[hash[i] & 15u]);
+        }
+    } else {
+        uart_puts(" refused=yes");
+    }
+    uart_puts(" scratch_cells=");
+    put_u64(heap_cells_used(HEAP_MODE_SCRATCH) - scratch0);
+    uart_puts(" persist_free_delta=");
+    put_u64(free0 - heap_persist_free_cells());
+    uart_puts("\r\n");
+    print_nock_line("state-hash", name, &r);
+    heap_scratch_reset();
+    return ok;
+}
+
 static int do_persist(const char *name)
 {
     i3_host_result_t r;
@@ -466,6 +503,8 @@ static int run_plan(noun plan)
             (void)do_poke(payload, name);
         } else if (tag_is(tag, "peek")) {
             (void)do_peek(payload, name);
+        } else if (tag_is(tag, "state-hash")) {
+            (void)do_state_hash(name);
         } else if (tag_is(tag, "persist")) {
             (void)do_persist(name);
         } else if (tag_is(tag, "call")) {
