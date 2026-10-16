@@ -28,6 +28,9 @@ int jam_encode_bytes_checked(noun n, const uint8_t **out,
 /* Same writer, but backrefs only the same noun word. Matches host jam of a
  * freshly cued ResourceProgram (structural twins stay distinct). */
 int jam_encode_bytes_identity(noun n, const uint8_t **out, uint64_t *out_bytes);
+/* ++jam's bits (hoon.hoon's backref rule), for the %jam jet. Fails closed
+ * (-1) past JAM_MAX_BYTES; the caller then runs the arm as Nock. */
+int jam_hoon_checked(noun n, noun *out);
 uint64_t jam_encode_bytes_selftest(void);
 
 /* One cumulative, fallible budget for an untrusted identity-keyed Jam.  The

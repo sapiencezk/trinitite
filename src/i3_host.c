@@ -858,6 +858,35 @@ int i3_host_peek(noun path, i3_host_result_t *out)
     return 1;
 }
 
+/* Row 199 on the lite node: the kernel's /state-hash, (shax (jam state)),
+ * paired with the host's event number N, the count of accepted log entries
+ * after a clean replay. A stopped node (rows 141, 200) refuses the request.
+ * Not on the step path: it runs only when asked, as a peek. The 32 hash bytes
+ * are the atom's little-endian bytes, as the full node prints them. */
+int i3_host_state_hash(uint64_t *event, uint8_t hash[32], i3_host_result_t *out)
+{
+    noun path;
+    if (!out)
+        return 0;
+    clear_result(out);
+    if (!g_ready || g_replaying)
+        return 0;
+    if (g_stop) {
+        uart_puts("I3H state-hash refused stopped=");
+        uart_puts(g_stop);
+        uart_puts("\r\n");
+        return 0;
+    }
+    if (!nest(tas("state-hash"), NOUN_ZERO, &path))
+        return 0;
+    if (!i3_host_peek(path, out) || !noun_is_atom(out->product))
+        return 0;
+    if (!noun_atom_read_fixed(out->product, hash, 32))
+        return 0;
+    *event = g_event_num - 1;
+    return 1;
+}
+
 static int read_pill(const uint8_t **jam, uint64_t *jam_len, uint8_t *shape)
 {
     volatile const uint8_t *base = (volatile const uint8_t *)(uintptr_t)PILL_BASE;
