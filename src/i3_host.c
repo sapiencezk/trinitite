@@ -27,6 +27,14 @@ static uint64_t g_jam_len;
 /* Decision L2 (rows 141, 198): once set, the application is stopped and
  * every later poke is refused until the next boot. */
 static const char *g_stop;
+static const char STOP_PERSIST[] = "persist";
+/* Row 200 persist stop: a live step must leave this many persist cells
+ * free, 1/16 of what was free when replay began (i3_host_boot). Replaying
+ * a step keeps a few more cells than the live step did (its job was
+ * decoded from the log, not shared with input already in persist), so the
+ * reserve is what lets the next boot replay every entry the live boot
+ * appended before it stopped. */
+static uint64_t g_persist_reserve;
 static int g_replaying;
 static uint8_t g_jam_blake3[32];
 
@@ -269,11 +277,20 @@ static int trip_noun(uint64_t num, noun *out)
     return nest(tas("i3-trip"), direct(num), out);
 }
 
+/* Row 200 persist stop: its own record, so it is never confused with a row
+ * 141 trip. */
+static int persist_trip_noun(uint64_t num, noun *out)
+{
+    return nest(tas("i3-trip-persist"), direct(num), out);
+}
+
 /* Row 141 stop: no entry is appended for the failed step. The trip is
  * recorded so the next boot, after replay, applies a journaled %manage STOP
  * before any input. The record names the event that tripped, so once that
  * STOP is logged the event number moves on and a later boot is not stopped
- * again: one trip stops one boot. */
+ * again: one trip stops one boot. A persist stop (row 200) writes a persist
+ * trip instead: no STOP is ever logged for it, so the event number never
+ * moves and every later boot finds it and refuses input (stop_after_trip). */
 static void host_stop(const char *reason)
 {
     noun trip;
@@ -285,7 +302,9 @@ static void host_stop(const char *reason)
     uart_puts(" event=");
     put_u64(g_event_num);
     uart_puts("\r\n");
-    if (!g_replaying && trip_noun(g_event_num, &trip)) {
+    if (!g_replaying && (reason == STOP_PERSIST
+                         ? persist_trip_noun(g_event_num, &trip)
+                         : trip_noun(g_event_num, &trip))) {
         (void)cold_store(trip);
         nv_flush();
     }
@@ -322,29 +341,51 @@ static int install_sample(noun template, noun sample, noun *out)
     return nest(battery, new_payload, out);
 }
 
-int i3_host_persist(i3_host_result_t *out)
+/* Copy the kept part of `kernel` into the persist heap and build the
+ * installed core there; nothing is committed. A live step calls this before
+ * log_append (row 200 persist stop): if it fails, the step appends nothing
+ * and g_kernel / g_event_num never move, so state never points into
+ * scratch. The cells of a prepared copy whose append then fails are left
+ * unreferenced in persist. The heap mode is restored for the caller. */
+static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_out);
+
+/* Live step: prepare the persist copy and keep the reserve, or refuse. */
+static int persist_prepare_live(noun kernel, i3_host_result_t *out, noun *installed_out)
+{
+    if (!persist_prepare(kernel, out, installed_out))
+        return 0;
+    if (heap_persist_free_cells() < g_persist_reserve) {
+        if (out)
+            out->persist_ok = 0;
+        return 0;
+    }
+    return 1;
+}
+
+static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_out)
 {
     noun sample, copy, installed;
     uint64_t t0, t1;
-    int ok;
+    int ok, mode = heap_get_mode();
     if (out) {
         out->persist_ok = 0;
         out->persist_ticks = 0;
         out->persist_copy_map_hwm = 0;
         out->persist_copy_map_capacity = noun_copy_map_capacity();
     }
-    if (!g_ready || !noun_is_cell(g_kernel))
+    if (!g_ready || !noun_is_cell(kernel))
         return 0;
-    sample = slot(direct(6), g_kernel);
+    sample = slot(direct(6), kernel);
     heap_set_mode(HEAP_MODE_PERSIST);
     noun_copy_map_hwm_reset();
     t0 = cntvct();
     ok = noun_copy_checked(sample, &copy);
     t1 = cntvct();
-    if (ok && install_sample(g_kernel, copy, &installed))
-        g_kernel = installed;
+    if (ok && install_sample(kernel, copy, &installed))
+        *installed_out = installed;
     else
         ok = 0;
+    heap_set_mode(mode);
     if (out) {
         out->persist_ok = ok;
         out->persist_ticks = t1 - t0;
@@ -352,6 +393,15 @@ int i3_host_persist(i3_host_result_t *out)
         out->persist_copy_map_capacity = noun_copy_map_capacity();
     }
     return ok;
+}
+
+int i3_host_persist(i3_host_result_t *out)
+{
+    noun installed;
+    if (!persist_prepare(g_kernel, out, &installed))
+        return 0;
+    g_kernel = installed;
+    return 1;
 }
 
 static void print_cue(cue_bounded_status_t status, uint64_t ticks)
@@ -581,6 +631,12 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
     }
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
+        noun next;
+        if (!persist_prepare_live(c->tail, out, &next)) {
+            host_stop(STOP_PERSIST);
+            nock_budget_finish();
+            return 0;
+        }
         if (!log_append(ovo)) {
             nock_budget_finish();
             return 0;
@@ -590,9 +646,8 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
             out->effects = c->head;
             out->effect_len = effect_list_len(c->head);
         }
-        g_kernel = c->tail;
+        g_kernel = next;
         g_event_num++;
-        (void)i3_host_persist(out);
         nock_budget_finish();
         return 1;
     }
@@ -641,6 +696,15 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
     }
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
+        noun next;
+        /* Row 200 persist stop: persist before append, so a failed persist
+         * appends nothing, commits nothing, and stops the application
+         * (row 141 trip, as a crash past %crud). */
+        if (!persist_prepare_live(c->tail, out, &next)) {
+            host_stop(STOP_PERSIST);
+            nock_budget_finish();
+            return 0;
+        }
         if (!log_append(job)) {
             nock_budget_finish();
             return 0;
@@ -650,9 +714,8 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
             out->effects = c->head;
             out->effect_len = effect_list_len(c->head);
         }
-        g_kernel = c->tail;
+        g_kernel = next;
         g_event_num++;
-        (void)i3_host_persist(out);
         nock_budget_finish();
         return 1;
     }
@@ -732,7 +795,7 @@ static int replay_fail(uint64_t i, const char *why)
  * (decision 198); the cell and stack limits stay. */
 static int replay_log(void)
 {
-    uint64_t n = cold_log_len(), i;
+    uint64_t n = cold_log_len(), i, cur = 0;
     i3_host_result_t r;
     uart_puts("I3H replay entries=");
     put_u64(n);
@@ -741,14 +804,18 @@ static int replay_log(void)
     for (i = 0; i < n; i++) {
         noun job, subject, product;
         int jumped;
-        heap_set_mode(HEAP_MODE_PERSIST);
-        job = cold_log_at(i);
+        /* The job decodes into SCRATCH, as a live step's job does, and is
+         * dropped by heap_scratch_reset below; i3_host_persist copies only
+         * what the new state keeps. Decoding it into the persist heap left
+         * every replayed job there for the whole boot, so replay ran out of
+         * persist (reason=persist) before live use did. */
+        heap_set_mode(HEAP_MODE_SCRATCH);
+        job = cold_log_next(&cur);
         if (!noun_is_cell(job))
             return replay_fail(i, "read");
         cell_t *jc = (cell_t *)(uintptr_t)cell_ptr(job);
         if (!noun_is_atom(jc->head) || direct_val(jc->head) != g_event_num)
             return replay_fail(i, "event-num");
-        heap_set_mode(HEAP_MODE_SCRATCH);
         if (!nest(g_kernel, job, &subject))
             return replay_fail(i, "alloc");
         nock_budget_set_limits(0, I3_SLAM_MAX_CELLS);
@@ -779,6 +846,15 @@ static void stop_after_trip(void)
     noun trip, manage, local, cause;
     noun m_xs[4], c_xs[5];
     i3_host_result_t r;
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    if (persist_trip_noun(g_event_num, &trip) && noun_is_cell(cold_load(cold_jam_hash(trip)))) {
+        /* Row 200: a persist-stopped node stays stopped on every boot, logs
+         * nothing, and does not rewrite its trip. */
+        g_stop = STOP_PERSIST;
+        uart_puts("I3H trip-stop reason=persist\r\n");
+        heap_scratch_reset();
+        return;
+    }
     heap_set_mode(HEAP_MODE_PERSIST);
     if (!trip_noun(g_event_num, &trip) || !noun_is_cell(cold_load(cold_jam_hash(trip))))
         return;
@@ -909,6 +985,13 @@ void i3_host_boot(void)
 #if defined(COLD_MEDIA_SEMIHOST)
     cold_nv_arm();
 #endif
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+    heap_persist_cap_arm();
+    uart_puts("I3H persist_headroom cells=");
+    put_u64(I3_PERSIST_HEADROOM_CELLS);
+    uart_puts("\r\n");
+#endif
+    g_persist_reserve = heap_persist_free_cells() / 16;
     if (!replay_log()) {
         uart_puts("I3H terminal=replay-fail\r\n");
         g_ready = 0;

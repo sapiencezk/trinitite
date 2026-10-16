@@ -818,6 +818,66 @@ noun cold_log_at(uint64_t index)
     return NOUN_ZERO;
 }
 
+/* Sequential log read for boot replay. *cursor starts at 0 and is a media
+ * offset into the data region, owned by the caller and kept in RAM only for
+ * one boot (nothing outlives it, nothing is written to media). A call with
+ * *cursor == 0 selects and fully validates the superblock (select_super,
+ * which walks every object); later calls reuse that selection while
+ * g_selected_generation and g_selected_data_head still match it, i.e. while
+ * nothing has written the cold store, and select again otherwise. Each call
+ * validates the objects from max(*cursor, COLD_DATA0) in media order, skips
+ * the non-LOG objects, decodes the first LOG object into SCRATCH (the caller
+ * resets scratch after the step), and advances *cursor to that object's
+ * aligned end. NOUN_ZERO at data_head or on any validate/cue error, with
+ * g_last_result set as cold_log_at does. cold_log_at rescans from
+ * COLD_DATA0 and re-selects the superblock (another full walk) per entry;
+ * this reads the log in O(bytes) per boot.
+ * Replay-only (one caller, replay_log). Cache rule: the cache is trusted
+ * only while the globals match it. An append that fails after its
+ * superblock already reached the media returns -1 without updating
+ * g_selected_generation / g_selected_data_head, so a later call with a
+ * nonzero cursor would read against the older head: less data, never torn.
+ * Any other caller must start every read at *cursor == 0. */
+static cold_super_t g_next_super;
+static int g_next_super_ok;
+
+noun cold_log_next(uint64_t *cursor)
+{
+    if (!cursor)
+        return NOUN_ZERO;
+    if (*cursor == 0 || !g_next_super_ok
+        || g_next_super.generation != g_selected_generation
+        || g_next_super.data_head != g_selected_data_head) {
+        g_next_super_ok = select_super(&g_next_super, 0) == COLD_RESULT_VALID;
+        if (!g_next_super_ok)
+            return NOUN_ZERO;
+    }
+    const cold_super_t *s = &g_next_super;
+    uint64_t off = *cursor < COLD_DATA0 ? COLD_DATA0 : *cursor;
+    while (off < s->data_head) {
+        cold_obj_hdr_t h;
+        uint64_t next;
+        cold_result_t r = object_validate(s, off, 0, 0, &h);
+        if (r != COLD_RESULT_VALID) {
+            g_last_result = r;
+            return NOUN_ZERO;
+        }
+        if (!align8_checked(off + sizeof h + h.len, &next))
+            break;
+        if (h.kind == KIND_LOG) {
+            noun out;
+            if (decode_object(s, off, KIND_LOG,
+                              HEAP_MODE_SCRATCH, &out) != 0)
+                return NOUN_ZERO;
+            noun_tx_commit();
+            *cursor = next;
+            return out;
+        }
+        off = next;
+    }
+    return NOUN_ZERO;
+}
+
 int cold_snap_save(noun root)
 {
     const uint8_t *bytes;

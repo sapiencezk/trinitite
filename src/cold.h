@@ -76,6 +76,7 @@ noun cold_load(uint64_t hash62);
 int cold_log(noun event);
 uint64_t cold_log_len(void);
 noun cold_log_at(uint64_t i);
+noun cold_log_next(uint64_t *cursor); /* boot replay: sequential, SCRATCH decode */
 
 int cold_snap_save(noun root);
 noun cold_snap_load(void);    /* standalone/Forth wrapper; commits decode */

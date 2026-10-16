@@ -82,6 +82,9 @@ int   heap_get_mode(void);
 void  heap_scratch_reset(void);    /* bump scratch ptr to HEAP_SCRATCH_BASE */
 uint64_t heap_scratch_mark(void);  /* byte offset for a nested scratch owner */
 int   heap_scratch_rewind(uint64_t mark);
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+void  heap_persist_cap_arm(void);  /* test knob: cap persist growth from here */
+#endif
 void  heap_persist_reset(void);    /* bump current persist semispace to its base */
 void  heap_persist_flip(void);     /* switch to other semispace (empty); for compact */
 /* Transactional candidate semispace.  A failed pre-promotion copy restores
@@ -103,6 +106,7 @@ void  noun_tx_commit(void);
 void  noun_tx_abort(void);
 int   noun_tx_active(void);
 uint64_t heap_cells_used(int mode);
+uint64_t heap_persist_free_cells(void); /* cells left in the live persist half */
 #if defined(M46_LIVE_REPLACEMENT)
 /* Same-boot allocation high-water marks include aborted candidate work. */
 uint64_t noun_m46_heap_peak_bytes(int mode);
