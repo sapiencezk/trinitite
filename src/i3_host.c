@@ -28,13 +28,23 @@ static uint64_t g_jam_len;
  * every later poke is refused until the next boot. */
 static const char *g_stop;
 static const char STOP_PERSIST[] = "persist";
-/* Row 200 persist stop: a live step must leave this many persist cells
+/* Row 200 persist stop (share): a live step must leave this many persist cells
  * free, 1/16 of what was free when replay began (i3_host_boot). Replaying
  * a step keeps a few more cells than the live step did (its job was
  * decoded from the log, not shared with input already in persist), so the
  * reserve is what lets the next boot replay every entry the live boot
  * appended before it stopped. */
 static uint64_t g_persist_reserve;
+/* The 1/16 share alone is not enough (row 200 amendment): a replayed step
+ * decodes its job into scratch, so its persist copy pays for every kept
+ * cell of that job, while the live step may share cells already in persist
+ * (the application, about 2,600 cells in the R4 set). That excess is fixed,
+ * not proportional, so a small heap stopped live and then failed replay.
+ * A live step therefore also keeps free the two largest jobs this boot has
+ * seen, replayed or live, including its own: the application plus the
+ * largest other kept input. */
+static uint64_t g_job_max1;
+static uint64_t g_job_max2;
 static int g_replaying;
 static uint8_t g_jam_blake3[32];
 
@@ -349,16 +359,103 @@ static int install_sample(noun template, noun sample, noun *out)
  * unreferenced in persist. The heap mode is restored for the caller. */
 static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_out);
 
-/* Live step: prepare the persist copy and keep the reserve, or refuse. */
-static int persist_prepare_live(noun kernel, i3_host_result_t *out, noun *installed_out)
+/* Distinct cells in `job`, as a decode from the log builds them: every
+ * cell counts once, whichever heap it sits in now (a live job may share
+ * cells already in persist; its replay will not). Iterative, with a fixed
+ * visited set; a job too large to count counts as unbounded, so the step is
+ * refused rather than accepted unreplayable. */
+#define JOB_SET_BITS 16u
+#define JOB_SET_SIZE (1u << JOB_SET_BITS)
+#define JOB_CELLS_MAX (JOB_SET_SIZE / 2u)
+static uint32_t g_job_set[JOB_SET_SIZE];
+static uint32_t g_job_stack[JOB_CELLS_MAX];
+
+static uint64_t job_cells(noun job)
 {
+    uint32_t sp = 0, cells = 0, i;
+    for (i = 0; i < JOB_SET_SIZE; i++)
+        g_job_set[i] = 0;
+    if (!noun_is_cell(job))
+        return 0;
+    g_job_stack[sp++] = cell_ptr(job);
+    while (sp) {
+        uint32_t op = g_job_stack[--sp], k, h;
+        int seen = 0;
+        h = (op * 2654435761u) >> (32u - JOB_SET_BITS);
+        for (k = 0; k < JOB_SET_SIZE; k++) {
+            uint32_t slot_i = (h + k) & (JOB_SET_SIZE - 1u);
+            if (g_job_set[slot_i] == op) {
+                seen = 1;
+                break;
+            }
+            if (g_job_set[slot_i] == 0) {
+                g_job_set[slot_i] = op;
+                break;
+            }
+        }
+        if (seen)
+            continue;
+        if (++cells >= JOB_CELLS_MAX)
+            return UINT64_MAX / 4;
+        cell_t *c = (cell_t *)(uintptr_t)op;
+        if (noun_is_cell(c->head)) {
+            if (sp >= JOB_CELLS_MAX)
+                return UINT64_MAX / 4;
+            g_job_stack[sp++] = cell_ptr(c->head);
+        }
+        if (noun_is_cell(c->tail)) {
+            if (sp >= JOB_CELLS_MAX)
+                return UINT64_MAX / 4;
+            g_job_stack[sp++] = cell_ptr(c->tail);
+        }
+    }
+    return cells;
+}
+
+static void job_seen(uint64_t cells)
+{
+    if (cells > g_job_max1) {
+        g_job_max2 = g_job_max1;
+        g_job_max1 = cells;
+    } else if (cells > g_job_max2) {
+        g_job_max2 = cells;
+    }
+}
+
+/* Reserve a live step must leave, counting `cells` for its own job. */
+static uint64_t live_reserve(uint64_t cells)
+{
+    uint64_t m1 = g_job_max1, m2 = g_job_max2, kept;
+    if (cells > m1) {
+        m2 = m1;
+        m1 = cells;
+    } else if (cells > m2) {
+        m2 = cells;
+    }
+    kept = m1 + m2;
+    return kept > g_persist_reserve ? kept : g_persist_reserve;
+}
+
+/* Live step: prepare the persist copy and keep the reserve, or refuse. */
+static int persist_prepare_live(noun kernel, noun job, i3_host_result_t *out,
+                                noun *installed_out)
+{
+    uint64_t cells = job_cells(job);
     if (!persist_prepare(kernel, out, installed_out))
         return 0;
-    if (heap_persist_free_cells() < g_persist_reserve) {
+    if (heap_persist_free_cells() < live_reserve(cells)) {
+        uart_puts("I3H persist reserve=");
+        put_u64(live_reserve(cells));
+        uart_puts(" share=");
+        put_u64(g_persist_reserve);
+        uart_puts(" free=");
+        put_u64(heap_persist_free_cells());
+        uart_puts("\r\n");
         if (out)
             out->persist_ok = 0;
         return 0;
     }
+    job_seen(cells);
     return 1;
 }
 
@@ -632,7 +729,7 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
         noun next;
-        if (!persist_prepare_live(c->tail, out, &next)) {
+        if (!persist_prepare_live(c->tail, ovo, out, &next)) {
             host_stop(STOP_PERSIST);
             nock_budget_finish();
             return 0;
@@ -700,7 +797,7 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
         /* Row 200 persist stop: persist before append, so a failed persist
          * appends nothing, commits nothing, and stops the application
          * (row 141 trip, as a crash past %crud). */
-        if (!persist_prepare_live(c->tail, out, &next)) {
+        if (!persist_prepare_live(c->tail, job, out, &next)) {
             host_stop(STOP_PERSIST);
             nock_budget_finish();
             return 0;
@@ -816,6 +913,7 @@ static int replay_log(void)
         cell_t *jc = (cell_t *)(uintptr_t)cell_ptr(job);
         if (!noun_is_atom(jc->head) || direct_val(jc->head) != g_event_num)
             return replay_fail(i, "event-num");
+        job_seen(job_cells(job));
         if (!nest(g_kernel, job, &subject))
             return replay_fail(i, "alloc");
         nock_budget_set_limits(0, I3_SLAM_MAX_CELLS);
@@ -888,6 +986,8 @@ void i3_host_boot(void)
     g_event_num = 1;
     g_stop = 0;
     g_replaying = 0;
+    g_job_max1 = 0;
+    g_job_max2 = 0;
     uart_puts("I3H start\r\n");
     fast_reset();
 
