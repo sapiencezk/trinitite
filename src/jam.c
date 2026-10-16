@@ -101,6 +101,9 @@ static jcent_t g_jcache[JAM_CACHE_SZ];
 /* 0: structural noun_eq (M8 trampoline battery digest).
  * 1: pointer identity (host Python jam of ResourceProgram). */
 static int g_jam_identity_keys;
+/* ++jam's own rule (hoon.hoon, and the full node's nockvm jam): a repeated
+ * atom is written again when (met 0 a) <= (met 0 cursor), else backref. */
+static int g_jam_hoon_rule;
 static uint32_t g_jcache_used;
 static uint32_t g_jam_depth;
 
@@ -224,6 +227,14 @@ static void do_jam(noun n) {
                 goto done;
             jb_write(&g_jambuf, 0);     /* atom tag */
             do_mat(&g_jambuf, n);
+        } else if (g_jam_hoon_rule) {
+            if (bn_met(n) <= u64_bits(cached_pos)) {
+                jb_write(&g_jambuf, 0);
+                do_mat(&g_jambuf, n);
+            } else {
+                jb_write(&g_jambuf, 1); jb_write(&g_jambuf, 1);
+                do_mat(&g_jambuf, direct(cached_pos));
+            }
         } else if (g_jam_identity_keys) {
             /* Host jam.py: re-emit the atom when value.bit_length()
              * is strictly less than the cached bit-position. */
@@ -333,6 +344,13 @@ static void do_jam_len(noun n)
             g_jam_len_depth--;
         return;
     }
+    if (g_jam_hoon_rule) {
+        jam_len_add(bn_met(n) <= u64_bits(cached_pos) ? 1 + mat_len(n)
+                                                      : 2 + mat_len(direct(cached_pos)));
+        if (bounded)
+            g_jam_len_depth--;
+        return;
+    }
     if (g_jam_identity_keys) {
         if (bn_met(n) < u64_bits(cached_pos)) {
             if (!jcache_put(n, g_jam_len)) {
@@ -408,6 +426,19 @@ int jam_encode_bytes_checked(noun n, const uint8_t **out,
     *out = (const uint8_t *)(const void *)g_jambuf.buf;
     *out_bytes = bytes;
     return 0;
+}
+
+int jam_hoon_checked(noun n, noun *out)
+{
+    uint64_t bytes;
+    int rc = -1;
+    g_jam_hoon_rule = 1;
+    if (jam_size_checked(n, JAM_MAX_BYTES, &bytes) == 0) {
+        *out = jam(n);
+        rc = 0;
+    }
+    g_jam_hoon_rule = 0;
+    return rc;
 }
 
 int jam_encode_bytes_identity(noun n, const uint8_t **out, uint64_t *out_bytes)

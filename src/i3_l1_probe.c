@@ -314,7 +314,20 @@ static void fill_call_result(i3_host_result_t *r, int jumped, uint64_t ticks)
     r->persist_copy_map_capacity = 0;
 }
 
-static int do_call(noun label, noun sample, const char *name)
+/* [9 2 0 1] kicks the arm through jet dispatch. raw: [2 [0 1] 0 2] runs
+ * the same arm as Nock, so the arm's own jet is skipped (jet parity); the
+ * jets the arm calls inside stay on. */
+static int call_formula(int raw, noun *fol)
+{
+    noun a, b;
+    if (!raw)
+        return nest(direct(0), direct(1), fol) && nest(direct(2), *fol, fol)
+            && nest(direct(9), *fol, fol);
+    return nest(direct(0), direct(1), &a) && nest(direct(0), direct(2), &b)
+        && nest(a, b, fol) && nest(direct(2), *fol, fol);
+}
+
+static int do_call(noun label, noun sample, const char *name, int raw)
 {
     i3_host_result_t r;
     noun gate, edited, product, fol;
@@ -330,16 +343,17 @@ static int do_call(noun label, noun sample, const char *name)
     }
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (!edit_sample(gate, sample, &edited)
-        || !nest(direct(0), direct(1), &fol)
-        || !nest(direct(2), fol, &fol)
-        || !nest(direct(9), fol, &fol)) {
+        || !call_formula(raw, &fol)) {
         uart_puts("I3L1 call name=");
         uart_puts(name);
         uart_puts(" missing=yes abort=none\r\n");
         heap_scratch_reset();
         return 0;
     }
-    nock_budget_set_limits(I3_SLAM_MAX_OPS, I3_SLAM_MAX_CELLS);
+    /* call-nock is a parity diagnostic: 16x ops, and cells up to what the
+     * 32 MiB scratch holds. The stack limit stays (it guards the C stack). */
+    nock_budget_set_limits(raw ? I3_SLAM_MAX_OPS * 16 : I3_SLAM_MAX_OPS,
+                           raw ? 1300000ULL : I3_SLAM_MAX_CELLS);
     nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
     __builtin_memcpy(saved, nock_abort, sizeof saved);
     t0 = cntvct();
@@ -510,7 +524,12 @@ static int run_plan(noun plan)
         } else if (tag_is(tag, "call")) {
             if (noun_is_cell(payload)) {
                 cell_t *p = (cell_t *)(uintptr_t)cell_ptr(payload);
-                (void)do_call(p->head, p->tail, name);
+                (void)do_call(p->head, p->tail, name, 0);
+            }
+        } else if (tag_is(tag, "call-nock")) {
+            if (noun_is_cell(payload)) {
+                cell_t *p = (cell_t *)(uintptr_t)cell_ptr(payload);
+                (void)do_call(p->head, p->tail, name, 1);
             }
         } else if (tag_is(tag, "load-app")) {
             (void)do_load_app(name);
@@ -545,7 +564,7 @@ static int plan_has_call(noun plan)
         if (!noun_is_cell(step))
             continue;
         cell_t *s = (cell_t *)(uintptr_t)cell_ptr(step);
-        if (tag_is(s->head, "call"))
+        if (tag_is(s->head, "call") || tag_is(s->head, "call-nock"))
             return 1;
     }
     return 0;
