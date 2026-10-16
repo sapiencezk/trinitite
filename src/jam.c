@@ -136,8 +136,53 @@ static void jcache_init(void) {
     g_i2_admission_metrics.jam_clear_bytes += sizeof g_jcache;
 }
 
-static uint32_t jcache_hash(noun n) {
+static uint32_t jcache_ptr_hash(noun n) {
     return (uint32_t)((n ^ (n >> 23)) * 2654435761ULL) & (JAM_CACHE_SZ - 1);
+}
+
+/* ++jam's rule keys its map by noun value, so under g_jam_hoon_rule the cache
+ * hashes by structure: equal subtrees at different addresses must land in the
+ * same probe chain, or the structural compare never sees them and no backref
+ * is written. An atom's noun word is already its value (direct) or its content
+ * hash (indirect). A cell's hash mixes its children's; a per-jam memo keyed by
+ * address only saves recomputing it, it never decides equality. */
+#define JAM_MUG_MEMO 262144u
+typedef struct { noun key; uint64_t mug; uint32_t gen; } jmug_t;
+static jmug_t g_jmug[JAM_MUG_MEMO];
+static uint32_t g_jmug_gen;
+static int g_jam_cache_full;
+
+static uint64_t jam_mix(uint64_t x) {
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;
+    return x ^ (x >> 33);
+}
+
+static uint64_t jam_mug(noun n) {
+    if (!noun_is_cell(n))
+        return jam_mix(n);
+    uint32_t h = (uint32_t)jam_mix(n) & (JAM_MUG_MEMO - 1);
+    for (uint32_t i = 0; i < 8; i++) {
+        jmug_t *e = &g_jmug[(h + i) & (JAM_MUG_MEMO - 1)];
+        if (e->gen == g_jmug_gen && e->key == n)
+            return e->mug;
+    }
+    cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
+    uint64_t m = jam_mix(jam_mug(c->head) * 31u + jam_mix(jam_mug(c->tail) ^ 0x9e3779b97f4a7c15ULL));
+    for (uint32_t i = 0; i < 8; i++) {
+        jmug_t *e = &g_jmug[(h + i) & (JAM_MUG_MEMO - 1)];
+        if (e->gen != g_jmug_gen) {
+            e->key = n; e->mug = m; e->gen = g_jmug_gen;
+            break;
+        }
+    }
+    return m;
+}
+
+static uint32_t jcache_hash(noun n) {
+    if (g_jam_hoon_rule)
+        return (uint32_t)jam_mug(n) & (JAM_CACHE_SZ - 1);
+    return jcache_ptr_hash(n);
 }
 
 static int jcache_get(noun n, uint64_t *pos) {
@@ -167,8 +212,12 @@ static int jcache_put(noun n, uint64_t pos) {
             &g_i2_admission_metrics.jam_probe_hwm, (uint64_t)i + 1u);
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) {
-            if (g_jcache_used >= I2_JAM_CACHE_ADMITTED)
+            if (g_jcache_used >= I2_JAM_CACHE_ADMITTED) {
+                /* A skipped entry loses a backref; under ++jam's rule that
+                 * is wrong bits, so the caller falls back to Nock. */
+                g_jam_cache_full = 1;
                 return 1;
+            }
             g_jcache[idx].key = n; g_jcache[idx].pos = pos; g_jcache[idx].used = 1;
             g_jcache_used++;
             i2_admission_metrics_max(
@@ -183,6 +232,7 @@ static int jcache_put(noun n, uint64_t pos) {
         }
     }
     /* cache full — skip (correctness preserved; dedup opportunity lost) */
+    g_jam_cache_full = 1;
     return 1;
 }
 
@@ -433,9 +483,14 @@ int jam_hoon_checked(noun n, noun *out)
     uint64_t bytes;
     int rc = -1;
     g_jam_hoon_rule = 1;
-    if (jam_size_checked(n, JAM_MAX_BYTES, &bytes) == 0) {
+    g_jam_cache_full = 0;
+    if (++g_jmug_gen == 0) {
+        for (uint32_t i = 0; i < JAM_MUG_MEMO; i++) g_jmug[i].gen = 0;
+        g_jmug_gen = 1;
+    }
+    if (jam_size_checked(n, JAM_MAX_BYTES, &bytes) == 0 && !g_jam_cache_full) {
         *out = jam(n);
-        rc = 0;
+        rc = g_jam_cache_full ? -1 : 0;
     }
     g_jam_hoon_rule = 0;
     return rc;
