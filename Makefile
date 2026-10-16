@@ -519,6 +519,7 @@ endif
 ifeq ($(COLD_MEDIA),ram)
 MEDIA_OBJS = cold_media.o cold_nv_none.o
 else ifeq ($(COLD_MEDIA),semihost)
+CFLAGS += -DCOLD_MEDIA_SEMIHOST=1
 MEDIA_OBJS = cold_media.o cold_nv.o
 else ifeq ($(COLD_MEDIA),fake)
 CFLAGS += -DCOLD_MEDIA_FAKE=1
