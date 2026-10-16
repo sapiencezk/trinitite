@@ -554,6 +554,9 @@ void i3_l1_probe_boot(void)
     uart_puts("I3L1 plan_bytes=");
     put_u64(plan_len);
     uart_puts("\r\n");
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+    uint64_t plan_cells0 = heap_cells_used(HEAP_MODE_PERSIST);
+#endif
     if (plan_len != 0) {
         heap_set_mode(HEAP_MODE_PERSIST);
         if (!i3_host_cue_bytes(plan_bytes, plan_len, &plan)) {
@@ -562,9 +565,11 @@ void i3_l1_probe_boot(void)
         }
     }
 #if defined(I3_PERSIST_HEADROOM_CELLS)
-    /* The plan is test input, not node state: re-arm past it so a write
-     * boot and a replay boot get the same headroom for their steps. */
-    heap_persist_cap_arm();
+    /* The plan is test input, not node state: move the cap past it, and
+     * only by its size, so replay already done this boot still counts
+     * against H (a write boot after replay must fit what the next boot
+     * replays). Re-arming here gave live steps a fresh H after replay. */
+    heap_persist_cap_extend(heap_cells_used(HEAP_MODE_PERSIST) - plan_cells0);
 #endif
 
     if (plan_has_call(plan)) {
