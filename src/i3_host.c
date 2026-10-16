@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "bignum.h"
 #include "blake3.h"
 #include "bounded_cue.h"
 #include "cold.h"
@@ -702,13 +703,21 @@ static void put_goof(noun goof)
  * host hashes and stores bytes and interprets nothing (decision 164). */
 #define I3_CKPT_STATE_AXIS 27
 
+/* sha256 of ++jam's bytes (jam_hoon_checked, the %jam jet's writer), as
+ * the kernel's (shax (jam state)): the atom's (met 3) little-endian bytes.
+ * The default writer's backref choice differs from ++jam (row 211 (6)). */
+static uint8_t g_ckpt_buf[JAM_MAX_BYTES];
 static int ckpt_digest(noun state, uint8_t out[32], uint64_t *bytes)
 {
-    const uint8_t *p;
+    noun a;
     uint64_t n;
-    if (jam_encode_bytes_checked(state, &p, &n) != 0)
+    if (jam_hoon_checked(state, &a) != 0 || !noun_is_atom(a))
         return 0;
-    sha256_hash(p, n, out);
+    n = (bn_met(a) + 7) / 8;
+    if (n == 0 || n > sizeof g_ckpt_buf
+        || !noun_atom_read_fixed(a, g_ckpt_buf, (size_t)n))
+        return 0;
+    sha256_hash(g_ckpt_buf, n, out);
     if (bytes)
         *bytes = n;
     return 1;
