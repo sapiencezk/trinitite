@@ -691,8 +691,8 @@ static void put_goof(noun goof)
 #if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
 /* Row 212 PR 1a: lite checkpoint writer, flag-gated (I3_CHECKPOINT_EVERY=K,
  * default off; with the flag off none of this is compiled). After every K
- * accepted live steps the host writes the kernel state (the persisted
- * sample, axis 6) to cold media, then a header record
+ * accepted live steps the host writes the kernel state (internal.outer,
+ * axis 27; see ckpt_maybe_write) to cold media, then a header record
  *   [%i3-ckpt N state-id sha256(jam state) blake3(kernel jam)]
  * and verifies both by reading back and re-hashing. N is the last event the
  * state follows. This PR only writes: boot does not read a checkpoint yet,
@@ -700,6 +700,8 @@ static void put_goof(noun goof)
  * path lands). A checkpoint that cannot be written or verified is skipped
  * and logged; the step itself is already committed and is not affected. The
  * host hashes and stores bytes and interprets nothing (decision 164). */
+#define I3_CKPT_STATE_AXIS 27
+
 static int ckpt_digest(noun state, uint8_t out[32], uint64_t *bytes)
 {
     const uint8_t *p;
@@ -748,7 +750,12 @@ static void ckpt_maybe_write(void)
     const char *why = 0;
     if (g_replaying || g_stop || n == 0 || n % (uint64_t)I3_CHECKPOINT_EVERY)
         return;
-    state = slot(direct(6), g_kernel);
+    /* The application state is internal.outer: the core's sample (axis 6) is
+     * the NockApp wrapper's outer-state [%0 desk-hash internal], so the
+     * kernel's own state (what /state-hash jams, row 199) is axis 27. Axis 6
+     * would also hash the wrapper tag and build hash and never equal the
+     * full node's /state-hash. */
+    state = slot(direct(I3_CKPT_STATE_AXIS), g_kernel);
     /* Conservative stand-in for the 128k-cell cue bound: the job counter
      * refuses past I2_CUE_MAX_CELLS (65,536) distinct cells. */
     if (job_cells(state) >= JOB_UNBOUNDED) {

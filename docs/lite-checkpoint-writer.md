@@ -14,7 +14,7 @@ Branch: trinitite `feat/lite-checkpoint-writer`. Sources: PLAN row 212 (in #254)
 ## Format (1a)
 After a committed live step (normal poke and the %crud re-poke path; never during replay, never once stopped)
 when N = event_num-1 is a multiple of K:
-1. `state` = axis 6 of the kernel core (the sample `persist_prepare` copies).
+1. `state` = axis 27 of the kernel core, internal.outer of the wrapper sample `[%0 desk-hash internal]` (axis 6), which is exactly what `/state-hash` jams.
 2. Bounds: distinct cells < 65,536 (`job_cells`, a conservative stand-in for row 212's 128k-cell cue bound)
    and jam ≤ `JAM_MAX_BYTES` (128 KiB, the cold writer's buffer). Otherwise `I3H ckpt skip reason=cells|jam-size`.
 3. `D = sha256(jam(state))` (bytes from `jam_encode_bytes_checked`).
