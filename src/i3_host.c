@@ -4,6 +4,7 @@
 #include "blake3.h"
 #include "bounded_cue.h"
 #include "cold.h"
+#include "i2_admission_envelope.h"
 #include "i2_admission_metrics.h"
 #include "i3_admission.h"
 #include "i3_host.h"
@@ -362,13 +363,19 @@ static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_o
 /* Distinct cells in `job`, as a decode from the log builds them: every
  * cell counts once, whichever heap it sits in now (a live job may share
  * cells already in persist; its replay will not). Iterative, with a fixed
- * visited set; a job too large to count counts as unbounded, so the step is
- * refused rather than accepted unreplayable. */
-#define JOB_SET_BITS 16u
+ * visited set. The limit is the log decoder's own: replay cues each entry
+ * under cue_i2_limits (cold.c decode_object), whose max_cells is
+ * I2_CUE_MAX_CELLS, and a decode builds at least one cell per distinct
+ * cell. A job above it could never replay, so it counts as unbounded and
+ * the step takes the row 200 persist stop instead of being accepted. The
+ * set is twice the limit, so it is at most half full. */
+#define JOB_CELLS_MAX ((uint32_t)I2_CUE_MAX_CELLS)
+#define JOB_SET_BITS 17u
 #define JOB_SET_SIZE (1u << JOB_SET_BITS)
-#define JOB_CELLS_MAX (JOB_SET_SIZE / 2u)
+#define JOB_STACK_MAX (2u * JOB_CELLS_MAX)
+_Static_assert(JOB_SET_SIZE >= 2u * JOB_CELLS_MAX, "job set at most half full");
 static uint32_t g_job_set[JOB_SET_SIZE];
-static uint32_t g_job_stack[JOB_CELLS_MAX];
+static uint32_t g_job_stack[JOB_STACK_MAX];
 
 static uint64_t job_cells(noun job)
 {
@@ -395,16 +402,16 @@ static uint64_t job_cells(noun job)
         }
         if (seen)
             continue;
-        if (++cells >= JOB_CELLS_MAX)
+        if (++cells > JOB_CELLS_MAX)
             return UINT64_MAX / 4;
         cell_t *c = (cell_t *)(uintptr_t)op;
         if (noun_is_cell(c->head)) {
-            if (sp >= JOB_CELLS_MAX)
+            if (sp >= JOB_STACK_MAX)
                 return UINT64_MAX / 4;
             g_job_stack[sp++] = cell_ptr(c->head);
         }
         if (noun_is_cell(c->tail)) {
-            if (sp >= JOB_CELLS_MAX)
+            if (sp >= JOB_STACK_MAX)
                 return UINT64_MAX / 4;
             g_job_stack[sp++] = cell_ptr(c->tail);
         }
