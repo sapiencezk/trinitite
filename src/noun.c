@@ -150,13 +150,13 @@ static void *heap_alloc(size_t bytes) {
         p   = scratch_ptr;
         top = (uint8_t *)(uintptr_t)HEAP_TOP;
         if (p > top || (size_t)(top - p) < bytes)
-            nock_crash("scratch exhausted");
+            nock_crash_meme("scratch exhausted");
         scratch_ptr = p + bytes;
     } else {
         p   = persist_ptr;
         top = persist_limit(persist_sel);
         if (p > top || (size_t)(top - p) < bytes)
-            nock_crash("heap exhausted");
+            nock_crash_meme("heap exhausted");
         persist_ptr = p + bytes;
     }
 #if defined(M38_D8_WAVE_B_B3)
@@ -403,7 +403,7 @@ static noun noun_copy_rec(noun n)
         if (g_copy_key[i] == op)
             return g_copy_val[i];
     }
-    nock_crash("copy map full");
+    nock_crash_meme("copy map full");
     return NOUN_ZERO;
 }
 
@@ -724,7 +724,7 @@ static size_t last_limb_bytes(uint64_t w) {
 noun make_atom(const uint64_t *limbs, uint64_t size) {
     noun out;
     if (!make_atom_checked(limbs, size, &out))
-        nock_crash("atom store exhausted/collision");
+        nock_crash_meme("atom store exhausted/collision");
     return out;
 }
 

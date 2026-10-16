@@ -50,6 +50,21 @@ extern jmp_buf nock_abort;
 
 /* ── Crash ───────────────────────────────────────────────────────────────── */
 __attribute__((noreturn)) void nock_crash(const char *msg);
+/* As nock_crash, but the bail's mote is %meme (memory exhausted), not %exit. */
+__attribute__((noreturn)) void nock_crash_meme(const char *msg);
+
+/* ── Bail mote and trace (the full node's goof = [mote tang]) ────────────── */
+/*
+ * The last crash's mote: %exit, or %meme for nock_crash_meme.  The trace is
+ * the nockvm mean stack: a list of [tag clue] for the enclosing dynamic
+ * %hand/%hunk/%lose/%mean/%spot hints, innermost first, as it stood at the
+ * crash.  nock_trace_set(0) before an eval; read it after NOCK_ABORT_CRASH.
+ * nock_mook renders a trace into a tang as nockvm's +mook does.
+ */
+uint64_t nock_crash_mote(void);
+noun     nock_trace_get(void);
+void     nock_trace_set(noun trace);
+noun     nock_mook(noun trace);
 
 /* ── Slam op budget (WP2) ────────────────────────────────────────────────── */
 /*
