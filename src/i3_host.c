@@ -39,13 +39,17 @@ static uint64_t g_persist_reserve;
 /* The 1/16 share alone is not enough (row 200 amendment): a replayed step
  * decodes its job into scratch, so its persist copy pays for every kept
  * cell of that job, while the live step may share cells already in persist
- * (the application, about 2,600 cells in the R4 set). That excess is fixed,
- * not proportional, so a small heap stopped live and then failed replay.
- * A live step therefore also keeps free the two largest jobs this boot has
- * seen, replayed or live, including its own: the application plus the
- * largest other kept input. */
-static uint64_t g_job_max1;
-static uint64_t g_job_max2;
+ * (the application, about 2,700 cells in the R4 set). Persist is a bump
+ * heap for the whole boot, so each replayed copy stays: the excess is the
+ * SUM over the large jobs, not the largest. A live step therefore also
+ * keeps free the sum of every large job this boot has seen (replayed or
+ * live, its own included) plus the largest small one. A job of fewer than
+ * I3_RESERVE_LARGE_CELLS cells is small; its excess is left to the 1/16
+ * share (R4 events are 15 cells and showed no per-entry excess). */
+#define I3_RESERVE_LARGE_CELLS 256u
+#define JOB_UNBOUNDED (UINT64_MAX / 4)
+static uint64_t g_job_large_sum;
+static uint64_t g_job_small_max;
 static int g_replaying;
 static uint8_t g_jam_blake3[32];
 
@@ -403,43 +407,45 @@ static uint64_t job_cells(noun job)
         if (seen)
             continue;
         if (++cells > JOB_CELLS_MAX)
-            return UINT64_MAX / 4;
+            return JOB_UNBOUNDED;
         cell_t *c = (cell_t *)(uintptr_t)op;
         if (noun_is_cell(c->head)) {
             if (sp >= JOB_STACK_MAX)
-                return UINT64_MAX / 4;
+                return JOB_UNBOUNDED;
             g_job_stack[sp++] = cell_ptr(c->head);
         }
         if (noun_is_cell(c->tail)) {
             if (sp >= JOB_STACK_MAX)
-                return UINT64_MAX / 4;
+                return JOB_UNBOUNDED;
             g_job_stack[sp++] = cell_ptr(c->tail);
         }
     }
     return cells;
 }
 
+static uint64_t add_sat(uint64_t a, uint64_t b)
+{
+    return (a >= JOB_UNBOUNDED || b >= JOB_UNBOUNDED || a + b >= JOB_UNBOUNDED)
+        ? JOB_UNBOUNDED : a + b;
+}
+
 static void job_seen(uint64_t cells)
 {
-    if (cells > g_job_max1) {
-        g_job_max2 = g_job_max1;
-        g_job_max1 = cells;
-    } else if (cells > g_job_max2) {
-        g_job_max2 = cells;
-    }
+    if (cells >= I3_RESERVE_LARGE_CELLS)
+        g_job_large_sum = add_sat(g_job_large_sum, cells);
+    else if (cells > g_job_small_max)
+        g_job_small_max = cells;
 }
 
 /* Reserve a live step must leave, counting `cells` for its own job. */
 static uint64_t live_reserve(uint64_t cells)
 {
-    uint64_t m1 = g_job_max1, m2 = g_job_max2, kept;
-    if (cells > m1) {
-        m2 = m1;
-        m1 = cells;
-    } else if (cells > m2) {
-        m2 = cells;
-    }
-    kept = m1 + m2;
+    uint64_t sum = g_job_large_sum, small = g_job_small_max, kept;
+    if (cells >= I3_RESERVE_LARGE_CELLS)
+        sum = add_sat(sum, cells);
+    else if (cells > small)
+        small = cells;
+    kept = add_sat(sum, small);
     return kept > g_persist_reserve ? kept : g_persist_reserve;
 }
 
@@ -993,8 +999,8 @@ void i3_host_boot(void)
     g_event_num = 1;
     g_stop = 0;
     g_replaying = 0;
-    g_job_max1 = 0;
-    g_job_max2 = 0;
+    g_job_large_sum = 0;
+    g_job_small_max = 0;
     uart_puts("I3H start\r\n");
     fast_reset();
 
