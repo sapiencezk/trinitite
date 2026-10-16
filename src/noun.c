@@ -935,6 +935,12 @@ int noun_tx_active(void)
     return noun_tx_live;
 }
 
+uint64_t heap_persist_free_cells(void)
+{
+    uint8_t *top = persist_limit(persist_sel);
+    return persist_ptr >= top ? 0 : (uint64_t)(top - persist_ptr) / sizeof(cell_t);
+}
+
 uint64_t heap_cells_used(int mode)
 {
     uint8_t *base;

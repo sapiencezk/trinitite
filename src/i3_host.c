@@ -27,6 +27,13 @@ static uint64_t g_jam_len;
 /* Decision L2 (rows 141, 198): once set, the application is stopped and
  * every later poke is refused until the next boot. */
 static const char *g_stop;
+/* Row 200 persist stop: a live step must leave this many persist cells
+ * free, 1/16 of what was free when replay began (i3_host_boot). Replaying
+ * a step keeps a few more cells than the live step did (its job was
+ * decoded from the log, not shared with input already in persist), so the
+ * reserve is what lets the next boot replay every entry the live boot
+ * appended before it stopped. */
+static uint64_t g_persist_reserve;
 static int g_replaying;
 static uint8_t g_jam_blake3[32];
 
@@ -328,6 +335,21 @@ static int install_sample(noun template, noun sample, noun *out)
  * and g_kernel / g_event_num never move, so state never points into
  * scratch. The cells of a prepared copy whose append then fails are left
  * unreferenced in persist. The heap mode is restored for the caller. */
+static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_out);
+
+/* Live step: prepare the persist copy and keep the reserve, or refuse. */
+static int persist_prepare_live(noun kernel, i3_host_result_t *out, noun *installed_out)
+{
+    if (!persist_prepare(kernel, out, installed_out))
+        return 0;
+    if (heap_persist_free_cells() < g_persist_reserve) {
+        if (out)
+            out->persist_ok = 0;
+        return 0;
+    }
+    return 1;
+}
+
 static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_out)
 {
     noun sample, copy, installed;
@@ -598,7 +620,7 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
         noun next;
-        if (!persist_prepare(c->tail, out, &next)) {
+        if (!persist_prepare_live(c->tail, out, &next)) {
             host_stop("persist");
             nock_budget_finish();
             return 0;
@@ -666,7 +688,7 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
         /* Row 200 persist stop: persist before append, so a failed persist
          * appends nothing, commits nothing, and stops the application
          * (row 141 trip, as a crash past %crud). */
-        if (!persist_prepare(c->tail, out, &next)) {
+        if (!persist_prepare_live(c->tail, out, &next)) {
             host_stop("persist");
             nock_budget_finish();
             return 0;
@@ -948,6 +970,7 @@ void i3_host_boot(void)
     put_u64(I3_PERSIST_HEADROOM_CELLS);
     uart_puts("\r\n");
 #endif
+    g_persist_reserve = heap_persist_free_cells() / 16;
     if (!replay_log()) {
         uart_puts("I3H terminal=replay-fail\r\n");
         g_ready = 0;
