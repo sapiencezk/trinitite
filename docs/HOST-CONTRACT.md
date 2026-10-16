@@ -200,6 +200,8 @@ Hard clear of tarms: after a structural crash, re-arm periods from Nock state on
 
 I3 `%crud` carries the bail's goof `[mote tang]` as the full node does; a trap `%mean` frame renders as `"####"` on the lite node (the full node's own fallback for an unrenderable trap; Trinitite has no printing jets).
 
+I3 input log (1499kernel decision 200): after each accepted step the host appends one entry with `cold_log`, the jam of the job `[event_num ovum]` (for a crash, the `%crud` ovo), the same entry as the full and web nodes. Nothing is appended past `%crud`. Boot replays every entry through the same slam, checking each event number, then installs the result. A crash past `%crud`, a failed append, and a host abort (ops, cells, stack) append nothing and stop the application: later pokes are refused, and the next boot, after replay, applies a journaled `%manage` STOP once. A wall abort would take the same path, but no wall check is installed on the I3 image (`nock_wall_check_set` is called only from `kernel.c`), so it cannot fire. Entries are written to the cold-store media; on semihost/RAM this is volatile logical acceptance, and rpi4-sd per-step appends are unmeasured; no durability claim (§5.2, and `cold.h` on `COLD_DEPLOY_COMMITTED`). Under `COLD_MEDIA=semihost` each append rewrites `build/cold.img`, so the run needs `-semihosting`.
+
 ### 5.1 Noun heap / atom store ceilings
 
 | Region | Range | On exhaust |

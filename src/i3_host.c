@@ -3,6 +3,7 @@
 
 #include "blake3.h"
 #include "bounded_cue.h"
+#include "cold.h"
 #include "i2_admission_metrics.h"
 #include "i3_admission.h"
 #include "i3_host.h"
@@ -23,6 +24,10 @@ static noun g_peek_fol;
 static uint64_t g_event_num = 1;
 static int g_ready;
 static uint64_t g_jam_len;
+/* Decision L2 (rows 141, 198): once set, the application is stopped and
+ * every later poke is refused until the next boot. */
+static const char *g_stop;
+static int g_replaying;
 static uint8_t g_jam_blake3[32];
 
 static uint64_t cntvct(void)
@@ -244,6 +249,61 @@ static void fill_eval(i3_host_result_t *out, int jumped, uint64_t ticks)
     out->stack = nock_eval_stack_peak();
     out->ticks = ticks;
     out->abort_reason = nock_budget_abort_reason();
+}
+
+/* Decision L2: the input log on the cold-store media. One entry per accepted
+ * step, appended only after the step succeeded: the jam of the job the step
+ * ran, `[event_num ovum]`, or for a crash the `%crud` ovo carrying the real
+ * goof, as the full node's `event-log.sqlite3` and the web node's log
+ * (decision 197). Entries are written to the cold-store media; on
+ * semihost/RAM this is volatile logical acceptance, and rpi4-sd per-step
+ * appends are unmeasured; no durability claim. */
+static void nv_flush(void)
+{
+    if (cold_nv_enabled())
+        (void)cold_nv_flush();
+}
+
+static int trip_noun(uint64_t num, noun *out)
+{
+    return nest(tas("i3-trip"), direct(num), out);
+}
+
+/* Row 141 stop: no entry is appended for the failed step. The trip is
+ * recorded so the next boot, after replay, applies a journaled %manage STOP
+ * before any input. The record names the event that tripped, so once that
+ * STOP is logged the event number moves on and a later boot is not stopped
+ * again: one trip stops one boot. */
+static void host_stop(const char *reason)
+{
+    noun trip;
+    if (g_stop)
+        return;
+    g_stop = reason;
+    uart_puts("I3H stop reason=");
+    uart_puts(reason);
+    uart_puts(" event=");
+    put_u64(g_event_num);
+    uart_puts("\r\n");
+    if (!g_replaying && trip_noun(g_event_num, &trip)) {
+        (void)cold_store(trip);
+        nv_flush();
+    }
+}
+
+/* Append before the step is committed: on failure g_kernel and g_event_num
+ * are unchanged, the step is refused with no effects, and the trip is keyed
+ * at this event so the next boot replays N entries and then STOPs. */
+static int log_append(noun job)
+{
+    if (g_replaying)
+        return 1;
+    if (cold_log(job) != 0) {
+        host_stop("log");
+        return 0;
+    }
+    nv_flush();
+    return 1;
 }
 
 static int install_sample(noun template, noun sample, noun *out)
@@ -512,11 +572,19 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
     t1 = cntvct();
     fill_eval(out, jumped, t1 - t0);
     if (jumped != 0) {
+        /* A crash past %crud, or a host abort in the %crud step: no entry,
+         * and the application stops (rows 141, 198). */
+        host_stop(jumped == NOCK_ABORT_CRASH
+                  ? "crud" : i3_host_abort_name(jumped, nock_budget_abort_reason()));
         nock_budget_finish();
         return 0;
     }
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
+        if (!log_append(ovo)) {
+            nock_budget_finish();
+            return 0;
+        }
         if (out) {
             out->parse = 1;
             out->effects = c->head;
@@ -528,6 +596,7 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
         nock_budget_finish();
         return 1;
     }
+    host_stop("crud");
     nock_budget_finish();
     return 0;
 }
@@ -543,6 +612,12 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
             out->abort_reason = 0;
         return 0;
     }
+    if (g_stop) {
+        uart_puts("I3H refused stopped=");
+        uart_puts(g_stop);
+        uart_puts("\r\n");
+        return 0;
+    }
     if (!ovum_job(g_event_num, cause, &job) || !nest(g_kernel, job, &subject))
         return 0;
     host_budget();
@@ -553,14 +628,23 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
     if (jumped != 0) {
         /* A bail propagates here from the de-moled fast
          * path (NOCK_ABORT_CRASH). Re-poke through ~[/arvo]; a budget abort
-         * (NOCK_ABORT_BUDGET) is not a bail and gets no %crud re-entry. */
+         * (NOCK_ABORT_BUDGET) is not a bail and gets no %crud re-entry.
+         * Decision L2: each host abort (ops, wall, cells, stack) is a
+         * host-set backstop like web fuel, so it stops the application
+         * (row 141) with no entry. Kernel profile-budget refusals are
+         * ordinary replies and never reach here. */
         if (jumped == NOCK_ABORT_CRASH)
             return crud_repoke(cause, nock_crash_mote(), nock_trace_get(), out);
+        host_stop(i3_host_abort_name(jumped, nock_budget_abort_reason()));
         nock_budget_finish();
         return 0;
     }
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
+        if (!log_append(job)) {
+            nock_budget_finish();
+            return 0;
+        }
         if (out) {
             out->parse = 1;
             out->effects = c->head;
@@ -631,6 +715,87 @@ static void halt(void)
         __asm__ volatile("wfe");
 }
 
+static int replay_fail(uint64_t i, const char *why)
+{
+    uart_puts("I3H replay fail entry=");
+    put_u64(i);
+    uart_puts(" reason=");
+    uart_puts(why);
+    uart_puts("\r\n");
+    return 0;
+}
+
+/* Boot = core + replay of every logged job through the same slam, as the
+ * full node's replay (form.rs:2692-2776): each job runs as logged (a crash
+ * entry is the %crud ovo itself), its event number must be the next one,
+ * and any failure stops the boot. Replay runs without the op budget
+ * (decision 198); the cell and stack limits stay. */
+static int replay_log(void)
+{
+    uint64_t n = cold_log_len(), i;
+    i3_host_result_t r;
+    uart_puts("I3H replay entries=");
+    put_u64(n);
+    uart_puts("\r\n");
+    g_replaying = 1;
+    for (i = 0; i < n; i++) {
+        noun job, subject, product;
+        int jumped;
+        heap_set_mode(HEAP_MODE_PERSIST);
+        job = cold_log_at(i);
+        if (!noun_is_cell(job))
+            return replay_fail(i, "read");
+        cell_t *jc = (cell_t *)(uintptr_t)cell_ptr(job);
+        if (!noun_is_atom(jc->head) || direct_val(jc->head) != g_event_num)
+            return replay_fail(i, "event-num");
+        heap_set_mode(HEAP_MODE_SCRATCH);
+        if (!nest(g_kernel, job, &subject))
+            return replay_fail(i, "alloc");
+        nock_budget_set_limits(0, I3_SLAM_MAX_CELLS);
+        nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
+        jumped = host_nock(subject, g_poke_fol, &product);
+        nock_budget_finish();
+        if (jumped != 0 || !noun_is_cell(product))
+            return replay_fail(i, "crashed");
+        g_kernel = ((cell_t *)(uintptr_t)cell_ptr(product))->tail;
+        g_event_num++;
+        clear_result(&r);
+        if (!i3_host_persist(&r))
+            return replay_fail(i, "persist");
+        heap_scratch_reset();
+    }
+    g_replaying = 0;
+    uart_puts("I3H replay done event=");
+    put_u64(g_event_num);
+    uart_puts("\r\n");
+    return 1;
+}
+
+/* Row 141 after replay: a trip recorded at the last run stops the
+ * application with a journaled %manage STOP before any input, the same
+ * cause as the web node's stop_after_trip: [%turn [0 %manage 3 0 0] 0 0 0]. */
+static void stop_after_trip(void)
+{
+    noun trip, manage, local, cause;
+    noun m_xs[4], c_xs[5];
+    i3_host_result_t r;
+    heap_set_mode(HEAP_MODE_PERSIST);
+    if (!trip_noun(g_event_num, &trip) || !noun_is_cell(cold_load(cold_jam_hash(trip))))
+        return;
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    m_xs[0] = tas("manage"); m_xs[1] = direct(3); m_xs[2] = NOUN_ZERO; m_xs[3] = NOUN_ZERO;
+    if (!tuple(m_xs, 4, &manage) || !nest(NOUN_ZERO, manage, &local))
+        return;
+    c_xs[0] = tas("turn"); c_xs[1] = local;
+    c_xs[2] = NOUN_ZERO; c_xs[3] = NOUN_ZERO; c_xs[4] = NOUN_ZERO;
+    if (!tuple(c_xs, 5, &cause))
+        return;
+    uart_puts("I3H trip-stop ok=");
+    uart_puts(i3_host_poke(cause, &r) ? "yes" : "no");
+    uart_puts("\r\n");
+    heap_scratch_reset();
+}
+
 void i3_host_boot(void)
 {
     const uint8_t *jam;
@@ -645,6 +810,8 @@ void i3_host_boot(void)
 
     g_ready = 0;
     g_event_num = 1;
+    g_stop = 0;
+    g_replaying = 0;
     uart_puts("I3H start\r\n");
     fast_reset();
 
@@ -739,6 +906,15 @@ void i3_host_boot(void)
         halt();
     }
 
+#if defined(COLD_MEDIA_SEMIHOST)
+    cold_nv_arm();
+#endif
+    if (!replay_log()) {
+        uart_puts("I3H terminal=replay-fail\r\n");
+        g_ready = 0;
+        halt();
+    }
+    stop_after_trip();
     uart_puts("I3H ready\r\n");
 #if defined(I3_L1_PROBE)
     i3_l1_probe_boot();
