@@ -8,8 +8,8 @@
 #include "i3_host.h"
 #if defined(I3_L1_PROBE)
 #include "i3_l1_probe.h"
-#include "jam.h"
 #endif
+#include "jam.h"
 #include "nock.h"
 #include "setjmp.h"
 #include "sha256.h"
