@@ -475,6 +475,13 @@ $(error I3_PERSIST_HEADROOM_CELLS requires I3_HOST=1)
 endif
 CFLAGS += -DI3_PERSIST_HEADROOM_CELLS=$(I3_PERSIST_HEADROOM_CELLS)
 endif
+# Row 212 PR 1a: lite checkpoint writer every K accepted entries (default off).
+ifneq ($(I3_CHECKPOINT_EVERY),)
+ifneq ($(I3_HOST),1)
+$(error I3_CHECKPOINT_EVERY requires I3_HOST=1)
+endif
+CFLAGS += -DI3_CHECKPOINT_EVERY=$(I3_CHECKPOINT_EVERY)
+endif
 ifeq ($(I3_UNJETTED),1)
 ifneq ($(I3_L1_PROBE),1)
 $(error I3_UNJETTED=1 requires I3_L1_PROBE=1)
@@ -703,6 +710,9 @@ CONFIG_KEY := $(CONFIG_KEY)-i3l1
 endif
 ifeq ($(I3_UNJETTED),1)
 CONFIG_KEY := $(CONFIG_KEY)-i3unjet
+endif
+ifneq ($(I3_CHECKPOINT_EVERY),)
+CONFIG_KEY := $(CONFIG_KEY)-i3ck$(I3_CHECKPOINT_EVERY)
 endif
 ifneq ($(I3_PERSIST_HEADROOM_CELLS),)
 CONFIG_KEY := $(CONFIG_KEY)-i3ph$(I3_PERSIST_HEADROOM_CELLS)

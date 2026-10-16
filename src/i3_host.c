@@ -688,6 +688,112 @@ static void put_goof(noun goof)
     uart_puts("\r\n");
 }
 
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+/* Row 212 PR 1a: lite checkpoint writer, flag-gated (I3_CHECKPOINT_EVERY=K,
+ * default off; with the flag off none of this is compiled). After every K
+ * accepted live steps the host writes the kernel state (the persisted
+ * sample, axis 6) to cold media, then a header record
+ *   [%i3-ckpt N state-id sha256(jam state) blake3(kernel jam)]
+ * and verifies both by reading back and re-hashing. N is the last event the
+ * state follows. This PR only writes: boot does not read a checkpoint yet,
+ * and nothing is rotated or dropped (rotation stays suspended until the boot
+ * path lands). A checkpoint that cannot be written or verified is skipped
+ * and logged; the step itself is already committed and is not affected. The
+ * host hashes and stores bytes and interprets nothing (decision 164). */
+static int ckpt_digest(noun state, uint8_t out[32], uint64_t *bytes)
+{
+    const uint8_t *p;
+    uint64_t n;
+    if (jam_encode_bytes_checked(state, &p, &n) != 0)
+        return 0;
+    sha256_hash(p, n, out);
+    if (bytes)
+        *bytes = n;
+    return 1;
+}
+
+static int digest_eq(const uint8_t a[32], const uint8_t b[32])
+{
+    uint32_t i;
+    uint8_t d = 0;
+    for (i = 0; i < 32; i++)
+        d |= (uint8_t)(a[i] ^ b[i]);
+    return d == 0;
+}
+
+static int bytes_atom(const uint8_t b[32], noun *out)
+{
+    uint64_t limbs[4] = {0, 0, 0, 0};
+    uint32_t i;
+    for (i = 0; i < 32; i++)
+        limbs[i / 8] |= (uint64_t)b[i] << (8 * (i % 8));
+    return make_atom_checked(limbs, 4, out);
+}
+
+static void ckpt_skip(uint64_t n, const char *why)
+{
+    uart_puts("I3H ckpt skip event=");
+    put_u64(n);
+    uart_puts(" reason=");
+    uart_puts(why);
+    uart_puts("\r\n");
+}
+
+static void ckpt_maybe_write(void)
+{
+    noun state, loaded, hdr, xs[5];
+    uint8_t dig[32], dig2[32];
+    uint64_t n = g_event_num - 1, bytes = 0, sid, hid;
+    int mode = heap_get_mode();
+    const char *why = 0;
+    if (g_replaying || g_stop || n == 0 || n % (uint64_t)I3_CHECKPOINT_EVERY)
+        return;
+    state = slot(direct(6), g_kernel);
+    /* Conservative stand-in for the 128k-cell cue bound: the job counter
+     * refuses past I2_CUE_MAX_CELLS (65,536) distinct cells. */
+    if (job_cells(state) >= JOB_UNBOUNDED) {
+        ckpt_skip(n, "cells");
+        return;
+    }
+    if (jam_size_checked(state, JAM_MAX_BYTES, &bytes) != 0) {
+        ckpt_skip(n, "jam-size");
+        return;
+    }
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    if (!ckpt_digest(state, dig, &bytes))
+        why = "jam";
+    else if (!(sid = cold_store(state)))
+        why = "store-state";
+    else if (!noun_is_cell(loaded = cold_load(sid)) || !ckpt_digest(loaded, dig2, 0)
+             || !digest_eq(dig, dig2))
+        why = "verify-state";
+    else {
+        xs[0] = tas("i3-ckpt");
+        xs[1] = direct(n);
+        xs[2] = direct(sid);
+        if (!bytes_atom(dig, &xs[3]) || !bytes_atom(g_jam_blake3, &xs[4])
+            || !tuple(xs, 5, &hdr))
+            why = "alloc";
+        else if (!(hid = cold_store(hdr)) || !noun_is_cell(cold_load(hid)))
+            why = "verify-header";
+    }
+    if (!why)
+        nv_flush();
+    heap_set_mode(mode);
+    if (why) {
+        ckpt_skip(n, why);
+        return;
+    }
+    uart_puts("I3H ckpt ok event=");
+    put_u64(n);
+    uart_puts(" bytes=");
+    put_u64(bytes);
+    uart_puts(" sha256=");
+    put_hex(dig, 32);
+    uart_puts("\r\n");
+}
+#endif
+
 static int crud_repoke(noun cause, uint64_t mote, noun trace,
                        i3_host_result_t *out)
 {
@@ -748,6 +854,9 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
         g_kernel = next;
         g_event_num++;
         nock_budget_finish();
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+        ckpt_maybe_write();
+#endif
         return 1;
     }
     host_stop("crud");
@@ -816,6 +925,9 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
         g_kernel = next;
         g_event_num++;
         nock_budget_finish();
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+        ckpt_maybe_write();
+#endif
         return 1;
     }
     nock_budget_finish();
