@@ -818,6 +818,45 @@ noun cold_log_at(uint64_t index)
     return NOUN_ZERO;
 }
 
+/* Sequential log read for boot replay. *cursor starts at 0 and is a media
+ * offset into the selected superblock's data region, owned by the caller and
+ * valid for one boot only (nothing outlives it). Each call validates every
+ * object from max(*cursor, COLD_DATA0) once, in media order, skips the
+ * non-LOG objects, decodes the first LOG object into SCRATCH (the caller
+ * resets scratch after the step), and advances *cursor to that object's
+ * aligned end. NOUN_ZERO at data_head or on any validate/cue error, with
+ * g_last_result set as cold_log_at does. Replaces cold_log_at's per-entry
+ * rescan from COLD_DATA0 in replay, so a boot reads the log in O(bytes). */
+noun cold_log_next(uint64_t *cursor)
+{
+    cold_super_t s;
+    if (!cursor || select_super(&s, 0) != COLD_RESULT_VALID)
+        return NOUN_ZERO;
+    uint64_t off = *cursor < COLD_DATA0 ? COLD_DATA0 : *cursor;
+    while (off < s.data_head) {
+        cold_obj_hdr_t h;
+        uint64_t next;
+        cold_result_t r = object_validate(&s, off, 0, 0, &h);
+        if (r != COLD_RESULT_VALID) {
+            g_last_result = r;
+            return NOUN_ZERO;
+        }
+        if (!align8_checked(off + sizeof h + h.len, &next))
+            break;
+        if (h.kind == KIND_LOG) {
+            noun out;
+            if (decode_object(&s, off, KIND_LOG,
+                              HEAP_MODE_SCRATCH, &out) != 0)
+                return NOUN_ZERO;
+            noun_tx_commit();
+            *cursor = next;
+            return out;
+        }
+        off = next;
+    }
+    return NOUN_ZERO;
+}
+
 int cold_snap_save(noun root)
 {
     const uint8_t *bytes;

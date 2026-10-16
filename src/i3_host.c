@@ -732,7 +732,7 @@ static int replay_fail(uint64_t i, const char *why)
  * (decision 198); the cell and stack limits stay. */
 static int replay_log(void)
 {
-    uint64_t n = cold_log_len(), i;
+    uint64_t n = cold_log_len(), i, cur = 0;
     i3_host_result_t r;
     uart_puts("I3H replay entries=");
     put_u64(n);
@@ -741,14 +741,18 @@ static int replay_log(void)
     for (i = 0; i < n; i++) {
         noun job, subject, product;
         int jumped;
-        heap_set_mode(HEAP_MODE_PERSIST);
-        job = cold_log_at(i);
+        /* The job decodes into SCRATCH, as a live step's job does, and is
+         * dropped by heap_scratch_reset below; i3_host_persist copies only
+         * what the new state keeps. Decoding it into the persist heap left
+         * every replayed job there for the whole boot, so replay ran out of
+         * persist (reason=persist) before live use did. */
+        heap_set_mode(HEAP_MODE_SCRATCH);
+        job = cold_log_next(&cur);
         if (!noun_is_cell(job))
             return replay_fail(i, "read");
         cell_t *jc = (cell_t *)(uintptr_t)cell_ptr(job);
         if (!noun_is_atom(jc->head) || direct_val(jc->head) != g_event_num)
             return replay_fail(i, "event-num");
-        heap_set_mode(HEAP_MODE_SCRATCH);
         if (!nest(g_kernel, job, &subject))
             return replay_fail(i, "alloc");
         nock_budget_set_limits(0, I3_SLAM_MAX_CELLS);
