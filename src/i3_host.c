@@ -27,6 +27,7 @@ static uint64_t g_jam_len;
 /* Decision L2 (rows 141, 198): once set, the application is stopped and
  * every later poke is refused until the next boot. */
 static const char *g_stop;
+static const char STOP_PERSIST[] = "persist";
 /* Row 200 persist stop: a live step must leave this many persist cells
  * free, 1/16 of what was free when replay began (i3_host_boot). Replaying
  * a step keeps a few more cells than the live step did (its job was
@@ -276,11 +277,20 @@ static int trip_noun(uint64_t num, noun *out)
     return nest(tas("i3-trip"), direct(num), out);
 }
 
+/* Row 200 persist stop: its own record, so it is never confused with a row
+ * 141 trip. */
+static int persist_trip_noun(uint64_t num, noun *out)
+{
+    return nest(tas("i3-trip-persist"), direct(num), out);
+}
+
 /* Row 141 stop: no entry is appended for the failed step. The trip is
  * recorded so the next boot, after replay, applies a journaled %manage STOP
  * before any input. The record names the event that tripped, so once that
  * STOP is logged the event number moves on and a later boot is not stopped
- * again: one trip stops one boot. */
+ * again: one trip stops one boot. A persist stop (row 200) writes a persist
+ * trip instead: no STOP is ever logged for it, so the event number never
+ * moves and every later boot finds it and refuses input (stop_after_trip). */
 static void host_stop(const char *reason)
 {
     noun trip;
@@ -292,7 +302,9 @@ static void host_stop(const char *reason)
     uart_puts(" event=");
     put_u64(g_event_num);
     uart_puts("\r\n");
-    if (!g_replaying && trip_noun(g_event_num, &trip)) {
+    if (!g_replaying && (reason == STOP_PERSIST
+                         ? persist_trip_noun(g_event_num, &trip)
+                         : trip_noun(g_event_num, &trip))) {
         (void)cold_store(trip);
         nv_flush();
     }
@@ -621,7 +633,7 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
         noun next;
         if (!persist_prepare_live(c->tail, out, &next)) {
-            host_stop("persist");
+            host_stop(STOP_PERSIST);
             nock_budget_finish();
             return 0;
         }
@@ -689,7 +701,7 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
          * appends nothing, commits nothing, and stops the application
          * (row 141 trip, as a crash past %crud). */
         if (!persist_prepare_live(c->tail, out, &next)) {
-            host_stop("persist");
+            host_stop(STOP_PERSIST);
             nock_budget_finish();
             return 0;
         }
@@ -834,6 +846,15 @@ static void stop_after_trip(void)
     noun trip, manage, local, cause;
     noun m_xs[4], c_xs[5];
     i3_host_result_t r;
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    if (persist_trip_noun(g_event_num, &trip) && noun_is_cell(cold_load(cold_jam_hash(trip)))) {
+        /* Row 200: a persist-stopped node stays stopped on every boot, logs
+         * nothing, and does not rewrite its trip. */
+        g_stop = STOP_PERSIST;
+        uart_puts("I3H trip-stop reason=persist\r\n");
+        heap_scratch_reset();
+        return;
+    }
     heap_set_mode(HEAP_MODE_PERSIST);
     if (!trip_noun(g_event_num, &trip) || !noun_is_cell(cold_load(cold_jam_hash(trip))))
         return;
