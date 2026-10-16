@@ -39,17 +39,14 @@ static uint64_t g_persist_reserve;
 /* The 1/16 share alone is not enough (row 200 amendment): a replayed step
  * decodes its job into scratch, so its persist copy pays for every kept
  * cell of that job, while the live step may share cells already in persist
- * (the application, about 2,700 cells in the R4 set). Persist is a bump
- * heap for the whole boot, so each replayed copy stays: the excess is the
- * SUM over the large jobs, not the largest. A live step therefore also
- * keeps free the sum of every large job this boot has seen (replayed or
- * live, its own included) plus the largest small one. A job of fewer than
- * I3_RESERVE_LARGE_CELLS cells is small; its excess is left to the 1/16
- * share (R4 events are 15 cells and showed no per-entry excess). */
-#define I3_RESERVE_LARGE_CELLS 256u
+ * (the application, about 2,760 cells in the R4 set). Persist is a bump
+ * heap for the whole boot, so each replayed copy stays: the excess is a
+ * SUM over jobs. The host cannot tell which cells of a job the kernel state
+ * keeps, so it reserves the upper bound: the sum of the distinct cells of
+ * every job this boot has seen (replayed or live, the step's own included).
+ * This grows with every step, including inputs the state does not keep. */
 #define JOB_UNBOUNDED (UINT64_MAX / 4)
-static uint64_t g_job_large_sum;
-static uint64_t g_job_small_max;
+static uint64_t g_job_sum;
 static int g_replaying;
 static uint8_t g_jam_blake3[32];
 
@@ -431,21 +428,13 @@ static uint64_t add_sat(uint64_t a, uint64_t b)
 
 static void job_seen(uint64_t cells)
 {
-    if (cells >= I3_RESERVE_LARGE_CELLS)
-        g_job_large_sum = add_sat(g_job_large_sum, cells);
-    else if (cells > g_job_small_max)
-        g_job_small_max = cells;
+    g_job_sum = add_sat(g_job_sum, cells);
 }
 
 /* Reserve a live step must leave, counting `cells` for its own job. */
 static uint64_t live_reserve(uint64_t cells)
 {
-    uint64_t sum = g_job_large_sum, small = g_job_small_max, kept;
-    if (cells >= I3_RESERVE_LARGE_CELLS)
-        sum = add_sat(sum, cells);
-    else if (cells > small)
-        small = cells;
-    kept = add_sat(sum, small);
+    uint64_t kept = add_sat(g_job_sum, cells);
     return kept > g_persist_reserve ? kept : g_persist_reserve;
 }
 
@@ -999,8 +988,7 @@ void i3_host_boot(void)
     g_event_num = 1;
     g_stop = 0;
     g_replaying = 0;
-    g_job_large_sum = 0;
-    g_job_small_max = 0;
+    g_job_sum = 0;
     uart_puts("I3H start\r\n");
     fast_reset();
 
