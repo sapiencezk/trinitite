@@ -56,39 +56,57 @@ def _mat_bits(i):
 # ── jam: noun → atom ──────────────────────────────────────────────────────────
 
 def jam(noun):
-    """Encode a noun as an integer atom (Urbit jam serialization)."""
+    """Encode a noun as an integer atom, bit for bit Hoon's ++jam.
+
+    Subtrees are remembered by value, not by object identity: an equal
+    subtree seen before is a back-reference whether or not the Python
+    objects are shared. An atom seen before is encoded again when it is no
+    longer than its back-reference (``(lte (met 0 a) (met 0 u.p))``), and
+    only its first position is remembered. Iterative, so deep nouns do not
+    exhaust the stack; subtree ids are assigned bottom-up, so it is linear.
+    """
+    ids = {}        # id(object) -> structural id (shared objects only once)
+    keyed = {}      # ('a', value) / ('c', head id, tail id) -> structural id
+    stack = [(noun, False)]
+    while stack:
+        n, done = stack.pop()
+        if deep(n):
+            if id(n) in ids:
+                continue
+            if not done:
+                stack.append((n, True)); stack.append((n[1], False)); stack.append((n[0], False))
+                continue
+            key = ('c', ids[id(n[0])], ids[id(n[1])])
+        else:
+            key = ('a', n)
+        ids[id(n)] = keyed.setdefault(key, len(keyed))
+
     buf  = []
-    refs = {}   # ('a', value) for atoms, id(cell) for cells → bit position
+    seen = {}       # structural id -> first bit position
 
     def back(pos):
         buf.append(1); buf.append(1)
         buf.extend(_mat_bits(pos))
 
-    def encode(n):
-        pos = len(buf)
+    work = [noun]
+    while work:
+        n = work.pop()
+        k = ids[id(n)] if deep(n) else keyed[('a', n)]
+        if k in seen:
+            ref = seen[k]
+            if not deep(n) and n.bit_length() <= ref.bit_length():
+                buf.append(0); buf.extend(_mat_bits(n))
+            else:
+                back(ref)
+            continue
+        seen[k] = len(buf)
         if deep(n):
-            key = id(n)
-            if key in refs:
-                back(refs[key]); return
-            refs[key] = pos
             buf.append(1); buf.append(0)        # tag 01 = cell
-            encode(n[0]); encode(n[1])
+            work.append(n[1]); work.append(n[0])
         else:
-            key = ('a', n)
-            if key in refs:
-                dupe = refs[key]
-                # choose shorter: direct atom encoding vs back-reference
-                if n.bit_length() < dupe.bit_length():
-                    refs[key] = pos
-                    buf.append(0); buf.extend(_mat_bits(n))
-                else:
-                    back(dupe)
-                return
-            refs[key] = pos
             buf.append(0)                        # tag 0 = atom
             buf.extend(_mat_bits(n))
 
-    encode(noun)
     result = 0
     for i, b in enumerate(buf):
         if b:
@@ -189,6 +207,9 @@ def _run_tests():
     # jam canonical values (from pynoun doctests)
     check('jam(0)',          jam(0),      2)
     check('jam([0 0])',      jam((0, 0)), 41)
+    # ++jam backrefs by value: unshared equal subtrees jam like shared ones
+    check('jam unshared = shared', jam(((1, 2), (1, 2))), jam((lambda c: (c, c))((1, 2))))
+    check('jam [[1 2] [1 2]]', jam(((1, 2), (1, 2))), 4835525)  # Hoon ++jam
 
     # round-trips
     for n in [0, 1, 42, 255, 2**32, (0, 0), (1, (2, 3)), ((1, 2), (3, 4))]:
