@@ -909,6 +909,12 @@ void i3_host_boot(void)
 #if defined(COLD_MEDIA_SEMIHOST)
     cold_nv_arm();
 #endif
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+    heap_persist_cap_arm();
+    uart_puts("I3H persist_headroom cells=");
+    put_u64(I3_PERSIST_HEADROOM_CELLS);
+    uart_puts("\r\n");
+#endif
     if (!replay_log()) {
         uart_puts("I3H terminal=replay-fail\r\n");
         g_ready = 0;

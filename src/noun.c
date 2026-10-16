@@ -64,8 +64,25 @@ static uint8_t *persist_base(int sel)
     return (uint8_t *)(uintptr_t)(HEAP_BASE + (uint64_t)sel * HEAP_PERSIST_HALF);
 }
 
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+/* Test knob (I3_PERSIST_HEADROOM_CELLS=<cells>, off by default): cap the live
+ * persist half at <cells> past the bump pointer when the cap is armed, so a
+ * short lite log reaches the persist ceiling that a full half reaches only
+ * past ~3400 steps. Armed by i3_host_boot before replay, and again by the
+ * L1 probe after it cues its plan. */
+static uint8_t *persist_cap;
+void heap_persist_cap_arm(void)
+{
+    persist_cap = persist_ptr + (uint64_t)(I3_PERSIST_HEADROOM_CELLS) * sizeof(cell_t);
+}
+#endif
+
 static uint8_t *persist_limit(int sel)
 {
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+    if (persist_cap && sel == persist_sel && persist_cap < persist_base(sel) + HEAP_PERSIST_HALF)
+        return persist_cap;
+#endif
     return persist_base(sel) + HEAP_PERSIST_HALF;
 }
 

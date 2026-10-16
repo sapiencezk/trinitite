@@ -561,6 +561,11 @@ void i3_l1_probe_boot(void)
             return;
         }
     }
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+    /* The plan is test input, not node state: re-arm past it so a write
+     * boot and a replay boot get the same headroom for their steps. */
+    heap_persist_cap_arm();
+#endif
 
     if (plan_has_call(plan)) {
         heap_set_mode(HEAP_MODE_PERSIST);

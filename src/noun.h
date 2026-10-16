@@ -82,6 +82,9 @@ int   heap_get_mode(void);
 void  heap_scratch_reset(void);    /* bump scratch ptr to HEAP_SCRATCH_BASE */
 uint64_t heap_scratch_mark(void);  /* byte offset for a nested scratch owner */
 int   heap_scratch_rewind(uint64_t mark);
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+void  heap_persist_cap_arm(void);  /* test knob: cap persist growth from here */
+#endif
 void  heap_persist_reset(void);    /* bump current persist semispace to its base */
 void  heap_persist_flip(void);     /* switch to other semispace (empty); for compact */
 /* Transactional candidate semispace.  A failed pre-promotion copy restores
