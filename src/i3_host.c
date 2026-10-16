@@ -767,6 +767,8 @@ int i3_host_peek(noun path, i3_host_result_t *out)
 int i3_host_state_hash(uint64_t *event, uint8_t hash[32], i3_host_result_t *out)
 {
     noun path;
+    if (!out)
+        return 0;
     clear_result(out);
     if (!g_ready || g_replaying)
         return 0;
@@ -778,7 +780,7 @@ int i3_host_state_hash(uint64_t *event, uint8_t hash[32], i3_host_result_t *out)
     }
     if (!nest(tas("state-hash"), NOUN_ZERO, &path))
         return 0;
-    if (!i3_host_peek(path, out) || !out || !noun_is_atom(out->product))
+    if (!i3_host_peek(path, out) || !noun_is_atom(out->product))
         return 0;
     if (!noun_atom_read_fixed(out->product, hash, 32))
         return 0;
