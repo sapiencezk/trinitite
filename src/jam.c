@@ -101,6 +101,9 @@ static jcent_t g_jcache[JAM_CACHE_SZ];
 /* 0: structural noun_eq (M8 trampoline battery digest).
  * 1: pointer identity (host Python jam of ResourceProgram). */
 static int g_jam_identity_keys;
+/* ++jam's own rule (hoon.hoon, and the full node's nockvm jam): a repeated
+ * atom is written again when (met 0 a) <= (met 0 cursor), else backref. */
+static int g_jam_hoon_rule;
 static uint32_t g_jcache_used;
 static uint32_t g_jam_depth;
 
@@ -133,8 +136,88 @@ static void jcache_init(void) {
     g_i2_admission_metrics.jam_clear_bytes += sizeof g_jcache;
 }
 
-static uint32_t jcache_hash(noun n) {
+static uint32_t jcache_ptr_hash(noun n) {
     return (uint32_t)((n ^ (n >> 23)) * 2654435761ULL) & (JAM_CACHE_SZ - 1);
+}
+
+/* ++jam's rule keys its map by noun value, so under g_jam_hoon_rule the cache
+ * hashes by structure: equal subtrees at different addresses must land in the
+ * same probe chain, or the structural compare never sees them and no backref
+ * is written. An atom's noun word is already its value (direct) or its content
+ * hash (indirect). A cell's hash mixes its children's; a per-jam memo keyed by
+ * address only saves recomputing it, it never decides equality. */
+#define JAM_MUG_MEMO 65536u      /* 16 B an entry: 1 MiB static */
+#define JAM_HOON_DEPTH 1024u     /* deepest noun the jet takes; else Nock */
+typedef struct { noun key; uint32_t mug; uint32_t gen; } jmug_t;
+static jmug_t g_jmug[JAM_MUG_MEMO];
+static uint32_t g_jmug_gen;
+static int g_jam_cache_full;
+
+static uint64_t jam_mix(uint64_t x) {
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;
+    return x ^ (x >> 33);
+}
+
+static jmug_t *jmug_find(noun n) {
+    uint32_t h = (uint32_t)jam_mix(n) & (JAM_MUG_MEMO - 1);
+    for (uint32_t i = 0; i < 8; i++) {
+        jmug_t *e = &g_jmug[(h + i) & (JAM_MUG_MEMO - 1)];
+        if (e->gen == g_jmug_gen && e->key == n)
+            return e;
+    }
+    return 0;
+}
+
+static void jmug_put(noun n, uint32_t m) {
+    uint32_t h = (uint32_t)jam_mix(n) & (JAM_MUG_MEMO - 1);
+    for (uint32_t i = 0; i < 8; i++) {
+        jmug_t *e = &g_jmug[(h + i) & (JAM_MUG_MEMO - 1)];
+        if (e->gen != g_jmug_gen) {
+            e->key = n; e->mug = m; e->gen = g_jmug_gen;
+            return;
+        }
+    }
+}
+
+/* Iterative post-order with an explicit stack, so a deep noun cannot overflow
+ * the C stack. A noun deeper than JAM_HOON_DEPTH marks the cache full, and the
+ * jet then runs the arm as Nock. */
+typedef struct { noun n; uint32_t head; uint8_t state; } jmug_frame_t;
+static jmug_frame_t g_jmug_stack[JAM_HOON_DEPTH];
+
+static uint32_t jam_mug(noun n) {
+    uint32_t sp = 0, ret = 0;
+    if (!noun_is_cell(n))
+        return (uint32_t)jam_mix(n);
+    g_jmug_stack[sp].n = n; g_jmug_stack[sp].state = 0; sp++;
+    while (sp) {
+        jmug_frame_t *f = &g_jmug_stack[sp - 1];
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(f->n);
+        noun child;
+        if (f->state == 0) {
+            jmug_t *e = jmug_find(f->n);
+            if (e) { ret = e->mug; sp--; continue; }
+            f->state = 1; child = c->head;
+        } else if (f->state == 1) {
+            f->head = ret; f->state = 2; child = c->tail;
+        } else {
+            uint32_t m = (uint32_t)jam_mix((uint64_t)f->head * 31u
+                + jam_mix((uint64_t)ret ^ 0x9e3779b97f4a7c15ULL));
+            jmug_put(f->n, m);
+            ret = m; sp--; continue;
+        }
+        if (!noun_is_cell(child)) { ret = (uint32_t)jam_mix(child); continue; }
+        if (sp == JAM_HOON_DEPTH) { g_jam_cache_full = 1; return 0; }
+        g_jmug_stack[sp].n = child; g_jmug_stack[sp].state = 0; sp++;
+    }
+    return ret;
+}
+
+static uint32_t jcache_hash(noun n) {
+    if (g_jam_hoon_rule)
+        return (uint32_t)jam_mug(n) & (JAM_CACHE_SZ - 1);
+    return jcache_ptr_hash(n);
 }
 
 static int jcache_get(noun n, uint64_t *pos) {
@@ -164,8 +247,12 @@ static int jcache_put(noun n, uint64_t pos) {
             &g_i2_admission_metrics.jam_probe_hwm, (uint64_t)i + 1u);
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) {
-            if (g_jcache_used >= I2_JAM_CACHE_ADMITTED)
+            if (g_jcache_used >= I2_JAM_CACHE_ADMITTED) {
+                /* A skipped entry loses a backref; under ++jam's rule that
+                 * is wrong bits, so the caller falls back to Nock. */
+                g_jam_cache_full = 1;
                 return 1;
+            }
             g_jcache[idx].key = n; g_jcache[idx].pos = pos; g_jcache[idx].used = 1;
             g_jcache_used++;
             i2_admission_metrics_max(
@@ -180,6 +267,7 @@ static int jcache_put(noun n, uint64_t pos) {
         }
     }
     /* cache full — skip (correctness preserved; dedup opportunity lost) */
+    g_jam_cache_full = 1;
     return 1;
 }
 
@@ -224,6 +312,14 @@ static void do_jam(noun n) {
                 goto done;
             jb_write(&g_jambuf, 0);     /* atom tag */
             do_mat(&g_jambuf, n);
+        } else if (g_jam_hoon_rule) {
+            if (bn_met(n) <= u64_bits(cached_pos)) {
+                jb_write(&g_jambuf, 0);
+                do_mat(&g_jambuf, n);
+            } else {
+                jb_write(&g_jambuf, 1); jb_write(&g_jambuf, 1);
+                do_mat(&g_jambuf, direct(cached_pos));
+            }
         } else if (g_jam_identity_keys) {
             /* Host jam.py: re-emit the atom when value.bit_length()
              * is strictly less than the cached bit-position. */
@@ -279,6 +375,10 @@ static void do_jam_len(noun n)
 {
     if (!g_jam_len_ok)
         return;
+    if (g_jam_hoon_rule && g_jam_cache_full) {
+        g_jam_len_ok = 0;
+        return;
+    }
     int bounded = g_jam_budget != 0;
     if (!jam_charge(1)) {
         g_jam_len_ok = 0;
@@ -333,6 +433,13 @@ static void do_jam_len(noun n)
             g_jam_len_depth--;
         return;
     }
+    if (g_jam_hoon_rule) {
+        jam_len_add(bn_met(n) <= u64_bits(cached_pos) ? 1 + mat_len(n)
+                                                      : 2 + mat_len(direct(cached_pos)));
+        if (bounded)
+            g_jam_len_depth--;
+        return;
+    }
     if (g_jam_identity_keys) {
         if (bn_met(n) < u64_bits(cached_pos)) {
             if (!jcache_put(n, g_jam_len)) {
@@ -356,7 +463,7 @@ static void do_jam_len(noun n)
         g_jam_len_depth--;
 }
 
-int jam_size_checked(noun n, uint64_t max_bytes, uint64_t *out_bytes)
+static int jam_size_in(noun n, uint64_t max_bytes, uint64_t *out_bytes)
 {
     if (!out_bytes || max_bytes == 0
         || max_bytes > UINT64_MAX / 8)
@@ -375,19 +482,40 @@ int jam_size_checked(noun n, uint64_t max_bytes, uint64_t *out_bytes)
     return *out_bytes <= max_bytes ? 0 : -1;
 }
 
+/* Selftest only: abort mid-jam under ++jam's rule, as a Nock abort would. */
+static int g_jam_test_abort;
+
 static uint64_t jam_encode(noun n) {
+    if (g_jam_hoon_rule && g_jam_test_abort)
+        longjmp(nock_abort, NOCK_ABORT_CRASH);
     jb_init(&g_jambuf);
     jcache_init();
     do_jam(n);
     return g_jambuf.cur;
 }
 
-noun jam(noun n) {
+static noun jam_in(noun n) {
     uint64_t bits = jam_encode(n);
     uint64_t limbs = (bits + 63) / 64;
     if (limbs == 0) limbs = 1;
     return bn_normalize(g_jambuf.buf, limbs);
 }
+
+/* The public entries clear g_jam_hoon_rule first: a Nock or budget abort can
+ * longjmp out of jam_hoon_checked with the rule still set, and the cold store
+ * and admission must never inherit it. */
+int jam_size_checked(noun n, uint64_t max_bytes, uint64_t *out_bytes)
+{
+    g_jam_hoon_rule = 0;
+    return jam_size_in(n, max_bytes, out_bytes);
+}
+
+noun jam(noun n) {
+    g_jam_hoon_rule = 0;
+    return jam_in(n);
+}
+
+
 
 int jam_encode_bytes_checked(noun n, const uint8_t **out,
                              uint64_t *out_bytes)
@@ -408,6 +536,24 @@ int jam_encode_bytes_checked(noun n, const uint8_t **out,
     *out = (const uint8_t *)(const void *)g_jambuf.buf;
     *out_bytes = bytes;
     return 0;
+}
+
+int jam_hoon_checked(noun n, noun *out)
+{
+    uint64_t bytes;
+    int rc = -1;
+    g_jam_hoon_rule = 1;
+    g_jam_cache_full = 0;
+    if (++g_jmug_gen == 0) {
+        for (uint32_t i = 0; i < JAM_MUG_MEMO; i++) g_jmug[i].gen = 0;
+        g_jmug_gen = 1;
+    }
+    if (jam_size_in(n, JAM_MAX_BYTES, &bytes) == 0 && !g_jam_cache_full) {
+        *out = jam_in(n);
+        rc = g_jam_cache_full ? -1 : 0;
+    }
+    g_jam_hoon_rule = 0;
+    return rc;
 }
 
 int jam_encode_bytes_identity(noun n, const uint8_t **out, uint64_t *out_bytes)
@@ -527,6 +673,45 @@ uint64_t jam_encode_bytes_selftest(void)
     if (!make_atom_checked(g_jambuf.buf, near_limbs, &near)
         || !jam_byte_view_matches(near))
         failures++;
+
+    /* An abort inside the %jam jet must not leave ++jam's rule on for the
+     * cold store: [7 7] jams differently under the two rules. */
+    {
+        noun pair, hoon, before, after;
+        jmp_buf saved;
+        if (!alloc_cell_checked(direct(7), direct(7), &pair))
+            return failures + 1;
+        before = jam(pair);
+        if (jam_hoon_checked(pair, &hoon) != 0 || hoon == jam(pair))
+            failures++;
+        __builtin_memcpy(saved, nock_abort, sizeof saved);
+        if (setjmp(nock_abort) == 0) {
+            g_jam_test_abort = 1;
+            (void)jam_hoon_checked(pair, &hoon);
+        }
+        g_jam_test_abort = 0;
+        __builtin_memcpy(nock_abort, saved, sizeof saved);
+        after = jam(pair);   /* the cold store's rule, not ++jam's */
+        if (before != after || after == hoon)
+            failures++;
+    }
+
+    /* A deep list (100,000 cells) must not overflow the C stack: the jet
+     * declines it (Nock runs the arm). A 500-deep list still takes the jet. */
+    {
+        noun list = NOUN_ZERO, out;
+        for (uint32_t i = 0; i < 100000u; i++)
+            if (!alloc_cell_checked(NOUN_ZERO, list, &list))
+                return failures + 1;
+        if (jam_hoon_checked(list, &out) != -1)
+            failures++;
+        list = NOUN_ZERO;
+        for (uint32_t i = 0; i < 500u; i++)
+            if (!alloc_cell_checked(NOUN_ZERO, list, &list))
+                return failures + 1;
+        if (jam_hoon_checked(list, &out) != 0)
+            failures++;
+    }
     return failures;
 }
 

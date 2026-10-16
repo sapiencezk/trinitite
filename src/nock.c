@@ -2,6 +2,8 @@
 #include "noun.h"
 #include "nock.h"
 #include "bignum.h"
+#include "jam.h"
+#include "sha256.h"
 #include "uart.h"
 #include "setjmp.h"
 #include "forth.h"
@@ -659,6 +661,41 @@ static noun jet_mole(noun core, const wilt_t *jets, sky_fn_t sky) {
     return nock_alloc_cell(NOUN_ZERO, product);
 }
 
+/* ── Lite /state-hash jets: %jam and %shax (row 199 on the lite node) ──── */
+
+/* Run the arm as plain Nock, for an input past the native buffer. */
+static noun jet_as_nock(noun core, const wilt_t *jets, sky_fn_t sky)
+{
+    return nock_eval(core, slot(direct(2), core), jets, sky);
+}
+
+/* %jam — the native writer (jam.c) under ++jam's backref rule. sample = a */
+static noun jet_jam(noun core, const wilt_t *jets, sky_fn_t sky) {
+    noun out;
+    if (jam_hoon_checked(slot(direct(6), core), &out) != 0)
+        return jet_as_nock(core, jets, sky);
+    return out;
+}
+
+/* %shax — SHA-256 of the atom's (met 3) little-endian bytes; the digest
+ * bytes read as a little-endian atom, as ++shax. sample = ruz */
+static uint8_t g_shax_buf[JAM_MAX_BYTES];
+static noun jet_shax(noun core, const wilt_t *jets, sky_fn_t sky) {
+    uint8_t digest[32];
+    uint64_t limbs[4] = {0, 0, 0, 0};
+    noun ruz = slot(direct(6), core);
+    uint64_t len, i;
+    if (!noun_is_atom(ruz))
+        nock_crash("jet shax: sample not atom");
+    len = (bn_met(ruz) + 7) / 8;
+    if (len > sizeof g_shax_buf || !noun_atom_read_fixed(ruz, g_shax_buf, (size_t)len))
+        return jet_as_nock(core, jets, sky);
+    sha256_hash(g_shax_buf, len, digest);
+    for (i = 0; i < 32; i++)
+        limbs[i / 8] |= (uint64_t)digest[i] << (8u * (i % 8));
+    return bn_normalize(limbs, 4);
+}
+
 /* ── Hot state ────────────────────────────────────────────────────────────── */
 
 /*
@@ -703,6 +740,9 @@ static hot_entry_t hot_state[] = {
     /* L1: honk %fast labels the R1 jam actually takes (deliverable 2) */
     { 1852994932,  jet_turn, 0 },  /* %turn */
     { 1701605229,  jet_mole, 0 },  /* %mole */
+    /* Lite /state-hash (row 199): ++jam and ++shax */
+    { 7168362,     jet_jam,  0 },  /* %jam  */
+    { 2019649651,  jet_shax, 0 },  /* %shax */
     { 0, NULL, 0 }                 /* sentinel */
 };
 
