@@ -75,6 +75,17 @@ void heap_persist_cap_arm(void)
 {
     persist_cap = persist_ptr + (uint64_t)(I3_PERSIST_HEADROOM_CELLS) * sizeof(cell_t);
 }
+
+/* Move the cap out by `cells`: test input cued into persist after the cap
+ * was armed (the L1 plan) is not node state, so it must not use H. Unlike
+ * re-arming, this keeps what replay already used counted against H, so a
+ * write boot after replay gets the same H for replay plus live steps as the
+ * next boot gets for replay alone. */
+void heap_persist_cap_extend(uint64_t cells)
+{
+    if (persist_cap)
+        persist_cap += cells * sizeof(cell_t);
+}
 #endif
 
 static uint8_t *persist_limit(int sel)
