@@ -291,15 +291,19 @@ static void host_stop(const char *reason)
     }
 }
 
-static void log_append(noun job)
+/* Append before the step is committed: on failure g_kernel and g_event_num
+ * are unchanged, the step is refused with no effects, and the trip is keyed
+ * at this event so the next boot replays N entries and then STOPs. */
+static int log_append(noun job)
 {
     if (g_replaying)
-        return;
+        return 1;
     if (cold_log(job) != 0) {
         host_stop("log");
-        return;
+        return 0;
     }
     nv_flush();
+    return 1;
 }
 
 static int install_sample(noun template, noun sample, noun *out)
@@ -577,6 +581,10 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
     }
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
+        if (!log_append(ovo)) {
+            nock_budget_finish();
+            return 0;
+        }
         if (out) {
             out->parse = 1;
             out->effects = c->head;
@@ -584,7 +592,6 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
         }
         g_kernel = c->tail;
         g_event_num++;
-        log_append(ovo);
         (void)i3_host_persist(out);
         nock_budget_finish();
         return 1;
@@ -634,6 +641,10 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
     }
     if (noun_is_cell(product)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(product);
+        if (!log_append(job)) {
+            nock_budget_finish();
+            return 0;
+        }
         if (out) {
             out->parse = 1;
             out->effects = c->head;
@@ -641,7 +652,6 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
         }
         g_kernel = c->tail;
         g_event_num++;
-        log_append(job);
         (void)i3_host_persist(out);
         nock_budget_finish();
         return 1;
