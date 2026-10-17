@@ -52,8 +52,9 @@ class RingError(Exception):
     pass
 
 
-def header(img: bytes) -> dict:
-    best = None
+def headers(img: bytes) -> list[dict]:
+    """The valid header slots, newest first."""
+    out = []
     for slot in (0, 1):
         raw = img[slot * SLOT: slot * SLOT + 128]
         if len(raw) < 128:
@@ -65,16 +66,13 @@ def header(img: bytes) -> dict:
                 or not h["gen"] or b3(raw[:96]) != h["checksum"]):
             continue
         h["slot"] = slot
-        if best is None or h["gen"] > best["gen"]:
-            best = h
-    if best is None:
+        out.append(h)
+    if not out:
         raise RingError("no valid header slot")
-    return best
+    return sorted(out, key=lambda h: -h["gen"])
 
 
-def records(path) -> tuple[dict, list[dict]]:
-    img = Path(path).read_bytes()
-    h = header(img)
+def chain(img: bytes, h: dict) -> list[dict]:
     R = h["ring_bytes"]
     img = img + bytes(max(0, R - len(img)))
     rec = lambda p: REC.unpack_from(img, p)
@@ -104,7 +102,23 @@ def records(path) -> tuple[dict, list[dict]]:
         p = q if q == h["head"] else norm(q)
     if out and out[0]["kind"] == "input":
         raise RingError("ring does not start with a segment")
-    return h, out
+    return out
+
+
+def records(path) -> tuple[dict, list[dict]]:
+    """As the node opens the ring (src/i3_ring.c): the newest valid header whose chain is
+    intact, else the other slot. (The node then falls back to a valid prefix; this tool
+    reports the ring as bad instead.)"""
+    img = Path(path).read_bytes()
+    err = None
+    for i, h in enumerate(headers(img)):
+        try:
+            recs = chain(img, h)
+            h["fallback"] = i
+            return h, recs
+        except RingError as e:
+            err = err or e
+    raise err
 
 
 def segments(recs: list[dict]) -> list[dict]:
@@ -113,8 +127,9 @@ def segments(recs: list[dict]) -> list[dict]:
         if r["kind"] in ("genesis", "ckpt"):
             seg = {"kind": r["kind"], "n": r["n"], "rec": r, "inputs": []}
             if r["kind"] == "ckpt":
-                d, kb, j = r["payload"][:32], r["payload"][32:64], r["payload"][64:]
-                seg.update(d=d, kb=kb, jam=j, sha_ok=hashlib.sha256(j).digest() == d)
+                d, kb, j = r["payload"][:32], r["payload"][32:64], r["payload"][72:]
+                js = int.from_bytes(r["payload"][64:72], "little")
+                seg.update(d=d, kb=kb, jam=j, job_sum=js, sha_ok=hashlib.sha256(j).digest() == d)
             else:
                 seg.update(kb=r["payload"][:32])
             segs.append(seg)
@@ -132,13 +147,15 @@ def summary(path) -> dict:
     return {
         "ring_bytes": h["ring_bytes"], "gen": h["gen"], "head": h["head"], "tail": h["tail"],
         "records": len(recs), "wraps": h["wraps"], "evicted": h["evicted"], "last_n": h["last_n"],
+        "slot": h["slot"], "fallback": h["fallback"],
         "segments": [{"kind": s["kind"], "n": s["n"], "off": s["rec"]["off"],
                       "seg_bytes": s["rec"]["size"] + sum(r["size"] for r in s["inputs"]),
                       "ckpt_record_bytes": s["rec"]["size"],
                       "inputs": [s["inputs"][0]["n"], s["inputs"][-1]["n"]] if s["inputs"] else [],
                       "input_bytes": sum(r["size"] for r in s["inputs"]),
                       "contiguous": s["contiguous"],
-                      **({"sha256": s["d"].hex(), "sha_ok": s["sha_ok"]} if s["kind"] == "ckpt" else {})}
+                      **({"sha256": s["d"].hex(), "sha_ok": s["sha_ok"], "job_sum": s["job_sum"]}
+                         if s["kind"] == "ckpt" else {})}
                      for s in segs],
         "ok": all(s["contiguous"] and s.get("sha_ok", True) for s in segs),
     }
@@ -189,21 +206,23 @@ def cold_image(path, out, start="oldest") -> dict:
         off = align8(off + 112 + len(payload)); gen += 1
         return at
 
-    base = 0
+    base, job_sum = 0, 0
     if seg["kind"] == "ckpt":
         sid = hash62(seg["jam"])
         put(KIND_BLOB, seg["jam"])
         hdr = (cord("i3-ckpt"), (seg["n"], (sid, (int.from_bytes(seg["d"], "little"),
                                                   int.from_bytes(seg["kb"], "little")))))
         put(KIND_BLOB, atom_bytes(jam(hdr)))
-        base = seg["n"]
+        base, job_sum = seg["n"], seg["job_sum"]
     for r in inputs:
         at = put(KIND_LOG, r["payload"]); logs += 1
         first_log = at if first_log is None else first_log
     pre = struct.pack("<QIIQQQQQQ", COLD_MAGIC, 2, 128, gen - 1, 0, 0, off, logs, COLD_COMMIT)
     chk = b3(pre)
     if base:
-        b = struct.pack("<QQQ", base, first_log if first_log is not None else off, 0)
+        # job_sum: the row 213 job-cell sum of entries 1..N, from the ring checkpoint record,
+        # so the reserve check during the off-device replay counts as the device did.
+        b = struct.pack("<QQQ", base, first_log if first_log is not None else off, job_sum)
         c = int.from_bytes(b3(pre + b)[:8], "little") or 1
         res = b + struct.pack("<Q", c)
     else:
@@ -211,7 +230,7 @@ def cold_image(path, out, start="oldest") -> dict:
     data[0:128] = pre + chk + res
     Path(out).write_bytes(bytes(data))
     return {"from": seg["kind"], "n": seg["n"], "inputs": [ns[0], ns[-1]] if ns else [],
-            "events": seg["n"] + len(ns), "base": base, "data_head": off}
+            "events": seg["n"] + len(ns), "base": base, "job_sum": job_sum, "data_head": off}
 
 
 def main() -> int:

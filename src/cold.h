@@ -96,7 +96,10 @@ int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
  * at or after it), the row 213
  * job-cell sum of entries 1..B, and a check word over the 64 checksummed
  * superblock bytes plus those three fields. All zero = no base (B = 0).
- * Dropped entries may still sit in the chain; they are never read again. */
+ * Dropped entries still sit in the chain until compaction. The I3 host never
+ * reads them again (replay and log_len start at the base), but cold_log_len
+ * and cold_log_at still count and read them by physical index, as the Forth
+ * words LOGLEN and LOG@ do (forth.s, cold_loglen and cold_logat). */
 typedef struct {
     uint64_t index;    /* B */
     uint64_t off;      /* entry B+1 is the first LOG object at or after it */

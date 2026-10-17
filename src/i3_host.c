@@ -12,6 +12,9 @@
 #if defined(COLD_LITE_LOG)
 #include "i3_ring.h"
 #endif
+#if defined(I3_CKPT_TEST_REBASEFAULT)
+#include "cold_media_fake_test.h"
+#endif
 #if defined(I3_L1_PROBE)
 #include "i3_l1_probe.h"
 #endif
@@ -950,6 +953,20 @@ static void ckpt_verified(uint64_t n, noun state)
         xs[0] = tas("i3-base");
         xs[1] = direct(g_last_ck_n);
         xs[2] = direct(n);
+#if defined(I3_CKPT_TEST_REBASEFAULT)
+        /* Test knob (tests/recorder_ring.py rebase-fault leg, COLD_MEDIA=fake):
+         * the first base move meets a cold media timeout at its first
+         * transfer, before any sector is submitted, so the move fails and
+         * nothing is dropped. */
+        static int rebase_fault_armed;
+        if (!rebase_fault_armed) {
+            rebase_fault_armed = 1;
+            uart_puts("I3H ckpt test rebase-fault event=");
+            put_u64(n);
+            uart_puts("\r\n");
+            cold_media_fake_fault_arm(COLD_MEDIA_FAKE_TIMEOUT, 1);
+        }
+#endif
         if (tuple(xs, 3, &marker)
             && cold_log_rebase(g_last_ck_n, g_last_ck_sum, marker) == 0
             && cold_log_base(&now) == 0) {
@@ -977,7 +994,7 @@ static void ckpt_verified(uint64_t n, noun state)
     g_last_ck_n = n;
     g_last_ck_sum = g_job_sum;
     if (n % (uint64_t)I3_RING_EVERY == 0 && ckpt_digest(state, dig, &bytes))
-        i3_ring_checkpoint(n, dig, g_ckpt_buf, bytes);
+        i3_ring_checkpoint(n, dig, g_job_sum, g_ckpt_buf, bytes);
     nv_flush();
     heap_set_mode(mode);
 }

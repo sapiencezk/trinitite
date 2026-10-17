@@ -36,6 +36,23 @@ first; full node --target full-node). Every hash compared is computed by a node.
             image from its oldest kept checkpoint; the same flag-on image boots it (no ring
             loaded), replays every later ring input and reads /state-hash, which must equal the
             full node's after the same causes (N=6 9f64c2d2, N=7 46775984).
+  wrap4     the wrap leg's ring (4+ wraps): a cold image from its oldest kept checkpoint boots on the
+            same lite image and reads the full node's /state-hash after all N=6+EXTRA causes; the
+            image's base job_sum comes from the ring checkpoint record.
+  torn      I3_RING_TEST=torn, 32 KiB ring: the first wrap marker never lands, the moved header does,
+            then a power cut. The reboot opens the older slot (status=torn-older, never formats), the
+            ring keeps its older segments and grows.
+  prefix    the torn image with the older slot damaged too: status=torn-prefix (longest valid prefix
+            from the tail, committed), older segments kept.
+  foreign   ring images the ring did not create (no magic in the header area; zero header area over
+            non-zero data): status=foreign, ring off, nothing written, the node runs as usual.
+  reformat  ring6 with both slot checksums broken (own magic and version): status=reformat, gen above
+            the highest on the media.
+  fault     COLD_MEDIA=fake, I3_RING_TEST=fault I3_RING_TEST_AT=RING_FAULT_AT (default 8): one ring
+            sector write lands half (WRITE_UNKNOWN). It is logged, the ring turns off, and the cold log,
+            checkpoints, base moves and /state-hash are as with no fault; the node never stops.
+  rebase-fault  COLD_MEDIA=fake, I3_CKPT_TEST=rebasefault: the first base move meets a cold media
+            timeout; `I3H log base fail` is logged, nothing is dropped, the next checkpoint moves the base.
 
 Run from a 1499kernel checkout (PATH=$HOME/.cargo/bin first); each make and QEMU boot waits for
 MemAvailable >= 4 GB. CKPT_SRC=DIR builds another trinitite tree.
@@ -285,6 +302,152 @@ def main() -> int:
                 and oz.get("event") == n and oz.get("hash") == fh.get("hash")
                 and oz.get("hash", "").startswith(STEWARD[n])):
             bad.append(f"offdevice{n}")
+    # wrap4: the wrap leg's ring has wrapped 4+ times; replay its oldest segment off the device
+    fhw = full_hash(full, "lite-node", full6 + more) or {}
+    rep["full"]["wrap"] = fhw
+    ck = [x for x in s1.get("segments", []) if x["kind"] == "ckpt"]
+    madew = ring_tool("cold", ringw, out / "offw.cold", ck[0]["n"]) if ck else {}
+    owl = boot(img, pill, peek, out / "offw-boot", out / "offw.cold")
+    owz = reads(owl).get("r-z") or {}
+    row = {"wraps": s1.get("wraps"), "oldest": ck[0]["n"] if ck else None, "image": madew,
+           "boot": [m.group(1) for l in owl for m in [BOOT_OK.match(l)] if m], "final": owz, "full": fhw}
+    rep["wrap4"] = row
+    print("wrap4:", json.dumps(row), flush=True)
+    if not (s1.get("wraps", 0) >= 4 and ck and madew.get("events") == nw
+            and madew.get("job_sum", 0) > 0 and row["boot"] == [str(ck[0]["n"])]
+            and owz.get("event") == nw and owz.get("hash") == fhw.get("hash")):
+        bad.append("wrap4")
+
+    # torn: the first wrap marker never lands, the moved header does, then a power cut.
+    # The reboot must open the older header slot (status=torn-older), never format,
+    # and keep extending the ring.
+    # A 32 KiB ring, so that segments survive the wrap (in 16 KiB a wrap evicts every segment).
+    ll32 = [x for x in ll if not x.startswith("I3_RING_BYTES=")] + ["I3_RING_BYTES=32768"]
+    mem_wait("make img-32"); img32 = flag_build(out / "img-32", ll32)
+    mem_wait("make img-torn"); img_torn = flag_build(out / "img-torn", ll32 + ["I3_RING_TEST=torn"])
+    tl = boot(img_torn, pill, plan("w", wseq), out / "torn-write")
+    tring = out / "torn-write/build/ring.img"; tcold = out / "torn-write/build/cold.img"
+    fired = [l for l in tl if l.startswith("I3H ring test torn-wrap")]
+    tshow = ring_tool("show", tring)
+    tl2 = boot(img32, pill, plan("v", [(ev(0), 1), (ev(1), 1), (ev(0), 1)]), out / "torn-boot", tcold, tring)
+    tshow2 = ring_tool("show", out / "torn-boot/build/ring.img")
+    rb = [l for l in tl2 if l.startswith("I3H ring boot")]
+    row = {"fired": fired, "show_before": {k: v for k, v in tshow.items() if k != "segments"},
+           "segs_before": [(x["kind"], x["n"]) for x in tshow.get("segments", [])],
+           "reboot_ring": rb, "show_after": {k: v for k, v in tshow2.items() if k != "segments"},
+           "segs_after": [(x["kind"], x["n"]) for x in tshow2.get("segments", [])]}
+    rep["torn"] = row
+    print("torn:", json.dumps(row), flush=True)
+    keep = [x for x in row["segs_before"]]
+    ok = (fired and tshow.get("fallback") == 1 and len(rb) == 1 and " status=torn-older " in rb[0]
+          and not any("status=fresh" in l or "status=reformat" in l for l in rb)
+          and tshow2.get("ok") and tshow2.get("fallback") == 0 and row["segs_before"]
+          and row["segs_after"] and row["segs_after"][0][1] <= row["segs_before"][-1][1])
+    if not ok:
+        bad.append("torn")
+
+    # prefix: the same torn image with the older slot damaged too: the newest slot's chain is
+    # broken at its end, so the node keeps the longest valid prefix (status=torn-prefix).
+    b = bytearray(tring.read_bytes())
+    gens = [(struct.unpack_from("<Q", b, sl * 512 + 24)[0], sl) for sl in (0, 1)]
+    older = min(gens)[1]
+    b[older * 512 + 100] ^= 0xFF
+    pring = out / "prefix.ring"; pring.write_bytes(bytes(b))
+    pl = boot(img32, pill, plan("v", [(ev(0), 1), (ev(1), 1), (ev(0), 1)]), out / "prefix-boot", tcold, pring)
+    pshow = ring_tool("show", out / "prefix-boot/build/ring.img")
+    prb = [l for l in pl if l.startswith("I3H ring boot")]
+    row = {"reboot_ring": prb, "show_after": {k: v for k, v in pshow.items() if k != "segments"},
+           "segs_after": [(x["kind"], x["n"]) for x in pshow.get("segments", [])]}
+    rep["prefix"] = row
+    print("prefix:", json.dumps(row), flush=True)
+    if not (len(prb) == 1 and " status=torn-prefix " in prb[0] and pshow.get("ok")
+            and keep and row["segs_after"] and row["segs_after"][0][1] <= keep[-1][1]):
+        bad.append("prefix")
+
+    # foreign: data the ring did not create is never formatted; the ring stays off and the
+    # node runs (cold log, checkpoints, /state-hash) as usual. Two images: no magic in the
+    # header area, and a zero header area over non-zero data.
+    pat = bytes((i * 151 + 7) & 0xFF for i in range(RING))
+    rep["foreign"] = {}
+    for name, data in (("hdr", pat), ("data", bytes(1024) + pat[1024:])):
+        fr = out / f"foreign-{name}.ring"; fr.write_bytes(data)
+        fl = boot(img, pill, plan("w", seq6), out / f"foreign-{name}", None, fr)
+        wrote = out / f"foreign-{name}/build/ring.img"
+        fz = reads(fl).get("w-z") or {}
+        row = {"lines": [l for l in fl if l.startswith(("I3H ring boot", "I3H ring off", "I3H stop"))],
+               "ckpts": [int(m.group(1)) for l in fl for m in [CKPT_OK.match(l)] if m],
+               "ring_written": wrote.exists(), "final": fz}
+        rep["foreign"][name] = row
+        print(f"foreign {name}:", json.dumps(row), flush=True)
+        if not (row["lines"] == ["I3H ring boot status=foreign", "I3H ring off reason=foreign"]
+                and row["ckpts"] == [2, 4, 6] and not row["ring_written"] and fr.read_bytes() == data
+                and fz.get("event") == 6 and fz.get("hash") == fh6.get("hash")):
+            bad.append(f"foreign-{name}")
+
+    # reformat: the ring's own magic and version with no valid header slot is formatted, and
+    # the generation continues above the highest one on the media.
+    b = bytearray(ring6.read_bytes())
+    gmax = max(struct.unpack_from("<Q", b, sl * 512 + 24)[0] for sl in (0, 1))
+    for sl in (0, 1):
+        b[sl * 512 + 100] ^= 0xFF
+    rr = out / "reformat.ring"; rr.write_bytes(bytes(b))
+    fl = boot(img, pill, plan("w", seq6), out / "reformat-boot", None, rr)
+    rb = [l for l in fl if l.startswith("I3H ring boot")]
+    m = re.search(r" gen=(\d+) ", rb[0]) if rb else None
+    row = {"lines": rb, "gen_before": gmax, "gen_after": int(m.group(1)) if m else None}
+    rep["reformat"] = row
+    print("reformat:", json.dumps(row), flush=True)
+    if not (rb and " status=reformat " in rb[0] and m and int(m.group(1)) > gmax):
+        bad.append("reformat")
+
+    # fault (COLD_MEDIA=fake): a ring sector write lands half and reports WRITE_UNKNOWN. The
+    # fault is logged, the ring turns off, and the cold log, checkpoints, base moves and
+    # /state-hash go on as with no fault; the node never stops.
+    fault_at = int(os.environ.get("RING_FAULT_AT", "8"))
+    mem_wait("make img-fault")
+    img_fault = flag_build(out / "img-fault", ll + ["COLD_MEDIA=fake", "I3_RING_TEST=fault",
+                                                     f"I3_RING_TEST_AT={fault_at}"])
+    fl = boot(img_fault, pill, plan("w", seq6, reads_each=True), out / "fault-write")
+    fr_ = reads(fl)
+    flt = [l for l in fl if l.startswith(("I3H ring media fault", "I3H ring off"))]
+    row = {"fault_at": fault_at, "fault": flt,
+           "ring_boot": [l for l in fl if l.startswith("I3H ring boot")],
+           "ckpts": [int(m.group(1)) for l in fl for m in [CKPT_OK.match(l)] if m],
+           "bases": [tuple(int(x) for x in m.groups())[:2] for l in fl for m in [BASE.match(l)] if m],
+           "ring_ckpts": [int(m.group(1)) for l in fl for m in [RING_CK.match(l)] if m],
+           "skips": [l for l in fl if l.startswith("I3H ring skip")],
+           "stops": [l for l in fl if l.startswith(("I3H stop", "I3H refused"))],
+           "final": fr_.get("w-z"), "h6": fr_.get("w-h6")}
+    rep["fault"] = row
+    print("fault:", json.dumps(row), flush=True)
+    if not (len(flt) == 2 and flt[0].startswith("I3H ring media fault op=write status=-11 ")
+            and flt[1] == "I3H ring off reason=media"
+            and row["ring_boot"] and " status=fresh " in row["ring_boot"][0]
+            and row["ckpts"] == [2, 4, 6] and row["bases"] == [(2, 4), (4, 6)]
+            and not row["stops"] and (row["final"] or {}).get("event") == 6
+            and (row["final"] or {}).get("hash") == fh6.get("hash")):
+        bad.append("fault")
+
+    # rebase-fault (COLD_MEDIA=fake): the first log base move meets a cold media timeout before
+    # any sector is submitted. The move fails and is logged (`I3H log base fail`, i3_host.c),
+    # nothing is dropped, and the next verified checkpoint moves the base (cold_media.c sets no
+    # reset for a read that failed before a mutation). The node never stops.
+    mem_wait("make img-rbf")
+    img_rbf = flag_build(out / "img-rbf", ll + ["COLD_MEDIA=fake", "I3_CKPT_TEST=rebasefault"])
+    rl_ = boot(img_rbf, pill, plan("w", seq6), out / "rbf-write")
+    rz_ = reads(rl_).get("w-z") or {}
+    row = {"lines": [l for l in rl_ if l.startswith(("I3H ckpt test rebase-fault", "I3H log base",
+                                                     "I3H stop", "I3H ring media fault"))],
+           "ckpts": [int(m.group(1)) for l in rl_ for m in [CKPT_OK.match(l)] if m], "final": rz_}
+    rep["rebase_fault"] = row
+    print("rebase-fault:", json.dumps(row), flush=True)
+    L = row["lines"]
+    if not (len(L) == 3 and L[0] == "I3H ckpt test rebase-fault event=4"
+            and L[1] == "I3H log base fail event=2 ckpt=4"
+            and L[2].startswith("I3H log base event=4 ckpt=6 ")
+            and row["ckpts"] == [2, 4, 6] and rz_.get("event") == 6 and rz_.get("hash") == fh6.get("hash")):
+        bad.append("rebase-fault")
+
     (out / "report.json").write_text(json.dumps(rep, indent=1, default=str))
     print("recorder ring: " + ("PASS" if not bad else f"FAIL {bad}"), flush=True)
     return 0 if not bad else 1

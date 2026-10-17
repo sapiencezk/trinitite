@@ -7,8 +7,9 @@
 # differs, and that the 1b boot-test writer knobs compile.
 # 1c: with ONBASE set (e.g. 6613d3b6, feat/lite-checkpoint-boot = 1b), the 1b flag-on
 # image (I3_CHECKPOINT_EVERY without I3_LITE_LOG) must also be byte-identical to ONBASE's,
-# and the I3_LITE_LOG=1 builds (qemu semihost and ram, rpi4b rpi4-sd, small-ring and
-# crash test knobs) must compile and differ from the 1b flag-on image.
+# and the I3_LITE_LOG=1 builds (qemu semihost, ram and fake, rpi4b rpi4-sd, small-ring
+# and the crash, fault, torn and rebasefault test knobs) must compile, and the semihost
+# one must differ from the 1b flag-on image.
 # Usage: tests/checkpoint_flag_off.sh [BASE [ONBASE]]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -81,6 +82,14 @@ if [ -n "$ONBASE" ]; then
     build "$WORK/head" llsd I3_HOST=1 COLD_MEDIA=rpi4-sd I3_CHECKPOINT_EVERY=2000 I3_LITE_LOG=1
     build "$WORK/head" llknob PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1 COLD_MEDIA=semihost \
         I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_EVERY=2 I3_RING_BYTES=16384 I3_CKPT_TEST=crash I3_CKPT_TEST_FROM=6
-    echo "PASS I3_LITE_LOG=1 builds compile [qemu ram, rpi4b rpi4-sd, small ring + crash knob]"
+    build "$WORK/head" llfake PLATFORM=qemu-virt I3_HOST=1 COLD_MEDIA=fake \
+        I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_EVERY=2 I3_RING_BYTES=16384
+    build "$WORK/head" llfault PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1 COLD_MEDIA=fake \
+        I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_EVERY=2 I3_RING_BYTES=16384 I3_RING_TEST=fault I3_RING_TEST_AT=8
+    build "$WORK/head" lltorn PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1 COLD_MEDIA=semihost \
+        I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_EVERY=2 I3_RING_BYTES=16384 I3_RING_TEST=torn
+    build "$WORK/head" llrbf PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1 COLD_MEDIA=fake \
+        I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_EVERY=2 I3_RING_BYTES=16384 I3_CKPT_TEST=rebasefault
+    echo "PASS I3_LITE_LOG=1 builds compile [qemu ram, rpi4b rpi4-sd, qemu fake, small ring + crash, fault, torn and rebasefault knobs]"
 fi
 exit $fail

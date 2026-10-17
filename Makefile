@@ -507,18 +507,50 @@ endif
 ifneq ($(I3_RING_EVERY),)
 CFLAGS += -DI3_RING_EVERY=$(I3_RING_EVERY)
 endif
+# Test builds only (tests/recorder_ring.py fault legs): I3_RING_TEST=fault
+# with I3_RING_TEST_AT=K (COLD_MEDIA=fake) makes the K-th ring sector write
+# land half and report WRITE_UNKNOWN; I3_RING_TEST=torn (COLD_MEDIA=semihost)
+# skips the first wrap marker, commits the header and stops dead.
+ifneq ($(I3_RING_TEST),)
+ifeq ($(I3_LITE_LOG),)
+$(error I3_RING_TEST requires I3_LITE_LOG=1)
+endif
+ifeq ($(I3_RING_TEST),fault)
+ifneq ($(COLD_MEDIA),fake)
+$(error I3_RING_TEST=fault requires COLD_MEDIA=fake)
+endif
+ifeq ($(I3_RING_TEST_AT),)
+$(error I3_RING_TEST=fault requires I3_RING_TEST_AT=K)
+endif
+CFLAGS += -DI3_RING_TEST_FAULT=1 -DI3_RING_TEST_AT=$(I3_RING_TEST_AT)
+else ifeq ($(I3_RING_TEST),torn)
+ifneq ($(COLD_MEDIA),semihost)
+$(error I3_RING_TEST=torn requires COLD_MEDIA=semihost)
+endif
+CFLAGS += -DI3_RING_TEST_TORN=1
+else
+$(error I3_RING_TEST must be fault or torn)
+endif
+endif
 # Test builds only: I3_CKPT_TEST=cells|jam|stack|wrapper shrinks one checkpoint
 # bound so tests/checkpoint_legs.py reaches that skip leg; hdrshape|hdrsid|hdrd
 # make the writer store a bad header for every N >= I3_CKPT_TEST_FROM (default 1)
 # so tests/checkpoint_boot.py reaches each boot fallback leg (default unset);
 # crash (PR 1c) stores a damaged header for N >= I3_CKPT_TEST_FROM and stops
-# dead before verifying it (tests/recorder_ring.py crash leg).
+# dead before verifying it (tests/recorder_ring.py crash leg); rebasefault
+# (PR 1c, COLD_MEDIA=fake) arms a cold media timeout before the first log
+# base move (tests/recorder_ring.py rebase-fault leg).
 ifneq ($(I3_CKPT_TEST),)
 ifeq ($(I3_CHECKPOINT_EVERY),)
 $(error I3_CKPT_TEST requires I3_CHECKPOINT_EVERY)
 endif
-ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper hdrshape hdrsid hdrd crash),)
-$(error I3_CKPT_TEST must be one of cells jam stack wrapper hdrshape hdrsid hdrd crash)
+ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper hdrshape hdrsid hdrd crash rebasefault),)
+$(error I3_CKPT_TEST must be one of cells jam stack wrapper hdrshape hdrsid hdrd crash rebasefault)
+endif
+ifeq ($(I3_CKPT_TEST),rebasefault)
+ifneq ($(COLD_MEDIA)$(I3_LITE_LOG),fake1)
+$(error I3_CKPT_TEST=rebasefault requires COLD_MEDIA=fake and I3_LITE_LOG=1)
+endif
 endif
 CFLAGS += -DI3_CKPT_TEST_$(shell echo $(I3_CKPT_TEST) | tr a-z A-Z)=1
 endif
@@ -772,6 +804,9 @@ endif
 ifneq ($(I3_RING_EVERY),)
 CONFIG_KEY := $(CONFIG_KEY)-i3re$(I3_RING_EVERY)
 endif
+ifneq ($(I3_RING_TEST),)
+CONFIG_KEY := $(CONFIG_KEY)-i3rt$(I3_RING_TEST)$(I3_RING_TEST_AT)
+endif
 ifneq ($(I3_CKPT_TEST),)
 CONFIG_KEY := $(CONFIG_KEY)-i3ckt$(I3_CKPT_TEST)
 endif
@@ -898,7 +933,7 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 
 $(OBJDIR)/noun.o: $(SRCDIR)/memory.h $(SRCDIR)/noun.h
 $(OBJDIR)/i3_host.o: $(SRCDIR)/i3_admission.h $(SRCDIR)/memory.h
-$(OBJDIR)/i3_ring.o: $(SRCDIR)/i3_ring.h $(SRCDIR)/cold.h $(SRCDIR)/memory.h
+$(OBJDIR)/i3_ring.o: $(SRCDIR)/i3_ring.h $(SRCDIR)/cold.h $(SRCDIR)/cold_media.h $(SRCDIR)/memory.h
 $(OBJDIR)/i3_l1_probe.o: $(SRCDIR)/i3_admission.h $(SRCDIR)/memory.h
 
 ifeq ($(M44_TWO_RESOURCE),1)

@@ -15,6 +15,7 @@
  * exact replay off the device; when full, the oldest checkpoint and its
  * inputs are overwritten. It is separate from the running log in the cold
  * store, and the node never reads it except to find its own head at boot.
+ * Ring faults never stop the node: the ring is turned off for the boot.
  *
  * Layout (little-endian; tools/ring_image.py reads it):
  *   [0, 512) and [512, 1024): two header slots (the higher valid gen wins),
@@ -25,12 +26,15 @@
  *     64-byte header (magic "I3RR", kind, seq, n, len, BLAKE3 of payload)
  *     then the payload. Kinds: 1 genesis (n 0, payload kernel-blake3: replay
  *     from the boot kernel), 2 checkpoint (n N, payload sha256 D || kernel-
- *     blake3 || ++jam of the state, so sha256 of the jam is D and /state-hash
- *     at N), 3 input (n the event number, payload the log entry's jam bytes,
+ *     blake3 || job_sum || ++jam of the state, so sha256 of the jam is D and
+ *     /state-hash at N; job_sum is the u64 LE row 213 job-cell sum of
+ *     entries 1..N, the log base's job_sum for a cold image built from this
+ *     checkpoint), 3 input (n the event number, payload the log entry's jam bytes,
  *     as in the cold log), 4 wrap (the next record is at 1024; implied when
  *     fewer than 64 bytes are left). The live records run from tail to head
  *     with consecutive seq; a segment is a genesis or checkpoint record and
- *     the inputs after it.
+ *     the inputs after it. The writer keeps a new record out of the sector
+ *     that holds the tail (the oldest live record).
  */
 #if defined(COLD_LITE_LOG)
 #ifndef I3_RING_BYTES
@@ -42,7 +46,7 @@
 
 void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32]);
 void i3_ring_input(uint64_t n, const uint8_t *bytes, uint64_t len);
-void i3_ring_checkpoint(uint64_t n, const uint8_t d[32],
+void i3_ring_checkpoint(uint64_t n, const uint8_t d[32], uint64_t job_sum,
                         const uint8_t *jam, uint64_t len);
 void i3_ring_flush(void);
 #endif

@@ -101,9 +101,12 @@ nock_ops_used=475 nock_cells_used=163 nock_eval_stack_peak=19` at every checkpoi
 and `tests/checkpoint_boot.py` passes against it.
 
 ## Rotation (1c: see the PR 1c section)
-- Only after the newest checkpoint verified. Keep: newest verified checkpoint + the previous one until the
-  next verifies, and every entry after the oldest kept one. Retention in entries, floor = 2-3 days at cycle rate.
-- If a checkpoint cannot be written (skip), rotation stays suspended and the 141/198/213 stop applies when full.
+- Amended row 212 (2) (1499kernel #263): the node keeps the last verified checkpoint plus every entry after
+  it, and the previous checkpoint until the next one verifies. Entries before the kept checkpoint are dropped.
+  There is no time-based retention floor on the node: long-term history lives in the SD recorder ring (a
+  fixed byte budget, oldest segment overwritten first) and upstream.
+- The base moves only after the newest checkpoint verified. If a checkpoint cannot be written (skip), the
+  base does not move, and the 141/198/213 stop applies when the cold store is full.
 
 ## SD log and compaction (base and ring in 1c; compaction 1d)
 - Today `cold_log` is an append-only chain in the same cold image as blobs; there is no way to drop a prefix.
@@ -137,28 +140,54 @@ The drop is logical only. The dropped bytes stay in the 8 MiB cold chain until c
 1d, not in this PR) reclaims them, so the cold store still fills and the row 141/198/200 stop applies.
 
 **Recorder ring** (`src/i3_ring.c`). This is a fixed-size byte ring: `I3_RING_BYTES`, default 64 MiB, a
-multiple of 512, at most 128 MiB. Its RAM window is at DRAM + 0x30000000. Media: `rpi4-sd` writes through to
-LBA `COLD_MEDIA_START_LBA + 32768`; semihost writes `build/ring.img`; ram and fake keep it in RAM only.
+multiple of 512, at most 128 MiB. Its RAM window is at DRAM + 0x30000000 (`src/memory.h` checks it against
+the heap, atom store, cold window, pill/plan/app slots and MMIO). Media: `rpi4-sd` writes through to its own
+extent at LBA `COLD_MEDIA_START_LBA + 32768`, after the cold extent (`src/cold_media.h` checks at build time
+that the two do not overlap, and at the first ring access that the card holds the whole extent); `fake` does
+the same on the fake backend (RAM, for the fault tests); semihost writes `build/ring.img`; ram keeps it in RAM.
 It has two 128 B header slots (gen, head, tail, seqs, wraps, evicted, blake3) and 64 B records: genesis
-(kernel blake3), ckpt (D ‖ kernel blake3 ‖ ++jam state), input (log entry jam) and wrap. A ring checkpoint
-is written every `I3_RING_EVERY` events (default 2,000; must be a multiple of K) and reuses the
+(kernel blake3), ckpt (D ‖ kernel blake3 ‖ job_sum ‖ ++jam state), input (log entry jam) and wrap. A ring
+checkpoint is written every `I3_RING_EVERY` events (default 2,000; must be a multiple of K) and reuses the
 verified running checkpoint. When the ring is full, the oldest checkpoint and the inputs after it are
-evicted together. A ring write failure is logged and never stops the node.
+evicted together.
 
-**Off-device exact replay.** `tools/ring_image.py show build/ring.img` lists segments.
-`tools/ring_image.py cold build/ring.img out.img oldest` builds a cold image (checkpoint + inputs, base = N)
-that the same flag-on image boots. `tests/recorder_ring.py` compares its `/state-hash` with the full
-node's.
+*Faults.* A ring media fault (boot load, write or barrier) is logged (`I3H ring media fault op=... status=...`)
+and turns the ring off for the rest of the boot (`I3H ring off reason=media`; later ring checkpoints log
+`I3H ring skip ... reason=off`). The ring keeps its own reset flag in `cold_media.c`: it never sets the cold
+session's `g_reset_required`, so a ring fault never stops the cold log or the node. The boot load gets a
+fresh 5 s deadline per 256 KiB chunk and stops after 60 s in total (then the ring is off for that boot); it
+logs its time (`I3H ring load bytes=... ticks=... freq=...`).
+
+*Torn writes.* Each change writes whole sectors from the window. Per record: free space (evict, wrap), and if
+the tail or head moved: wrap marker, barrier, header commit; then the record, barrier, header commit. Each
+commit goes to the other header slot. The writer never writes into the sector that holds the oldest live
+record. The first sector of a new record can still hold the end of the last committed record, so a torn
+write there can damage that record. At boot the node opens the newest valid header slot whose chain is
+intact (`status=ok`), else the other slot (`status=torn-older`), else the longest valid prefix from the tail
+of either slot, committed over the broken slot (`status=torn-prefix`). It never formats after a chain check
+fails; with no valid prefix the ring stays off and the media is left as it is (`status=corrupt`).
+
+*Foreign data.* With no valid header slot the node formats only an extent that is all zero (`status=fresh`)
+or carries the ring's own magic and version (`status=reformat`; the generation continues above the highest
+one on the media). Anything else is refused: `I3H ring boot status=foreign`, ring off, nothing written. The
+on-media layout descriptor does not name the ring extent; that needs a new descriptor version (not in 1c).
+
+**Off-device exact replay.** `tools/ring_image.py show build/ring.img` lists segments (it opens the ring as
+the node does, newest intact slot first). `tools/ring_image.py cold build/ring.img out.img oldest` builds a
+cold image (checkpoint + inputs, base = N, base job_sum from the ring checkpoint) that the same flag-on lite
+image boots. `tests/recorder_ring.py` compares its `/state-hash` with the full node's after the same causes.
+This replays on the lite image under QEMU, not on the full node: the full node boots a kernel jam and its own
+snapshots, and has no way to start from a ring checkpoint's state jam.
 
 **Measured** (QEMU, probe events, K = ring cadence = 2, 16 KiB ring):
-- ring ckpt record 5,952-5,968 B; input record 96 B per event;
+- ring ckpt record 5,960-5,976 B (8 B more than before for job_sum); input record 96 B per event;
 - kept log bytes after a rebase 6,648-6,656 B (one checkpoint + 2 entries + marker).
 
-At K=2000 that gives ≈ 5,968 + 2,000 × 96 ≈ 198 KB per segment for these events, so ≈ 339 segments fit in 64 MiB.
+At K=2000 that gives ≈ 5,976 + 2,000 × 96 ≈ 198 KB per segment for these events, so ≈ 339 segments fit in 64 MiB.
 Real input sizes vary.
 
-**Not measured:** SD append time, torn writes, SD wear, rpi4 ring boot (it reads the whole ring) and
-the extra jam per step for ring inputs.
+**Not measured:** SD append time, torn-write behaviour of real cards, SD wear, the rpi4 ring boot load time
+(it reads the whole ring; the node now logs it), and the extra jam per step for ring inputs.
 
 ## Boot (PR 1b)
 Newest header whose sid loads, re-hashes to D and whose kernel-blake3 equals the booted pill's `g_jam_blake3`
