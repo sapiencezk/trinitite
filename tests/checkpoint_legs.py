@@ -191,7 +191,8 @@ def replay_leg(out: Path, full: Path, mode: str) -> int:
     run = t.subprocess.run
     def patched(cmd, *a, **kw):
         if cmd[:1] == ["make"]:
-            cmd = cmd[:-1] + ["I3_CHECKPOINT_EVERY=2", cmd[-1]]
+            # CKPT_LEGS_EXTRA (PR 1c): extra make args, e.g. "I3_LITE_LOG=1".
+            cmd = cmd[:-1] + ["I3_CHECKPOINT_EVERY=2"] + os.environ.get("CKPT_LEGS_EXTRA", "").split() + [cmd[-1]]
         return run(cmd, *a, **kw)
     t.subprocess.run = patched
     sys.argv = ["lite_replay_ceiling.py", mode, str(out), str(full), str(TT)]
