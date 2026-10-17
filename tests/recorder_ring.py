@@ -47,7 +47,14 @@ first; full node --target full-node). Every hash compared is computed by a node.
   foreign   ring images the ring did not create (no magic in the header area; zero header area over
             non-zero data): status=foreign, ring off, nothing written, the node runs as usual.
   reformat  ring6 with both slot checksums broken (own magic and version): status=reformat, gen above
-            the highest on the media.
+            the highest on the media, `I3H ring reformat old_bytes=16384 new_bytes=16384`.
+  reformat-size  a 32 KiB ring's first 16 KiB booted by the 16 KiB build (valid own headers, other
+            size): status=reformat and `I3H ring reformat old_bytes=32768 new_bytes=16384`.
+  corrupt   ring6 with the tail record broken (valid slots, no valid prefix): status=corrupt, ring
+            off, media untouched, the off line and the operator hint exactly once, node as usual.
+  fullreplay  tests/ring_full_replay.py: the FULL node boots a host snapshot written from the ring's
+            oldest checkpoint (N=6 ring, N=7 ring, wrap4 ring), poke-jams the ring's inputs, and its
+            /state-hash equals the full node's own hash of all N causes.
   fault     COLD_MEDIA=fake, I3_RING_TEST=fault I3_RING_TEST_AT=RING_FAULT_AT (default 8): one ring
             sector write lands half (WRITE_UNKNOWN). It is logged, the ring turns off, and the cold log,
             checkpoints, base moves and /state-hash are as with no fault; the node never stops.
@@ -61,7 +68,8 @@ Exit 0 when every leg passes; OUT/report.json has the measurements.
 """
 import json, os, re, shutil, struct, subprocess, sys, time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 sys.path.insert(0, os.getcwd())
 import checkpoint_axis
 from checkpoint_axis import flag_build
@@ -318,6 +326,29 @@ def main() -> int:
             and owz.get("event") == nw and owz.get("hash") == fhw.get("hash")):
         bad.append("wrap4")
 
+    # fullreplay: the FULL node replays the ring's oldest checkpoint plus its inputs
+    # (tests/ring_full_replay.py: a host snapshot written from the checkpoint, then poke-jam).
+    rep["fullreplay"] = {}
+    for name, src, tgt, n, fh in (("6", ring6, "lite-node", 6, fh6),
+                                  ("7", out / "off7-write/build/ring.img", "full-node", 7, fh7),
+                                  ("wrap4", ringw, "lite-node", nw, fhw)):
+        mem_wait(f"fullreplay {name}")
+        rd = out / f"fullreplay-{name}"
+        shutil.rmtree(rd, ignore_errors=True)
+        pr = subprocess.run([sys.executable, str(HERE / "ring_full_replay.py"), str(src), str(full), tgt,
+                             "--out", str(rd)], capture_output=True, text=True, timeout=600)
+        try:
+            row = json.loads(pr.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            row = {"ok": False, "stderr": pr.stderr[-400:]}
+        ck = [x for x in ring_tool("show", src).get("segments", []) if x["kind"] == "ckpt"]
+        rep["fullreplay"][name] = row
+        print(f"fullreplay {name}:", json.dumps(row), flush=True)
+        if not (pr.returncode == 0 and row.get("ok") and row.get("booted_from_snapshot")
+                and ck and row.get("from") == ck[0]["n"] and row.get("event") == n
+                and row.get("hash") == fh.get("hash")):
+            bad.append(f"fullreplay{name}")
+
     # torn: the first wrap marker never lands, the moved header does, then a power cut.
     # The reboot must open the older header slot (status=torn-older), never format,
     # and keep extending the ring.
@@ -397,8 +428,52 @@ def main() -> int:
     row = {"lines": rb, "gen_before": gmax, "gen_after": int(m.group(1)) if m else None}
     rep["reformat"] = row
     print("reformat:", json.dumps(row), flush=True)
-    if not (rb and " status=reformat " in rb[0] and m and int(m.group(1)) > gmax):
+    sz = [l for l in fl if l.startswith("I3H ring reformat")]
+    row["size_lines"] = sz
+    if not (rb and " status=reformat " in rb[0] and m and int(m.group(1)) > gmax
+            and sz == [f"I3H ring reformat old_bytes={RING} new_bytes={RING}"]):
         bad.append("reformat")
+
+    # reformat-size: a ring the 32 KiB build wrote, as the 16 KiB build loads it (its first
+    # 16 KiB). Valid own headers with another ring size: reformat, logging both sizes in bytes.
+    big = (out / "prefix-boot/build/ring.img").read_bytes()
+    rsz = out / "reformat-size.ring"; rsz.write_bytes(big[:RING])
+    big_rb = struct.unpack_from("<Q", big, 16)[0]
+    fl = boot(img, pill, plan("w", seq6), out / "reformat-size-boot", None, rsz)
+    rb = [l for l in fl if l.startswith("I3H ring boot")]
+    sz = [l for l in fl if l.startswith("I3H ring reformat")]
+    rshow = ring_tool("show", out / "reformat-size-boot/build/ring.img")
+    row = {"old_ring_bytes": big_rb, "lines": rb, "size_lines": sz,
+           "show_after": {k: v for k, v in rshow.items() if k != "segments"}}
+    rep["reformat_size"] = row
+    print("reformat-size:", json.dumps(row), flush=True)
+    if not (big_rb == 32768 and rb and " status=reformat " in rb[0]
+            and sz == [f"I3H ring reformat old_bytes=32768 new_bytes={RING}"]
+            and rshow.get("ok") and rshow.get("last_n") == 6):
+        bad.append("reformat-size")
+
+    # corrupt: our ring with valid header slots but no record to trust (the record at the tail
+    # is broken in both slots' chains). The ring stays off, the media is left as it is, the
+    # node runs as usual, and the off line and the operator hint appear exactly once.
+    b = bytearray(ring6.read_bytes())
+    for t in {struct.unpack_from("<Q", b, sl * 512 + 40)[0] for sl in (0, 1)}:
+        b[t] ^= 0xFF
+    cr = out / "corrupt.ring"; cr.write_bytes(bytes(b))
+    cl = boot(img, pill, plan("w", seq6), out / "corrupt-boot", None, cr)
+    cz = reads(cl).get("w-z") or {}
+    row = {"lines": [l for l in cl if l.startswith(("I3H ring boot", "I3H ring off", "I3H ring hint",
+                                                     "I3H ring reformat", "I3H stop"))],
+           "ckpts": [int(m.group(1)) for l in cl for m in [CKPT_OK.match(l)] if m],
+           "ring_written": (out / "corrupt-boot/build/ring.img").exists(), "final": cz}
+    rep["corrupt"] = row
+    print("corrupt:", json.dumps(row), flush=True)
+    ln = row["lines"]
+    if not (ln[:2] == ["I3H ring boot status=corrupt", "I3H ring off reason=corrupt"] and len(ln) == 3
+            and sum(l == "I3H ring off reason=corrupt" for l in cl) == 1
+            and sum(l.startswith("I3H ring hint: ") for l in cl) == 1
+            and row["ckpts"] == [2, 4, 6] and not row["ring_written"] and cr.read_bytes() == bytes(b)
+            and cz.get("event") == 6 and cz.get("hash") == fh6.get("hash")):
+        bad.append("corrupt")
 
     # fault (COLD_MEDIA=fake): a ring sector write lands half and reports WRITE_UNKNOWN. The
     # fault is logged, the ring turns off, and the cold log, checkpoints, base moves and

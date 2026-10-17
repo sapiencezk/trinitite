@@ -576,7 +576,9 @@ void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
             /* Our ring, but no record can be trusted: leave the media as it
              * is for off-device inspection and run without the ring. */
             g_ok = 0;
-            uart_puts("I3H ring boot status=corrupt\r\nI3H ring off reason=corrupt\r\n");
+            uart_puts("I3H ring boot status=corrupt\r\nI3H ring off reason=corrupt\r\n"
+                      "I3H ring hint: media kept as is; copy the ring extent off and read it "
+                      "with tools/ring_image.py show, then zero the extent to start a new ring\r\n");
             return;
         }
     } else if (window_zero()) {
@@ -584,7 +586,14 @@ void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
         format(0);
     } else if (hdr_own(0, &g) || hdr_own(1, &g)) {
         /* Our magic and version, but no valid header slot. */
+        ring_hdr_t o;
+        copy(&o, W + (hdr_own(0, &g) ? 0u : RING_SLOT), sizeof o);
         status = "reformat";
+        uart_puts("I3H ring reformat old_bytes=");
+        put_u64(o.ring_bytes);
+        uart_puts(" new_bytes=");
+        put_u64(RING_R);
+        uart_puts("\r\n");
         format(gen_max);
     } else {
         /* Not blank and not ours: never format data the ring did not create. */
