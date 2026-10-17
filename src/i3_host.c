@@ -902,7 +902,7 @@ static void ckpt_maybe_write(void)
         why = "jam";
     else if (!(sid = cold_store(state)))
         why = "store-state";
-    else if (!noun_is_cell(loaded = cold_load(sid)) || !ckpt_digest(loaded, dig2, 0)
+    else if (!noun_is_cell(loaded = cold_load_scratch(sid)) || !ckpt_digest(loaded, dig2, 0)
              || !digest_eq(dig, dig2))
         why = "verify-state";
     else {
@@ -914,7 +914,7 @@ static void ckpt_maybe_write(void)
             why = "alloc";
         /* The header read back must jam to the same bytes as the one
          * written (all five fields), not merely be a cell. */
-        else if (!(hid = cold_store(hdr)) || !noun_is_cell(loaded = cold_load(hid))
+        else if (!(hid = cold_store(hdr)) || !noun_is_cell(loaded = cold_load_scratch(hid))
                  || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2))
             why = "verify-header";
     }

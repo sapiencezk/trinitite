@@ -11,7 +11,8 @@
   replay [MODE]
              MODE --multiboot (default), --reserve or --reserve3 of
              1499kernel tools/lite_replay_ceiling.py with I3_CHECKPOINT_EVERY=2 added.
-             The leg itself must PASS (same accepted/stop counts as flag off), the write
+             The leg itself must PASS with the same accepted count as flag off (FLAG_OFF_ACCEPTED:
+             the checkpoint writer must cost no persist cells), the write
              boots must write checkpoints, no ckpt line may appear between
              `I3H replay entries=` and `I3H replay done` of any boot nor after
              `I3H stop reason=persist`, and the stopped boots (2-4) log no ckpt line.
@@ -36,6 +37,8 @@ import tools.scale_scan as sc
 
 REASON = {"cells": "cells", "jam": "jam-size", "stack": "stack", "wrapper": "wrapper"}
 EVENTS = 8
+# Accepted live steps before the persist stop with the flag off (trinitite 9927b88c).
+FLAG_OFF_ACCEPTED = {"--reserve": 32, "--reserve3": 33, "--multiboot": 68}
 
 
 def skip_leg(leg: str, out: Path, full: Path) -> int:
@@ -92,16 +95,19 @@ def replay_leg(out: Path, full: Path, mode: str) -> int:
         t.subprocess.run = run
     writes = sorted(p for p in out.glob("write*") if (p / "uart.log").exists())
     stopped = [out / d for d in ("replay", "third", "fourth") if (out / d / "uart.log").exists()]
-    ok_lines, bad = 0, []
+    ok_lines, bad, accepted = 0, [], 0
     for d in writes:
         ls = (d / "uart.log").read_text().splitlines()
+        accepted += sum(l.startswith("I3L1 effects name=w-") for l in ls)
         ok_lines += sum(l.startswith("I3H ckpt ok ") for l in ls)
         bad += [f"{d.name}: {l}" for l in ckpt_misplaced(ls)]
     for d in stopped:
         ls = (d / "uart.log").read_text().splitlines()
         bad += [f"{d.name}: {l}" for l in ls if l.startswith("I3H ckpt ")]
-    ok = rc == 0 and ok_lines > 0 and not bad and len(stopped) == 3
-    print(f"replay {mode}: leg rc={rc} write boots={len(writes)} ckpt ok in write boots={ok_lines} "
+    want = FLAG_OFF_ACCEPTED.get(mode)
+    ok = rc == 0 and ok_lines > 0 and not bad and len(stopped) == 3 and (want is None or accepted == want)
+    print(f"replay {mode}: leg rc={rc} write boots={len(writes)} accepted={accepted} (flag off {want}) "
+          f"ckpt ok in write boots={ok_lines} "
           f"stopped boots={len(stopped)} misplaced={bad[:5]}")
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1

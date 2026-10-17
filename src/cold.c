@@ -776,6 +776,36 @@ noun cold_load(uint64_t hash62)
     return NOUN_ZERO;
 }
 
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+noun cold_load_scratch(uint64_t hash62)
+{
+    cold_super_t s;
+    if (hash62 == 0 || select_super(&s, 0) != COLD_RESULT_VALID)
+        return NOUN_ZERO;
+    uint64_t off = COLD_DATA0;
+    while (off < s.data_head) {
+        cold_obj_hdr_t h;
+        cold_result_t r = object_validate(&s, off, 0, 0, &h);
+        if (r != COLD_RESULT_VALID) {
+            g_last_result = r;
+            return NOUN_ZERO;
+        }
+        if (h.kind == KIND_BLOB && hash62_of(h.payload_digest) == hash62) {
+            noun out;
+            if (decode_object(&s, off, KIND_BLOB,
+                              HEAP_MODE_SCRATCH, &out) != 0)
+                return NOUN_ZERO;
+            noun_tx_commit();
+            return out;
+        }
+        if (!align8_checked(off + sizeof h + h.len, &off))
+            break;
+    }
+    g_last_result = COLD_RESULT_ABSENT;
+    return NOUN_ZERO;
+}
+#endif
+
 int cold_log(noun event)
 {
     const uint8_t *bytes;

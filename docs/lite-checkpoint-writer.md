@@ -26,8 +26,10 @@ when N = event_num-1 is a multiple of K:
    never misreported.
 3. `D = sha256(jam(state))` (bytes from `jam_hoon_checked`, the `++jam` writer of trinitite#8, so D is
    the kernel's `(shax (jam state))`).
-4. `sid = cold_store(state)` (BLOB; cold's 62-bit BLAKE3 identity), then **verify**: `cold_load(sid)`, re-jam,
-   re-hash, must equal D.
+4. `sid = cold_store(state)` (BLOB; cold's 62-bit BLAKE3 identity), then **verify**: `cold_load_scratch(sid)`,
+   re-jam, re-hash, must equal D. `cold_load_scratch` (cold.c, compiled only with the flag) is `cold_load` decoding
+   into SCRATCH: `cold_load` always decodes into PERSIST, and at 274d51e0 the two read-backs cost persist cells
+   on every checkpoint (flag on, K=2: the row 200/213 legs stopped after 2/4/6 accepted steps instead of 32/33/68).
 5. Header BLOB `[%i3-ckpt N sid D kernel-blake3]` stored, read back, and required to jam to the same bytes
    as the header written (all five fields; sha256 of both `jam_hoon_checked` encodings compared), else
    `reason=verify-header`. `kernel-blake3` is `g_jam_blake3` from `i3_host_boot`: BLAKE3-256 of the pill's
@@ -36,7 +38,8 @@ when N = event_num-1 is a multiple of K:
 6. `nv_flush`, then `I3H ckpt ok event=N bytes=… sha256=D`. Any failure: `I3H ckpt skip event=N reason=…`;
    the step is already committed and unaffected.
 All checkpoint allocation is in SCRATCH (the caller's scratch reset drops it); persist is untouched, so the
-row 213 reserve accounting is unchanged.
+row 213 reserve accounting is unchanged. `tests/checkpoint_legs.py replay` checks it: with the flag on the
+legs accept exactly as many steps as with it off.
 
 ## Tests
 - `tests/checkpoint_flag_off.sh [BASE]`: flag off is byte-identical to BASE in three configs.
@@ -45,7 +48,7 @@ row 213 reserve accounting is unchanged.
   `I3_CKPT_TEST=` (test builds only, requires `I3_CHECKPOINT_EVERY`) shrinks one bound: cells 8, jam 8 bytes,
   walk stack 2, wrapper tag 1 instead of 0. Every step is still accepted.
 - `tests/checkpoint_legs.py replay [--multiboot|--reserve|--reserve3]`: the 1499kernel row 200/213 leg with the
-  flag on; it still passes, and no ckpt line appears during replay or after a stop.
+  flag on; it still passes with the flag-off accepted count, and no ckpt line appears during replay or after a stop.
 The Python tests run from a 1499kernel checkout (they use its tools and full node).
 
 ## Rotation (later PR, 1c)
