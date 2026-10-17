@@ -694,14 +694,45 @@ static void put_goof(noun goof)
  * default off; with the flag off none of this is compiled). After every K
  * accepted live steps the host writes the kernel state (internal.outer,
  * axis 27; see ckpt_maybe_write) to cold media, then a header record
- *   [%i3-ckpt N state-id sha256(jam state) blake3(kernel jam)]
- * and verifies both by reading back and re-hashing. N is the last event the
- * state follows. This PR only writes: boot does not read a checkpoint yet,
- * and nothing is rotated or dropped (rotation stays suspended until the boot
- * path lands). A checkpoint that cannot be written or verified is skipped
- * and logged; the step itself is already committed and is not affected. The
- * host hashes and stores bytes and interprets nothing (decision 164). */
+ *   [%i3-ckpt N state-id sha256(jam state) kernel-blake3]
+ * and verifies both by reading back and re-hashing. kernel-blake3 is
+ * g_jam_blake3: BLAKE3-256 of the pill's kernel jam bytes exactly as read
+ * at boot (all jam_len bytes, trailing zero bytes included), not of a
+ * re-jam of the cued kernel. N is the last event the state follows. This
+ * PR only writes: boot does not read a checkpoint yet, and nothing is
+ * rotated or dropped (rotation stays suspended until the boot path lands).
+ * A checkpoint that cannot be written or verified is skipped and logged;
+ * the step itself is already committed and is not affected. The host
+ * hashes and stores bytes; apart from the wrapper shape check below it
+ * interprets nothing (decision 164). */
 #define I3_CKPT_STATE_AXIS 27
+
+/* Bounds. Defaults are the production rule; the I3_CKPT_TEST_* knobs
+ * (Makefile I3_CKPT_TEST=cells|jam|stack|wrapper, test builds only) shrink
+ * one bound so a QEMU run reaches that skip leg with a real state. */
+#if defined(I3_CKPT_TEST_CELLS)
+#define I3_CKPT_CELLS_MAX 8u
+#else
+#define I3_CKPT_CELLS_MAX JOB_CELLS_MAX
+#endif
+#if defined(I3_CKPT_TEST_JAM)
+#define I3_CKPT_JAM_MAX 8u
+#else
+#define I3_CKPT_JAM_MAX JAM_MAX_BYTES
+#endif
+#if defined(I3_CKPT_TEST_STACK)
+#define I3_CKPT_STACK_MAX 2u
+#else
+#define I3_CKPT_STACK_MAX JOB_STACK_MAX
+#endif
+#if defined(I3_CKPT_TEST_WRAPPER)
+#define I3_CKPT_WRAPPER_TAG 1u
+#else
+#define I3_CKPT_WRAPPER_TAG 0u
+#endif
+_Static_assert(I3_CKPT_STACK_MAX <= JOB_STACK_MAX, "ckpt stack fits");
+_Static_assert(I3_CKPT_CELLS_MAX <= JOB_CELLS_MAX, "ckpt cells fit");
+_Static_assert(I3_CKPT_JAM_MAX <= JAM_MAX_BYTES, "ckpt jam fits");
 
 /* sha256 of ++jam's bytes (jam_hoon_checked, the %jam jet's writer), as
  * the kernel's (shax (jam state)): the atom's (met 3) little-endian bytes.
@@ -750,28 +781,119 @@ static void ckpt_skip(uint64_t n, const char *why)
     uart_puts("\r\n");
 }
 
+/* Axis `a` of `n` without crashing: 0 when the path meets an atom. */
+static int ckpt_axis(noun n, uint64_t a, noun *out)
+{
+    int depth = 0, i;
+    uint64_t t = a;
+    if (a == 0)
+        return 0;
+    while (t > 1) {
+        t >>= 1;
+        depth++;
+    }
+    for (i = depth - 1; i >= 0; i--) {
+        cell_t *c;
+        if (!noun_is_cell(n))
+            return 0;
+        c = (cell_t *)(uintptr_t)cell_ptr(n);
+        n = ((a >> i) & 1) ? c->tail : c->head;
+    }
+    *out = n;
+    return 1;
+}
+
+/* The state axis holds only while the core's sample (axis 6) is the NockApp
+ * wrapper's outer-state [%0 desk-hash internal]: axis 12 the atom 0 and
+ * axis 13 a cell, so axes 26 (desk-hash) and 27 (internal) exist. */
+static int ckpt_wrapper_ok(noun core, noun *state)
+{
+    noun tag, rest;
+    if (!ckpt_axis(core, 12, &tag) || !noun_is_direct(tag)
+        || direct_val(tag) != I3_CKPT_WRAPPER_TAG)
+        return 0;
+    if (!ckpt_axis(core, 13, &rest) || !noun_is_cell(rest))
+        return 0;
+    return ckpt_axis(core, I3_CKPT_STATE_AXIS, state);
+}
+
+/* Distinct cells in `state` (job_cells' walk and its visited set, kept
+ * separate so the flag-off image is unchanged). Returns 0 when at most
+ * I3_CKPT_CELLS_MAX (65,536) cells, else the skip reason: "cells" past the
+ * limit (skip only when > 65,536), "stack" if the walk stack would
+ * overflow. With the default bounds "stack" cannot happen (each cell
+ * popped pushes at most two, so depth <= cells + 1 <= 65,537 < 131,072);
+ * it is a separate reason so it is never reported as a cell count. */
+static const char *ckpt_cells(noun state)
+{
+    uint32_t sp = 0, cells = 0, i;
+    for (i = 0; i < JOB_SET_SIZE; i++)
+        g_job_set[i] = 0;
+    if (!noun_is_cell(state))
+        return 0;
+    g_job_stack[sp++] = cell_ptr(state);
+    while (sp) {
+        uint32_t op = g_job_stack[--sp], k, h;
+        int seen = 0;
+        cell_t *c;
+        h = (op * 2654435761u) >> (32u - JOB_SET_BITS);
+        for (k = 0; k < JOB_SET_SIZE; k++) {
+            uint32_t slot_i = (h + k) & (JOB_SET_SIZE - 1u);
+            if (g_job_set[slot_i] == op) {
+                seen = 1;
+                break;
+            }
+            if (g_job_set[slot_i] == 0) {
+                g_job_set[slot_i] = op;
+                break;
+            }
+        }
+        if (seen)
+            continue;
+        if (++cells > I3_CKPT_CELLS_MAX)
+            return "cells";
+        c = (cell_t *)(uintptr_t)op;
+        if (noun_is_cell(c->head)) {
+            if (sp >= I3_CKPT_STACK_MAX)
+                return "stack";
+            g_job_stack[sp++] = cell_ptr(c->head);
+        }
+        if (noun_is_cell(c->tail)) {
+            if (sp >= I3_CKPT_STACK_MAX)
+                return "stack";
+            g_job_stack[sp++] = cell_ptr(c->tail);
+        }
+    }
+    return 0;
+}
+
 static void ckpt_maybe_write(void)
 {
     noun state, loaded, hdr, xs[5];
-    uint8_t dig[32], dig2[32];
+    uint8_t dig[32], dig2[32], hd[32], hd2[32];
     uint64_t n = g_event_num - 1, bytes = 0, sid, hid;
     int mode = heap_get_mode();
     const char *why = 0;
+    /* Never during replay and never once stopped: only a committed live
+     * step reaches here, and the guard makes it explicit. */
     if (g_replaying || g_stop || n == 0 || n % (uint64_t)I3_CHECKPOINT_EVERY)
         return;
     /* The application state is internal.outer: the core's sample (axis 6) is
      * the NockApp wrapper's outer-state [%0 desk-hash internal], so the
      * kernel's own state (what /state-hash jams, row 199) is axis 27. Axis 6
      * would also hash the wrapper tag and build hash and never equal the
-     * full node's /state-hash. */
-    state = slot(direct(I3_CKPT_STATE_AXIS), g_kernel);
-    /* Conservative stand-in for the 128k-cell cue bound: the job counter
-     * refuses past I2_CUE_MAX_CELLS (65,536) distinct cells. */
-    if (job_cells(state) >= JOB_UNBOUNDED) {
-        ckpt_skip(n, "cells");
+     * full node's /state-hash. Any other wrapper shape: skip. */
+    if (!ckpt_wrapper_ok(g_kernel, &state)) {
+        ckpt_skip(n, "wrapper");
         return;
     }
-    if (jam_size_checked(state, JAM_MAX_BYTES, &bytes) != 0) {
+    /* Conservative stand-in for the 128k-cell cue bound: skip when the
+     * state has more than I2_CUE_MAX_CELLS (65,536) distinct cells. */
+    if ((why = ckpt_cells(state)) != 0) {
+        ckpt_skip(n, why);
+        return;
+    }
+    if (jam_size_checked(state, I3_CKPT_JAM_MAX, &bytes) != 0) {
         ckpt_skip(n, "jam-size");
         return;
     }
@@ -788,9 +910,12 @@ static void ckpt_maybe_write(void)
         xs[1] = direct(n);
         xs[2] = direct(sid);
         if (!bytes_atom(dig, &xs[3]) || !bytes_atom(g_jam_blake3, &xs[4])
-            || !tuple(xs, 5, &hdr))
+            || !tuple(xs, 5, &hdr) || !ckpt_digest(hdr, hd, 0))
             why = "alloc";
-        else if (!(hid = cold_store(hdr)) || !noun_is_cell(cold_load(hid)))
+        /* The header read back must jam to the same bytes as the one
+         * written (all five fields), not merely be a cell. */
+        else if (!(hid = cold_store(hdr)) || !noun_is_cell(loaded = cold_load(hid))
+                 || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2))
             why = "verify-header";
     }
     if (!why)
