@@ -483,15 +483,23 @@ endif
 CFLAGS += -DI3_CHECKPOINT_EVERY=$(I3_CHECKPOINT_EVERY)
 endif
 # Test builds only: I3_CKPT_TEST=cells|jam|stack|wrapper shrinks one checkpoint
-# bound so tests/checkpoint_legs.py reaches that skip leg (default unset).
+# bound so tests/checkpoint_legs.py reaches that skip leg; hdrshape|hdrsid|hdrd
+# make the writer store a bad header for every N >= I3_CKPT_TEST_FROM (default 1)
+# so tests/checkpoint_boot.py reaches each boot fallback leg (default unset).
 ifneq ($(I3_CKPT_TEST),)
 ifeq ($(I3_CHECKPOINT_EVERY),)
 $(error I3_CKPT_TEST requires I3_CHECKPOINT_EVERY)
 endif
-ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper),)
-$(error I3_CKPT_TEST must be one of cells jam stack wrapper)
+ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper hdrshape hdrsid hdrd),)
+$(error I3_CKPT_TEST must be one of cells jam stack wrapper hdrshape hdrsid hdrd)
 endif
 CFLAGS += -DI3_CKPT_TEST_$(shell echo $(I3_CKPT_TEST) | tr a-z A-Z)=1
+endif
+ifneq ($(I3_CKPT_TEST_FROM),)
+ifeq ($(filter $(I3_CKPT_TEST),hdrshape hdrsid hdrd),)
+$(error I3_CKPT_TEST_FROM requires I3_CKPT_TEST=hdrshape|hdrsid|hdrd)
+endif
+CFLAGS += -DI3_CKPT_TEST_FROM=$(I3_CKPT_TEST_FROM)
 endif
 ifeq ($(I3_UNJETTED),1)
 ifneq ($(I3_L1_PROBE),1)
@@ -727,6 +735,9 @@ CONFIG_KEY := $(CONFIG_KEY)-i3ck$(I3_CHECKPOINT_EVERY)
 endif
 ifneq ($(I3_CKPT_TEST),)
 CONFIG_KEY := $(CONFIG_KEY)-i3ckt$(I3_CKPT_TEST)
+endif
+ifneq ($(I3_CKPT_TEST_FROM),)
+CONFIG_KEY := $(CONFIG_KEY)-i3ckf$(I3_CKPT_TEST_FROM)
 endif
 ifneq ($(I3_PERSIST_HEADROOM_CELLS),)
 CONFIG_KEY := $(CONFIG_KEY)-i3ph$(I3_PERSIST_HEADROOM_CELLS)

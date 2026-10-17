@@ -78,6 +78,9 @@ noun cold_load(uint64_t hash62);
  * (the caller resets scratch), so a read-back costs no persist cells.
  * Compiled only with the checkpoint flag, so flag-off images are unchanged. */
 noun cold_load_scratch(uint64_t hash62);
+/* Row 212 PR 1b: walk the BLOBs of at most max_len payload bytes in media
+ * order, each decoded into SCRATCH, for the checkpoint header search. */
+int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx);
 #endif
 int cold_log(noun event);
 uint64_t cold_log_len(void);
