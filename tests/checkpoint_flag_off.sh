@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Row 212 PR 1a: with I3_CHECKPOINT_EVERY unset the checkpoint writer must not
-# change the image. Builds BASE (default: the row 200 reserve fix, b0b3b021)
+# change the image. Builds BASE (default: the row 200 reserve fix, 9927b88c)
 # and the working tree without the flag in the same configs and requires
 # byte-identical kernel8.img; then checks the flag-on build compiles and
 # differs. Usage: tests/checkpoint_flag_off.sh [BASE]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BASE=${1:-${BASE:-b0b3b021}}
+BASE=${1:-${BASE:-9927b88c}}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/ckpt-off.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 git -C "$ROOT" archive "$BASE" | tar -x -C "$WORK" --one-top-level=base
