@@ -136,6 +136,11 @@ static cold_media_status_t validate_descriptor(
     return COLD_MEDIA_OK;
 }
 
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 \
+    && defined(I3_LITE_LOG) && defined(COLD_MEDIA_RPI4_SD)
+static uint64_t g_ring_capacity;
+#endif
+
 static cold_media_status_t initialize(uint64_t deadline)
 {
     if (g_initialized)
@@ -173,6 +178,10 @@ static cold_media_status_t initialize(uint64_t deadline)
         return status;
     }
     g_read_only = read_only;
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 \
+    && defined(I3_LITE_LOG) && defined(COLD_MEDIA_RPI4_SD)
+    g_ring_capacity = capacity;
+#endif
     g_active = 1;
     diag_set(COLD_MEDIA_PHASE_LAYOUT, COLD_MEDIA_OK, 0,
              COLD_MEDIA_START_LBA, 1, 0);
@@ -409,3 +418,92 @@ void cold_media_reset_session(void)
     g_reset_required = 0;
     diag_set(COLD_MEDIA_PHASE_NONE, COLD_MEDIA_DISABLED, 0, 0, 0, 0);
 }
+
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 \
+    && defined(I3_LITE_LOG) && defined(COLD_MEDIA_RPI4_SD)
+/* Row 212 PR 1c recorder ring extent (cold_media.h). Same session, owner
+ * and reset rules as the cold extent; a failed ring write marks the session
+ * reset-required like any other mutation. */
+static cold_media_status_t ring_range(uint64_t off, uint64_t len,
+                                      uint64_t ring_bytes)
+{
+    if (len == 0 || off > ring_bytes || len > ring_bytes - off
+        || COLD_MEDIA_RING_START_LBA + ring_bytes / COLD_MEDIA_SECTOR_BYTES
+           > g_ring_capacity)
+        return COLD_MEDIA_RANGE;
+    return COLD_MEDIA_OK;
+}
+
+cold_media_status_t cold_media_ring_load(uint8_t *window, uint64_t bytes,
+                                         uint64_t deadline)
+{
+    cold_media_status_t status = initialize(deadline);
+    if (status != COLD_MEDIA_OK)
+        return status;
+    if (bytes % COLD_MEDIA_SECTOR_BYTES || ring_range(0, bytes, bytes) != COLD_MEDIA_OK)
+        return COLD_MEDIA_UNDERSIZED;
+    if (g_reset_required)
+        return COLD_MEDIA_RESET_REQUIRED;
+    if (g_owner)
+        return COLD_MEDIA_BUSY;
+    g_owner = 1;
+    for (uint64_t s = 0; s < bytes / COLD_MEDIA_SECTOR_BYTES; s++) {
+        if (deadline_expired(deadline)) {
+            status = COLD_MEDIA_TIMEOUT;
+            break;
+        }
+        status = backend_read(COLD_MEDIA_RING_START_LBA + s,
+                              window + s * COLD_MEDIA_SECTOR_BYTES, deadline);
+        if (status != COLD_MEDIA_OK)
+            break;
+    }
+    g_owner = 0;
+    if (status != COLD_MEDIA_OK)
+        g_reset_required = 1;
+    return status;
+}
+
+cold_media_status_t cold_media_ring_write(const uint8_t *window, uint64_t off,
+                                          uint64_t len, uint64_t deadline)
+{
+    cold_media_status_t status = initialize(deadline);
+    if (status != COLD_MEDIA_OK)
+        return status;
+    if (g_reset_required)
+        return COLD_MEDIA_RESET_REQUIRED;
+    if (g_read_only)
+        return COLD_MEDIA_READ_ONLY;
+    if (g_owner)
+        return COLD_MEDIA_BUSY;
+    uint64_t first = off / COLD_MEDIA_SECTOR_BYTES;
+    uint64_t last = (off + len - 1) / COLD_MEDIA_SECTOR_BYTES;
+    if (ring_range(first * COLD_MEDIA_SECTOR_BYTES,
+                   (last - first + 1) * COLD_MEDIA_SECTOR_BYTES,
+                   (last + 1) * COLD_MEDIA_SECTOR_BYTES) != COLD_MEDIA_OK)
+        return COLD_MEDIA_RANGE;
+    g_owner = 1;
+    for (uint64_t s = first; s <= last; s++) {
+        int submitted = 0;
+        if (deadline_expired(deadline)) {
+            status = COLD_MEDIA_TIMEOUT;
+            break;
+        }
+        status = backend_write(COLD_MEDIA_RING_START_LBA + s,
+                               window + s * COLD_MEDIA_SECTOR_BYTES,
+                               deadline, &submitted);
+        if (status != COLD_MEDIA_OK) {
+            if (submitted)
+                status = COLD_MEDIA_WRITE_UNKNOWN;
+            g_reset_required = 1;
+            break;
+        }
+    }
+    g_owner = 0;
+    return status;
+}
+
+cold_media_status_t cold_media_ring_barrier(uint64_t deadline)
+{
+    return cold_media_barrier(COLD_MEDIA_PHASE_DATA_BARRIER, deadline);
+}
+#endif

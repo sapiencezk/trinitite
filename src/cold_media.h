@@ -74,3 +74,19 @@ cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
 int cold_media_active(void);
 const cold_media_diag_t *cold_media_last_diag(void);
 void cold_media_reset_session(void);
+
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 \
+    && defined(I3_LITE_LOG) && defined(COLD_MEDIA_RPI4_SD)
+/* Row 212 PR 1c recorder ring (src/i3_ring.c): its own extent after the
+ * cold extent, I3_RING_BYTES / 512 sectors from COLD_MEDIA_RING_START_LBA.
+ * The ring's RAM window is the source of every write: each touched sector is
+ * written whole from it (no read-modify-write). Not measured on the board. */
+#ifndef COLD_MEDIA_RING_START_LBA
+#define COLD_MEDIA_RING_START_LBA (COLD_MEDIA_START_LBA + 32768ULL)
+#endif
+cold_media_status_t cold_media_ring_load(uint8_t *window, uint64_t bytes,
+                                         uint64_t deadline_tick);
+cold_media_status_t cold_media_ring_write(const uint8_t *window, uint64_t off,
+                                          uint64_t len, uint64_t deadline_tick);
+cold_media_status_t cold_media_ring_barrier(uint64_t deadline_tick);
+#endif

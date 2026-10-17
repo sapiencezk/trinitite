@@ -100,12 +100,12 @@ unchanged. Measured with that kernel jam (same app, QEMU): `I3H ckpt boot load .
 nock_ops_used=475 nock_cells_used=163 nock_eval_stack_peak=19` at every checkpoint N tried (2, 4, 5),
 and `tests/checkpoint_boot.py` passes against it.
 
-## Rotation (later PR, 1c)
+## Rotation (1c: see the PR 1c section)
 - Only after the newest checkpoint verified. Keep: newest verified checkpoint + the previous one until the
   next verifies, and every entry after the oldest kept one. Retention in entries, floor = 2-3 days at cycle rate.
 - If a checkpoint cannot be written (skip), rotation stays suspended and the 141/198/213 stop applies when full.
 
-## SD log and compaction (later PR, 1c/1d)
+## SD log and compaction (base and ring in 1c; compaction 1d)
 - Today `cold_log` is an append-only chain in the same cold image as blobs; there is no way to drop a prefix.
 - Plan: a log "base" field in the superblock (first retained entry index + the checkpoint header id it
   follows). Rotation = one superblock write moving the base; replay starts at base. Compaction = copy kept
@@ -113,6 +113,52 @@ and `tests/checkpoint_boot.py` passes against it.
   only reused after the flip verifies. rpi4-sd per-step append cost and torn-write behaviour: not measured.
 - Compaction also reclaims persist-reserve growth (row 213's lifetime limit) because replay then starts
   at the checkpoint, so the job sum restarts there.
+
+## PR 1c: running log + SD recorder ring (branch `feat/lite-recorder-ring`)
+Amended row 212 (2), (3) and (4) (1499kernel main, amendment 5091bb19). Build with
+`I3_CHECKPOINT_EVERY=K I3_LITE_LOG=1`; off by default. Flag-off images and 1b flag-on images
+(`I3_CHECKPOINT_EVERY` without `I3_LITE_LOG`) are byte-identical to the base
+(`tests/checkpoint_flag_off.sh 8d287abd 6613d3b6`).
+
+**Running log.** The 32 reserved superblock bytes carry a log base
+`{index B, off, job_sum, check}` (`check` = first 8 bytes of blake3(superblock[0..64] ‖ base[0..24]),
+never 0; all zero = no base, so a flag-off image reads unchanged). Entry B+1 is the first LOG object at
+or after `off`. When checkpoint N verifies (`I3H ckpt ok`), the previous verified checkpoint P becomes the
+base: a small `[%i3-base P N]` BLOB is appended and its superblock carries base = P, with the row 213
+job sum of entries 1..P in `job_sum`. So the node keeps checkpoint N, the previous checkpoint P until
+the next one verifies, and every entry after P. Entries 1..P are dropped from replay and from
+`log_len`. Boot looks only at checkpoints with n ≥ B and replays from `off`. If no checkpoint ≥ B is valid
+and B > 0, the node stops: `I3H ckpt boot none ... fallback=stop base=B`, `I3H stop reason=rotated`
+(row 212 (3), row 141 stop). A crash after a checkpoint is written but before it verifies leaves the base at
+the earlier checkpoint, so boot falls back to it. If a checkpoint is skipped, the base does not move
+(row 212 (4)).
+
+The drop is logical only. The dropped bytes stay in the 8 MiB cold chain until compaction (A/B media,
+1d, not in this PR) reclaims them, so the cold store still fills and the row 141/198/200 stop applies.
+
+**Recorder ring** (`src/i3_ring.c`). This is a fixed-size byte ring: `I3_RING_BYTES`, default 64 MiB, a
+multiple of 512, at most 128 MiB. Its RAM window is at DRAM + 0x30000000. Media: `rpi4-sd` writes through to
+LBA `COLD_MEDIA_START_LBA + 32768`; semihost writes `build/ring.img`; ram and fake keep it in RAM only.
+It has two 128 B header slots (gen, head, tail, seqs, wraps, evicted, blake3) and 64 B records: genesis
+(kernel blake3), ckpt (D ‖ kernel blake3 ‖ ++jam state), input (log entry jam) and wrap. A ring checkpoint
+is written every `I3_RING_EVERY` events (default 2,000; must be a multiple of K) and reuses the
+verified running checkpoint. When the ring is full, the oldest checkpoint and the inputs after it are
+evicted together. A ring write failure is logged and never stops the node.
+
+**Off-device exact replay.** `tools/ring_image.py show build/ring.img` lists segments.
+`tools/ring_image.py cold build/ring.img out.img oldest` builds a cold image (checkpoint + inputs, base = N)
+that the same flag-on image boots. `tests/recorder_ring.py` compares its `/state-hash` with the full
+node's.
+
+**Measured** (QEMU, probe events, K = ring cadence = 2, 16 KiB ring):
+- ring ckpt record 5,952-5,968 B; input record 96 B per event;
+- kept log bytes after a rebase 6,648-6,656 B (one checkpoint + 2 entries + marker).
+
+At K=2000 that gives ≈ 5,968 + 2,000 × 96 ≈ 198 KB per segment for these events, so ≈ 339 segments fit in 64 MiB.
+Real input sizes vary.
+
+**Not measured:** SD append time, torn writes, SD wear, rpi4 ring boot (it reads the whole ring) and
+the extra jam per step for ring inputs.
 
 ## Boot (PR 1b)
 Newest header whose sid loads, re-hashes to D and whose kernel-blake3 equals the booted pill's `g_jam_blake3`

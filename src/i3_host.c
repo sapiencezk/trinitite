@@ -9,6 +9,9 @@
 #include "i2_admission_metrics.h"
 #include "i3_admission.h"
 #include "i3_host.h"
+#if defined(COLD_LITE_LOG)
+#include "i3_ring.h"
+#endif
 #if defined(I3_L1_PROBE)
 #include "i3_l1_probe.h"
 #endif
@@ -283,7 +286,23 @@ static void nv_flush(void)
 {
     if (cold_nv_enabled())
         (void)cold_nv_flush();
+#if defined(COLD_LITE_LOG)
+    i3_ring_flush();
+#endif
 }
+
+#if defined(COLD_LITE_LOG)
+/* Row 212 PR 1c: every accepted entry also goes to the recorder ring, as the
+ * same jam bytes the cold log holds (src/i3_ring.c). A ring that cannot take
+ * it skips inputs until its next checkpoint; the step is not affected. */
+static void ring_input(uint64_t num, noun job)
+{
+    const uint8_t *bytes;
+    uint64_t len;
+    if (jam_encode_bytes_checked(job, &bytes, &len) == 0)
+        i3_ring_input(num, bytes, len);
+}
+#endif
 
 static int trip_noun(uint64_t num, noun *out)
 {
@@ -334,6 +353,9 @@ static int log_append(noun job)
         host_stop("log");
         return 0;
     }
+#if defined(COLD_LITE_LOG)
+    ring_input(g_event_num, job);
+#endif
     nv_flush();
     return 1;
 }
@@ -736,7 +758,8 @@ static void put_goof(noun goof)
  * fall back (row 212 (3)). hdrshape drops the kernel-blake3 field, hdrsid
  * names a state id that is not in the store, hdrd flips one bit of D. The
  * state blob itself is written and verified as usual. */
-#if defined(I3_CKPT_TEST_HDRSHAPE) || defined(I3_CKPT_TEST_HDRSID) || defined(I3_CKPT_TEST_HDRD)
+#if defined(I3_CKPT_TEST_HDRSHAPE) || defined(I3_CKPT_TEST_HDRSID) || defined(I3_CKPT_TEST_HDRD) \
+    || defined(I3_CKPT_TEST_CRASH)
 #if !defined(I3_CKPT_TEST_FROM)
 #define I3_CKPT_TEST_FROM 1
 #endif
@@ -879,6 +902,87 @@ static const char *ckpt_cells(noun state)
     return 0;
 }
 
+#if defined(I3_CKPT_TEST_CRASH)
+/* Test knob (row 212 PR 1c, tests/recorder_ring.py crash leg): for every
+ * N >= I3_CKPT_TEST_FROM the state blob and a header with one bit of D
+ * flipped (a damaged write) are stored and flushed, then the node stops dead
+ * before the header is verified, as a power cut between writing and
+ * verifying a checkpoint would. Never returns for such N. */
+static void halt(void);
+static int ckpt_test_crash(uint64_t n)
+{
+    if (!I3_CKPT_BAD_HDR(n))
+        return 0;
+    nv_flush();
+    uart_puts("I3H ckpt test crash event=");
+    put_u64(n);
+    uart_puts("\r\nI3H terminal=test-crash\r\n");
+    halt();
+    return 1;
+}
+#endif
+
+#if defined(COLD_LITE_LOG)
+/* Row 212 (2) as amended (1499kernel #263, 5091bb19), running log, PR 1c:
+ * "The node keeps the last verified checkpoint plus every entry after it,
+ * and the previous checkpoint until the next one verifies. Entries before
+ * the kept checkpoint are dropped." When the checkpoint at N verifies, the
+ * previous verified one (P) becomes the oldest kept: the log base moves to P
+ * (entries 1..P dropped, one superblock write), so P stays a boot fallback
+ * until the checkpoint after N verifies. The row 213 job-cell sum of the
+ * dropped entries is kept in the base, so the reserve still counts entries
+ * 1..N as in 1b. g_base is the base this boot has; g_last_ck_* the newest
+ * verified checkpoint (written live, or the one this boot booted from). */
+static cold_log_base_t g_base;
+static uint64_t g_last_ck_n, g_last_ck_sum;
+static int g_rotated;
+static const char STOP_ROTATED[] = "rotated";
+
+static void ckpt_verified(uint64_t n, noun state)
+{
+    noun marker, xs[3];
+    uint8_t dig[32];
+    uint64_t bytes = 0;
+    int mode = heap_get_mode();
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    if (g_last_ck_n > g_base.index) {
+        cold_log_base_t now;
+        xs[0] = tas("i3-base");
+        xs[1] = direct(g_last_ck_n);
+        xs[2] = direct(n);
+        if (tuple(xs, 3, &marker)
+            && cold_log_rebase(g_last_ck_n, g_last_ck_sum, marker) == 0
+            && cold_log_base(&now) == 0) {
+            g_base = now;
+            uart_puts("I3H log base event=");
+            put_u64(now.index);
+            uart_puts(" ckpt=");
+            put_u64(n);
+            uart_puts(" kept_entries=");
+            put_u64(now.len - now.index);
+            uart_puts(" kept_bytes=");
+            put_u64(cold_data_head() - now.off);
+            uart_puts(" chain_bytes=");
+            put_u64(cold_data_head());
+            uart_puts("\r\n");
+        } else {
+            /* Nothing is dropped; the next verified checkpoint tries again. */
+            uart_puts("I3H log base fail event=");
+            put_u64(g_last_ck_n);
+            uart_puts(" ckpt=");
+            put_u64(n);
+            uart_puts("\r\n");
+        }
+    }
+    g_last_ck_n = n;
+    g_last_ck_sum = g_job_sum;
+    if (n % (uint64_t)I3_RING_EVERY == 0 && ckpt_digest(state, dig, &bytes))
+        i3_ring_checkpoint(n, dig, g_ckpt_buf, bytes);
+    nv_flush();
+    heap_set_mode(mode);
+}
+#endif
+
 static void ckpt_maybe_write(void)
 {
     noun state, loaded, hdr, xs[5];
@@ -932,7 +1036,7 @@ static void ckpt_maybe_write(void)
 #elif defined(I3_CKPT_TEST_HDRSID)
         if (I3_CKPT_BAD_HDR(n))
             xs[2] = direct(sid ^ 1u);
-#elif defined(I3_CKPT_TEST_HDRD)
+#elif defined(I3_CKPT_TEST_HDRD) || defined(I3_CKPT_TEST_CRASH)
         if (I3_CKPT_BAD_HDR(n))
             hdig[0] ^= 1u;
 #endif
@@ -941,9 +1045,16 @@ static void ckpt_maybe_write(void)
             why = "alloc";
         /* The header read back must jam to the same bytes as the one
          * written (all five fields), not merely be a cell. */
+#if defined(I3_CKPT_TEST_CRASH)
+        else if (!(hid = cold_store(hdr)) || ckpt_test_crash(n)
+                 || !noun_is_cell(loaded = cold_load_scratch(hid))
+                 || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2))
+            why = "verify-header";
+#else
         else if (!(hid = cold_store(hdr)) || !noun_is_cell(loaded = cold_load_scratch(hid))
                  || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2))
             why = "verify-header";
+#endif
     }
     if (!why)
         nv_flush();
@@ -959,6 +1070,9 @@ static void ckpt_maybe_write(void)
     uart_puts(" sha256=");
     put_hex(dig, 32);
     uart_puts("\r\n");
+#if defined(COLD_LITE_LOG)
+    ckpt_verified(n, state);
+#endif
 }
 #endif
 
@@ -1211,13 +1325,26 @@ static int replay_log(uint64_t skip)
 static int replay_log(void)
 #endif
 {
+#if defined(COLD_LITE_LOG)
+    /* PR 1c: replay starts at the log base: entries 1..B are dropped, their
+     * row 213 job sum comes from the base, and entry B+1 is the first LOG
+     * object at or after the base offset. */
+    uint64_t n = g_base.len, i, cur = g_base.off;
+    g_job_sum = g_base.job_sum;
+    g_last_ck_sum = g_job_sum;
+#else
     uint64_t n = cold_log_len(), i, cur = 0;
+#endif
     i3_host_result_t r;
     uart_puts("I3H replay entries=");
     put_u64(n);
     uart_puts("\r\n");
     g_replaying = 1;
+#if defined(COLD_LITE_LOG)
+    for (i = g_base.index; i < n; i++) {
+#else
     for (i = 0; i < n; i++) {
+#endif
         noun job, subject, product;
         int jumped;
         /* The job decodes into SCRATCH, as a live step's job does, and is
@@ -1235,6 +1362,10 @@ static int replay_log(void)
             if (!noun_is_atom(jc->head) || direct_val(jc->head) != i + 1)
                 return replay_fail(i, "event-num");
             job_seen(job_cells(job));
+#if defined(COLD_LITE_LOG)
+            if (i + 1 == skip)
+                g_last_ck_sum = g_job_sum;
+#endif
             heap_scratch_reset();
             continue;
         }
@@ -1320,6 +1451,9 @@ static void stop_after_trip(void)
 typedef struct {
     noun tag;
     uint64_t below;   /* only headers with N < below */
+#if defined(COLD_LITE_LOG)
+    uint64_t min;     /* PR 1c: only headers with N >= the log base */
+#endif
     int found, shape_ok;
     uint64_t n, sid;
     uint8_t d[32], kb[32];
@@ -1353,6 +1487,10 @@ static int ckpt_find_cb(void *ctx, noun blob)
     n = direct_val(x[1]);
     if (n >= f->below || (f->found && n < f->n))
         goto done;
+#if defined(COLD_LITE_LOG)
+    if (n < f->min)
+        goto done;
+#endif
     if (shape_ok)
         shape_ok = noun_is_direct(x[2]) && noun_atom_read_fixed(x[3], d, 32)
                    && noun_atom_read_fixed(x[4], kb, 32);
@@ -1462,10 +1600,18 @@ static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
 static uint64_t ckpt_boot(void)
 {
     ckpt_find_t f;
+#if defined(COLD_LITE_LOG)
+    uint64_t log_len = g_base.len, rejected = 0;
+#else
     uint64_t log_len = cold_log_len(), rejected = 0;
+#endif
     const char *why;
     f.tag = tas("i3-ckpt");
     f.below = UINT64_MAX;
+#if defined(COLD_LITE_LOG)
+    /* A checkpoint before the base cannot boot: its entries are dropped. */
+    f.min = g_base.index;
+#endif
     for (;;) {
         f.found = 0;
         if (cold_blob_scan(I3_CKPT_HDR_MAX_BYTES, ckpt_find_cb, &f) != 0 || !f.found)
@@ -1480,6 +1626,9 @@ static uint64_t ckpt_boot(void)
             uart_puts(" log=");
             put_u64(log_len);
             uart_puts("\r\n");
+#if defined(COLD_LITE_LOG)
+            g_last_ck_n = f.n;
+#endif
             return f.n;
         }
         uart_puts("I3H ckpt boot reject event=");
@@ -1491,10 +1640,63 @@ static uint64_t ckpt_boot(void)
         f.below = f.n;
     }
     heap_scratch_reset();
+#if defined(COLD_LITE_LOG)
+    /* Row 212 (3): "if none is valid and the log has been rotated, the node
+     * stops (row 141 stop) and reports it. It never boots from an unverified
+     * image." Rotated = entries 1..B dropped (B > 0). */
+    if (g_base.index > 0) {
+        uart_puts("I3H ckpt boot none rejected=");
+        put_u64(rejected);
+        uart_puts(" fallback=stop base=");
+        put_u64(g_base.index);
+        uart_puts("\r\n");
+        g_rotated = 1;
+        return 0;
+    }
+#endif
     uart_puts("I3H ckpt boot none rejected=");
     put_u64(rejected);
     uart_puts(" fallback=zero\r\n");
     return 0;
+}
+#endif
+
+#if defined(COLD_LITE_LOG)
+/* PR 1c boot: read the log base, take a checkpoint (1b), replay the tail,
+ * then open the recorder ring at the replayed log length. With no valid
+ * checkpoint and a rotated log the node is stopped (row 141): nothing is
+ * replayed, nothing is appended, every input and /state-hash is refused,
+ * and no trip is written (the next boot finds the same and stops again). */
+static int lite_boot(void)
+{
+    uint64_t from;
+    if (cold_log_base(&g_base) != 0) {
+        g_base.index = 0;
+        g_base.off = 0;
+        g_base.job_sum = 0;
+        g_base.len = cold_log_len();
+    }
+    uart_puts("I3H log boot base=");
+    put_u64(g_base.index);
+    uart_puts(" len=");
+    put_u64(g_base.len);
+    uart_puts(" job_sum=");
+    put_u64(g_base.job_sum);
+    uart_puts("\r\n");
+    from = ckpt_boot();
+    if (g_rotated) {
+        g_stop = STOP_ROTATED;
+        uart_puts("I3H stop reason=rotated base=");
+        put_u64(g_base.index);
+        uart_puts(" log=");
+        put_u64(g_base.len);
+        uart_puts("\r\n");
+        return 1;
+    }
+    if (!replay_log(from))
+        return 0;
+    i3_ring_boot(g_event_num - 1, g_jam_blake3);
+    return 1;
 }
 #endif
 
@@ -1619,7 +1821,9 @@ void i3_host_boot(void)
     uart_puts("\r\n");
 #endif
     g_persist_reserve = heap_persist_free_cells() / 16;
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(COLD_LITE_LOG)
+    if (!lite_boot()) {
+#elif defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
     if (!replay_log(ckpt_boot())) {
 #else
     if (!replay_log()) {
@@ -1628,6 +1832,9 @@ void i3_host_boot(void)
         g_ready = 0;
         halt();
     }
+#if defined(COLD_LITE_LOG)
+    if (!g_rotated)
+#endif
     stop_after_trip();
     uart_puts("I3H ready\r\n");
 #if defined(I3_L1_PROBE)

@@ -482,22 +482,49 @@ $(error I3_CHECKPOINT_EVERY requires I3_HOST=1)
 endif
 CFLAGS += -DI3_CHECKPOINT_EVERY=$(I3_CHECKPOINT_EVERY)
 endif
+# Row 212 PR 1c (amended row 212 (2)): I3_LITE_LOG=1 adds the running log (the
+# log base in the cold superblock) and the SD recorder ring (src/i3_ring.c).
+# Nested under I3_CHECKPOINT_EVERY, default off. I3_RING_BYTES (bytes, a
+# multiple of 512, default 67108864 = 64 MiB) and I3_RING_EVERY (events per ring
+# checkpoint, a multiple of I3_CHECKPOINT_EVERY, default 2000) are build-time.
+ifneq ($(I3_LITE_LOG),)
+ifeq ($(I3_CHECKPOINT_EVERY),)
+$(error I3_LITE_LOG requires I3_CHECKPOINT_EVERY)
+endif
+ifneq ($(I3_LITE_LOG),1)
+$(error I3_LITE_LOG must be 1 or unset)
+endif
+CFLAGS += -DI3_LITE_LOG=1
+endif
+ifneq ($(I3_RING_BYTES)$(I3_RING_EVERY),)
+ifeq ($(I3_LITE_LOG),)
+$(error I3_RING_BYTES and I3_RING_EVERY require I3_LITE_LOG=1)
+endif
+endif
+ifneq ($(I3_RING_BYTES),)
+CFLAGS += -DI3_RING_BYTES=$(I3_RING_BYTES)ULL
+endif
+ifneq ($(I3_RING_EVERY),)
+CFLAGS += -DI3_RING_EVERY=$(I3_RING_EVERY)
+endif
 # Test builds only: I3_CKPT_TEST=cells|jam|stack|wrapper shrinks one checkpoint
 # bound so tests/checkpoint_legs.py reaches that skip leg; hdrshape|hdrsid|hdrd
 # make the writer store a bad header for every N >= I3_CKPT_TEST_FROM (default 1)
-# so tests/checkpoint_boot.py reaches each boot fallback leg (default unset).
+# so tests/checkpoint_boot.py reaches each boot fallback leg (default unset);
+# crash (PR 1c) stores a damaged header for N >= I3_CKPT_TEST_FROM and stops
+# dead before verifying it (tests/recorder_ring.py crash leg).
 ifneq ($(I3_CKPT_TEST),)
 ifeq ($(I3_CHECKPOINT_EVERY),)
 $(error I3_CKPT_TEST requires I3_CHECKPOINT_EVERY)
 endif
-ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper hdrshape hdrsid hdrd),)
-$(error I3_CKPT_TEST must be one of cells jam stack wrapper hdrshape hdrsid hdrd)
+ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper hdrshape hdrsid hdrd crash),)
+$(error I3_CKPT_TEST must be one of cells jam stack wrapper hdrshape hdrsid hdrd crash)
 endif
 CFLAGS += -DI3_CKPT_TEST_$(shell echo $(I3_CKPT_TEST) | tr a-z A-Z)=1
 endif
 ifneq ($(I3_CKPT_TEST_FROM),)
-ifeq ($(filter $(I3_CKPT_TEST),hdrshape hdrsid hdrd),)
-$(error I3_CKPT_TEST_FROM requires I3_CKPT_TEST=hdrshape|hdrsid|hdrd)
+ifeq ($(filter $(I3_CKPT_TEST),hdrshape hdrsid hdrd crash),)
+$(error I3_CKPT_TEST_FROM requires I3_CKPT_TEST=hdrshape|hdrsid|hdrd|crash)
 endif
 CFLAGS += -DI3_CKPT_TEST_FROM=$(I3_CKPT_TEST_FROM)
 endif
@@ -707,6 +734,9 @@ endif
 I3_HOST_OBJS =
 ifeq ($(I3_HOST),1)
 I3_HOST_OBJS = i3_host.o
+ifeq ($(I3_LITE_LOG),1)
+I3_HOST_OBJS += i3_ring.o
+endif
 endif
 I3_L1_OBJS =
 ifeq ($(I3_L1_PROBE),1)
@@ -732,6 +762,15 @@ CONFIG_KEY := $(CONFIG_KEY)-i3unjet
 endif
 ifneq ($(I3_CHECKPOINT_EVERY),)
 CONFIG_KEY := $(CONFIG_KEY)-i3ck$(I3_CHECKPOINT_EVERY)
+endif
+ifeq ($(I3_LITE_LOG),1)
+CONFIG_KEY := $(CONFIG_KEY)-i3ll
+endif
+ifneq ($(I3_RING_BYTES),)
+CONFIG_KEY := $(CONFIG_KEY)-i3rb$(I3_RING_BYTES)
+endif
+ifneq ($(I3_RING_EVERY),)
+CONFIG_KEY := $(CONFIG_KEY)-i3re$(I3_RING_EVERY)
 endif
 ifneq ($(I3_CKPT_TEST),)
 CONFIG_KEY := $(CONFIG_KEY)-i3ckt$(I3_CKPT_TEST)
@@ -859,6 +898,7 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 
 $(OBJDIR)/noun.o: $(SRCDIR)/memory.h $(SRCDIR)/noun.h
 $(OBJDIR)/i3_host.o: $(SRCDIR)/i3_admission.h $(SRCDIR)/memory.h
+$(OBJDIR)/i3_ring.o: $(SRCDIR)/i3_ring.h $(SRCDIR)/cold.h $(SRCDIR)/memory.h
 $(OBJDIR)/i3_l1_probe.o: $(SRCDIR)/i3_admission.h $(SRCDIR)/memory.h
 
 ifeq ($(M44_TWO_RESOURCE),1)
