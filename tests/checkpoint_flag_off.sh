@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Row 212 PR 1a/1b: with I3_CHECKPOINT_EVERY unset neither the checkpoint
-# writer (1a) nor the checkpoint boot (1b) may change the image. Builds BASE (default: the row 200 reserve fix, 9927b88c)
+# writer (1a) nor the checkpoint boot (1b) may change the image. Builds BASE (default: 8d287abd, i3/cue-input-16m with 1a, trinitite#10)
 # and the working tree without the flag in the same configs and requires
 # byte-identical kernel8.img; then checks the flag-on build compiles and
 # differs, and that the 1b boot-test writer knobs compile.
 # Usage: tests/checkpoint_flag_off.sh [BASE]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BASE=${1:-${BASE:-9927b88c}}
+BASE=${1:-${BASE:-8d287abd}}
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/ckpt-off.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 git -C "$ROOT" archive "$BASE" | tar -x -C "$WORK" --one-top-level=base
