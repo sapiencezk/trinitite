@@ -73,6 +73,12 @@ cold_deploy_result_t cold_store_deployment(noun pill_blob,
  * hash domain used by cold_store(). */
 uint64_t cold_jam_hash(noun n);
 noun cold_load(uint64_t hash62);
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+/* Row 212 checkpoint verify: cold_load, but the noun is decoded into SCRATCH
+ * (the caller resets scratch), so a read-back costs no persist cells.
+ * Compiled only with the checkpoint flag, so flag-off images are unchanged. */
+noun cold_load_scratch(uint64_t hash62);
+#endif
 int cold_log(noun event);
 uint64_t cold_log_len(void);
 noun cold_log_at(uint64_t i);
