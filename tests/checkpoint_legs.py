@@ -16,6 +16,7 @@
              boots must write checkpoints, no ckpt line may appear between
              `I3H replay entries=` and `I3H replay done` of any boot nor after
              `I3H stop reason=persist`, and the stopped boots (2-4) log no ckpt line.
+             `I3H ckpt boot ...` lines (1b's boot-time search) are not writes and are allowed.
 
 Run from the 1499kernel root (PATH=$HOME/.cargo/bin first):
   python3 TRINITITE/tests/checkpoint_legs.py skip LEG OUT FULL_NODE
@@ -37,8 +38,12 @@ import tools.scale_scan as sc
 
 REASON = {"cells": "cells", "jam": "jam-size", "stack": "stack", "wrapper": "wrapper"}
 EVENTS = 8
-# Accepted live steps before the persist stop with the flag off (trinitite 9927b88c).
-FLAG_OFF_ACCEPTED = {"--reserve": 32, "--reserve3": 33, "--multiboot": 68}
+# Accepted live steps before the persist stop with the flag off, measured with the 1499kernel
+# #258 kernel jam (bff56583). With the pre-#258 kernel (trinitite 9927b88c) --reserve3 was 33.
+FLAG_OFF_ACCEPTED = {"--reserve": 32, "--reserve3": 35, "--multiboot": 68}
+# 1b: the boot-time checkpoint search logs `I3H ckpt boot ...` lines (none/reject/load/boot) at the
+# start of replay; they are not checkpoint writes, so the misplaced-write checks skip them.
+BOOT_LINE = "I3H ckpt boot "
 
 
 def skip_leg(leg: str, out: Path, full: Path) -> int:
@@ -54,7 +59,9 @@ def skip_leg(leg: str, out: Path, full: Path) -> int:
         s.poke(f"e{i}", event_cause(tabs, "B0", "REQ", [1, 1]))
     lines = t.boot(img, pill, jam_bytes(nock_list(s.steps)), out / "w")
     steps = EVENTS + 3  # %load-bundle is two logged steps
-    want = [f"I3H ckpt skip event={n} reason={REASON[leg]}" for n in range(2, steps + 1, 2)]
+    # 1b: a fresh boot (empty store) first logs the search result, then replays from zero.
+    want = ["I3H ckpt boot none rejected=0 fallback=zero"] + [
+        f"I3H ckpt skip event={n} reason={REASON[leg]}" for n in range(2, steps + 1, 2)]
     got = [l for l in lines if l.startswith("I3H ckpt ")]
     persists = [l for l in lines if l.startswith("I3L1 persist_copy name=w-") and "ok=yes" in l]
     done = any("terminal=done" in l for l in lines)
@@ -75,7 +82,7 @@ def ckpt_misplaced(lines: list[str]) -> list[str]:
             replaying = False
         elif l.startswith("I3H stop reason=") or l.startswith("I3H trip-stop reason="):
             stopped = True
-        elif l.startswith("I3H ckpt ") and (replaying or stopped):
+        elif l.startswith("I3H ckpt ") and not l.startswith(BOOT_LINE) and (replaying or stopped):
             bad.append(l)
     return bad
 
@@ -103,7 +110,7 @@ def replay_leg(out: Path, full: Path, mode: str) -> int:
         bad += [f"{d.name}: {l}" for l in ckpt_misplaced(ls)]
     for d in stopped:
         ls = (d / "uart.log").read_text().splitlines()
-        bad += [f"{d.name}: {l}" for l in ls if l.startswith("I3H ckpt ")]
+        bad += [f"{d.name}: {l}" for l in ls if l.startswith("I3H ckpt ") and not l.startswith(BOOT_LINE)]
     want = FLAG_OFF_ACCEPTED.get(mode)
     ok = rc == 0 and ok_lines > 0 and not bad and len(stopped) == 3 and (want is None or accepted == want)
     print(f"replay {mode}: leg rc={rc} write boots={len(writes)} accepted={accepted} (flag off {want}) "

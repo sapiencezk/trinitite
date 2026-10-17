@@ -88,17 +88,17 @@ persisted and before replay (`ckpt_boot` in `src/i3_host.c`):
    entry 1 and the rotated-log stop cannot arise yet. A rejected attempt restores the booted core and
    event number and resets scratch; persist cells a failed persist copy took are not returned.
 
-### Known blocker (1b): the wrapper's `+load` does not fit the lite heap
-The wrapper's outer `+load` begins `~&  build-hash+hash` (hoon/lib/wrapper.hoon, vendored from
-NockChain). Trinitite evaluates every dynamic hint's clue (src/nock.c op 11), and this `%slog` clue
-renders the vase with `sell` (the type printer), unjetted. Measured on the box (QEMU, chain-5 app,
-checkpoint at N=4): with the replay limits the load stops at the cell bound
-(`abort=cells`, 128,000 cells, 440,489 ops); with no cell limit it crashes `%meme` (scratch exhausted)
-after 1,395,186 cells and 4,689,346 ops. So today every header is rejected with `reason=load` and the
-node falls back to replay from zero: safe, but it never boots from a checkpoint. A local experiment
-that skips only the `%slog` clue (not in this branch) loads in 476 ops / 163 cells and the boot legs
-pass (see the PR body). The fix is a decision outside this PR (kernel wrapper, lite hint policy, or
-the load path).
+### Former blocker (1b), resolved by row 216 (1499kernel #258)
+The wrapper's outer `+load` began `~&  build-hash+hash` (hoon/lib/wrapper.hoon, vendored from
+NockChain). Trinitite evaluates every dynamic hint's clue (src/nock.c op 11), and that `%slog` clue
+rendered the vase with `sell` (the type printer), unjetted. With the pre-#258 kernel (box, QEMU, chain-5
+app, checkpoint at N=4) the load stopped at the cell bound (`abort=cells`, 128,000 cells, 440,489 ops),
+and with no cell limit it crashed `%meme` after 1,395,186 cells and 4,689,346 ops, so every header was
+rejected with `reason=load` and the node replayed from zero. Row 216 (approved by Guillaume) removes the
+trace from the kernel's `+load`; it lands with #258's re-pin (bff56583). Trinitite's `src/nock.c` is
+unchanged. Measured with that kernel jam (same app, QEMU): `I3H ckpt boot load ... abort=none
+nock_ops_used=475 nock_cells_used=163 nock_eval_stack_peak=19` at every checkpoint N tried (2, 4, 5),
+and `tests/checkpoint_boot.py` passes against it.
 
 ## Rotation (later PR, 1c)
 - Only after the newest checkpoint verified. Keep: newest verified checkpoint + the previous one until the
@@ -118,7 +118,7 @@ the load path).
 Newest header whose sid loads, re-hashes to D and whose kernel-blake3 equals the booted pill's `g_jam_blake3`
 (same bytes-as-read rule, so a pill re-jammed to different bytes does not match) → cue into the
 versioned `+load` → replay entries after N. Fallback per row 212 (3). Never boot from an unverified image.
-Implemented as above (PR 1b section), including its known blocker.
+Implemented as above (PR 1b section); the `+load` blocker is resolved by row 216 (1499kernel #258).
 
 ## Open questions
 1. ~~Is sha256(jam(axis 6)) exactly `/state-hash` (row 199)?~~ **Answered** by the flag-on smoke run
@@ -127,7 +127,9 @@ Implemented as above (PR 1b section), including its known blocker.
    **Settled on the lite node itself (1b)** by `tests/checkpoint_boot.py`: in the same QEMU boot, each
    writer digest D = sha256(jam(axis 27)) equals the lite node's own `/state-hash` peek (row 199,
    `i3_host_state_hash`) read right after the step that wrote it: N=4 `df590166…` (N=6 sequence, K=4),
-   N=5 `d73a8797…` (N=6 sequence, K=5), N=4 `c47a0420…` (N=7 sequence, K=4). Equal in all three. The
+   N=5 `d73a8797…` (N=6 sequence, K=5), N=4 `c47a0420…` (N=7 sequence, K=4). Equal in all three
+   (pre-#258 kernel; with the #258 kernel jam at bff56583: `9f64c2d2…`, `71fb60e5…`, `c5225f7a…`, equal
+   again). The
    two are the same bytes hashed two ways: the host's `jam_hoon_checked` + sha256, and the kernel's
    `(shax (jam state))` through the lite `%jam`/`%shax` jets (row 211).
 2. ~~Smoke run: D was identical at N=10/20/30 with R4 `[1 1]` events.~~ **Answered** by the same run: that
