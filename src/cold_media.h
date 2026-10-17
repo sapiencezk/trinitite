@@ -86,9 +86,12 @@ void cold_media_reset_session(void);
  * here at build time) and the medium must hold the whole ring extent
  * (checked at the first ring access; if not, the ring stays off and the cold
  * store is unaffected). The on-media layout descriptor does not name the
- * ring extent: that would need a new descriptor version. Instead the ring
- * formats only an extent that is all zero or already carries its own magic
- * and version (src/i3_ring.c); anything else is refused.
+ * ring extent: that would need a new descriptor version (deferred). Instead
+ * the ring formats only an extent that is all zero or holds a whole header of
+ * its own for another ring size (src/i3_ring.c); anything else is refused.
+ * GAP (Steward's ruling): an all-zero range that belongs to another partition
+ * is still formatted. No rpi4-sd image with I3_LITE_LOG on is deployed until a
+ * layout descriptor version names the ring (docs/lite-checkpoint-writer.md).
  *
  * Session. Ring I/O shares the backend and its owner lock with the cold
  * store, but not its reset rule: a ring fault marks only the ring as needing

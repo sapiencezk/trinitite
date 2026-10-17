@@ -18,10 +18,18 @@ with no change to the full node or the kernel:
      read the kernel's /state-hash with a peek (an ephemeral boot has no event log, so the
      event number is N plus the inputs poked).
 
-  python3 TRINITITE/tests/ring_full_replay.py RING FULL_NODE TARGET [FROM] [--out DIR]
+  4. With --zero CAUSES.json ({"offset": O, "causes": [hex jam, ...]}, the full node's causes
+     for lite events O+1, O+2, ...), the fresh boot of step 1 also pokes those causes from zero
+     and reads /state-hash after each one. Every step is then asserted: the snapshot boot's hash
+     equals the from-zero hash at N, and the hash after each ring input n equals the from-zero
+     hash at n. (N=6 and wrap4 start and end at the same hash, so the final hash alone is weak.)
+     O is 1 when lite event 1 is [%target %full-node], which the full node takes as --target.
+
+  python3 TRINITITE/tests/ring_full_replay.py RING FULL_NODE TARGET [FROM] [--zero F] [--out DIR]
 Run from a 1499kernel checkout (its build/kernel/kernel.jam). TARGET is full-node or lite-node
 (the --target the write boot's causes were made for). FROM is oldest (default), newest or N.
-Prints one JSON line; exit 0 when the full node accepted every input and answered /state-hash.
+Prints one JSON line; exit 0 when the full node accepted every input, answered /state-hash and
+(with --zero) every step matched.
 """
 import hashlib, json, os, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
@@ -109,7 +117,9 @@ def state_hash(reply: dict) -> str | None:
 
 def main() -> int:
     a = sys.argv[1:]
-    out = None
+    out = zero = None
+    if "--zero" in a:
+        i = a.index("--zero"); zero = json.loads(Path(a[i + 1]).read_text()); del a[i:i + 2]
     if "--out" in a:
         i = a.index("--out"); out = Path(a[i + 1]); del a[i:i + 2]
     if len(a) not in (3, 4):
@@ -136,8 +146,17 @@ def main() -> int:
     (d / "fresh").mkdir(exist_ok=True)
     fresh = d / "fresh" / "fresh.snap"
     n0 = Node(full, kernel, target, d / "fresh", fresh)
+    zsteps, zrefused = [], []
     try:
         r0 = n0.c.request({"snapshot": True})
+        if zero is not None:
+            # from zero: zsteps[k] = /state-hash after k causes = lite event k + offset
+            zsteps.append(state_hash(n0.c.request({"peek": "/state-hash"})))
+            for k, hx in enumerate(zero["causes"]):
+                rz = n0.c.request({"poke-jam": hx})
+                if not rz.get("ok", False):
+                    zrefused.append({"k": k + 1, "reply": str(rz)[:200]})
+                zsteps.append(state_hash(n0.c.request({"peek": "/state-hash"})))
     finally:
         n0.close()
     outer = cue(int.from_bytes(i3snap_core(fresh.read_bytes()), "little"))
@@ -172,7 +191,18 @@ def main() -> int:
     finally:
         n1.close()
     booted = "booting from host snapshot" in (d / "replay" / "node.log").read_text()
-    res = {"ok": booted and not refused and state_hash(peek) is not None,
+    ok = booted and not refused and state_hash(peek) is not None
+    check = None
+    if zero is not None:
+        o = zero.get("offset", 0)
+        at = lambda n: zsteps[n - o] if 0 <= n - o < len(zsteps) else None
+        want = [at(seg["n"])] + [at(n) for n in pokes]
+        got = [h0] + steps
+        check = {"events": [seg["n"]] + pokes, "zero": [x[:8] if x else None for x in want],
+                 "match": [g is not None and g == w for g, w in zip(got, want)],
+                 "zero_refused": zrefused}
+        ok = ok and not zrefused and all(check["match"])
+    res = {"ok": ok, "zero_check": check,
            "from": seg["n"], "d": seg["d"].hex(), "boot_hash": h0, "booted_from_snapshot": booted,
            "inputs": [pokes[0], pokes[-1]] if pokes else [], "event": seg["n"] + len(pokes),
            "hash": state_hash(peek), "steps": [x[:8] for x in steps], "refused": refused, "snapshot_bytes": snap.stat().st_size,

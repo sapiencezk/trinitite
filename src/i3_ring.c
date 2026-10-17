@@ -32,8 +32,12 @@
  * cannot reach it. Boot checks the newest valid header's chain; if it is
  * broken it tries the other slot, then the longest valid prefix from the
  * tail of either slot (and commits that). It formats only an extent that is
- * all zero or carries the ring's own magic and version, and never after a
- * chain check fails. Not measured on the board: SD append time, torn-write
+ * all zero (status=fresh) or holds a whole header of its own for another ring
+ * size (status=reformat), and never after a chain check fails. Its own magic
+ * with no header or record to trust is status=corrupt; anything else is
+ * status=foreign. Both leave the media as it is and run without the ring.
+ * GAP (Steward's ruling): a zero range that belongs to someone else is still
+ * formatted; see docs/lite-checkpoint-writer.md. Not measured on the board: SD append time, torn-write
  * behaviour of real cards, wear, and the boot load time.
  */
 #include <stddef.h>
@@ -209,17 +213,27 @@ static int hdr_own(unsigned slot, uint64_t *gen)
     return 1;
 }
 
-static int hdr_valid(unsigned slot, ring_hdr_t *out)
+/* A header slot the ring wrote whole: magic, version, length, zero field,
+ * generation and checksum are right. Its ring size may differ from RING_R. */
+static int hdr_sound(unsigned slot, ring_hdr_t *out)
 {
     ring_hdr_t h;
     uint8_t dig[32];
     copy(&h, W + slot * RING_SLOT, sizeof h);
     if (h.magic != RING_MAGIC || h.version != 1 || h.header_len != sizeof h
-        || h.ring_bytes != RING_R || h.zero != 0 || h.gen == 0
-        || h.gen == UINT64_MAX)
+        || h.zero != 0 || h.gen == 0 || h.gen == UINT64_MAX)
         return 0;
     blake3_hash((const uint8_t *)&h, 96, dig);
     if (!eq32(dig, h.checksum))
+        return 0;
+    *out = h;
+    return 1;
+}
+
+static int hdr_valid(unsigned slot, ring_hdr_t *out)
+{
+    ring_hdr_t h;
+    if (!hdr_sound(slot, &h) || h.ring_bytes != RING_R)
         return 0;
     if (h.head < RING_DATA0 || h.head > RING_R || (h.head & 7)
         || h.tail < RING_DATA0 || h.tail >= RING_R || (h.tail & 7)
@@ -533,9 +547,19 @@ static const char *open_slots(const ring_hdr_t h[2], const int v[2],
     return 0;
 }
 
+/* Our ring, but nothing on it can be trusted: leave the media as it is for
+ * off-device inspection and run without the ring (one off line, one hint). */
+static void off_corrupt(void)
+{
+    g_ok = 0;
+    uart_puts("I3H ring boot status=corrupt\r\nI3H ring off reason=corrupt\r\n"
+              "I3H ring hint: media kept as is; copy the ring extent off and read it "
+              "with tools/ring_image.py show, then zero the extent to start a new ring\r\n");
+}
+
 void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
 {
-    ring_hdr_t h[2];
+    ring_hdr_t h[2], o;
     int v[2];
     uint64_t segments = 0, gen_max = 0, g;
     const char *status = "ok";
@@ -573,21 +597,17 @@ void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
     if (v[0] || v[1]) {
         status = open_slots(h, v, gen_max, &segments);
         if (!status) {
-            /* Our ring, but no record can be trusted: leave the media as it
-             * is for off-device inspection and run without the ring. */
-            g_ok = 0;
-            uart_puts("I3H ring boot status=corrupt\r\nI3H ring off reason=corrupt\r\n"
-                      "I3H ring hint: media kept as is; copy the ring extent off and read it "
-                      "with tools/ring_image.py show, then zero the extent to start a new ring\r\n");
+            /* Our ring, but no record can be trusted. */
+            off_corrupt();
             return;
         }
     } else if (window_zero()) {
         status = "fresh";
         format(0);
-    } else if (hdr_own(0, &g) || hdr_own(1, &g)) {
-        /* Our magic and version, but no valid header slot. */
-        ring_hdr_t o;
-        copy(&o, W + (hdr_own(0, &g) ? 0u : RING_SLOT), sizeof o);
+    } else if ((hdr_sound(0, &o) && o.ring_bytes != RING_R)
+               || (hdr_sound(1, &o) && o.ring_bytes != RING_R)) {
+        /* A whole header of ours for another ring size (the build changed
+         * I3_RING_BYTES): the only case that reformats over non-zero data. */
         status = "reformat";
         uart_puts("I3H ring reformat old_bytes=");
         put_u64(o.ring_bytes);
@@ -595,6 +615,10 @@ void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
         put_u64(RING_R);
         uart_puts("\r\n");
         format(gen_max);
+    } else if (hdr_own(0, &g) || hdr_own(1, &g)) {
+        /* Our magic and version, but no header slot to trust. */
+        off_corrupt();
+        return;
     } else {
         /* Not blank and not ours: never format data the ring did not create. */
         g_ok = 0;

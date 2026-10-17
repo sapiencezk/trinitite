@@ -72,7 +72,9 @@ def headers(img: bytes) -> list[dict]:
     return sorted(out, key=lambda h: -h["gen"])
 
 
-def chain(img: bytes, h: dict) -> list[dict]:
+def chain(img: bytes, h: dict, prefix: bool = False) -> list[dict]:
+    """The records from the tail, checked as the node's walk() does. With prefix, stop at the
+    first bad record and return the valid records before it (the longest valid prefix)."""
     R = h["ring_bytes"]
     img = img + bytes(max(0, R - len(img)))
     rec = lambda p: REC.unpack_from(img, p)
@@ -84,40 +86,60 @@ def chain(img: bytes, h: dict) -> list[dict]:
         return DATA0 if (m == REC_MAGIC and k == WRAP) else q
 
     out, p, seq = [], h["tail"], h["tail_seq"]
-    while seq < h["next_seq"]:
+    limit = min(h["next_seq"], h["tail_seq"] + R // REC_HDR)
+
+    def bad(msg):
+        if prefix:
+            return out
+        raise RingError(msg)
+    while seq < limit:
+        if p < DATA0 or R - p < REC_HDR:
+            return bad(f"record offset {p} out of the ring")
         m, k, s, n, ln, dig = rec(p)
-        if m != REC_MAGIC or s != seq or k not in KIND or p + align8(REC_HDR + ln) > R:
-            raise RingError(f"bad record at {p} seq {seq}")
+        if (m != REC_MAGIC or s != seq or k not in KIND or p + align8(REC_HDR + ln) > R
+                or (seq == h["tail_seq"] and k == INPUT)):
+            return bad(f"bad record at {p} seq {seq}")
         payload = img[p + REC_HDR: p + REC_HDR + ln]
         if b3(payload) != dig:
-            raise RingError(f"payload digest at {p} seq {seq}")
+            return bad(f"payload digest at {p} seq {seq}")
         out.append({"off": p, "kind": KIND[k], "seq": s, "n": n, "payload": payload,
                     "size": align8(REC_HDR + ln)})
         q = p + align8(REC_HDR + ln)
         seq += 1
         if seq == h["next_seq"]:
-            if q != h["head"] and norm(q) != h["head"]:
-                raise RingError("records do not end at head")
+            if (q != h["head"] and norm(q) != h["head"]) or n != h["last_n"]:
+                return bad("records do not end at head")
             break
         p = q if q == h["head"] else norm(q)
-    if out and out[0]["kind"] == "input":
-        raise RingError("ring does not start with a segment")
+    if seq < h["next_seq"] and not prefix:
+        raise RingError("more records than fit in the ring")
     return out
 
 
 def records(path) -> tuple[dict, list[dict]]:
-    """As the node opens the ring (src/i3_ring.c): the newest valid header whose chain is
-    intact, else the other slot. (The node then falls back to a valid prefix; this tool
-    reports the ring as bad instead.)"""
+    """As the node opens the ring (src/i3_ring.c open_slots): the newest valid header whose
+    chain is intact (fallback 0, status=ok), else the other slot (fallback 1, torn-older),
+    else the longest valid prefix from the tail of either slot, newest first (prefix true,
+    torn-prefix; head and last_n then describe the prefix, as the node commits them).
+    No valid prefix raises RingError (the node's status=corrupt)."""
     img = Path(path).read_bytes()
     err = None
-    for i, h in enumerate(headers(img)):
+    hs = headers(img)
+    for i, h in enumerate(hs):
         try:
             recs = chain(img, h)
-            h["fallback"] = i
+            h["fallback"], h["prefix"] = i, False
             return h, recs
         except RingError as e:
             err = err or e
+    for i, h in enumerate(hs):
+        recs = chain(img, h, prefix=True)
+        if recs:
+            last = recs[-1]
+            h.update(fallback=i, prefix=True, last_n=last["n"],
+                     next_seq=h["tail_seq"] + len(recs), head=last["off"] + last["size"],
+                     broken=str(err))
+            return h, recs
     raise err
 
 
@@ -147,7 +169,7 @@ def summary(path) -> dict:
     return {
         "ring_bytes": h["ring_bytes"], "gen": h["gen"], "head": h["head"], "tail": h["tail"],
         "records": len(recs), "wraps": h["wraps"], "evicted": h["evicted"], "last_n": h["last_n"],
-        "slot": h["slot"], "fallback": h["fallback"],
+        "slot": h["slot"], "fallback": h["fallback"], "prefix": h["prefix"],
         "segments": [{"kind": s["kind"], "n": s["n"], "off": s["rec"]["off"],
                       "seg_bytes": s["rec"]["size"] + sum(r["size"] for r in s["inputs"]),
                       "ckpt_record_bytes": s["rec"]["size"],

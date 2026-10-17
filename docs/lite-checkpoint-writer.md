@@ -136,6 +136,20 @@ and B > 0, the node stops: `I3H ckpt boot none ... fallback=stop base=B`, `I3H s
 the earlier checkpoint, so boot falls back to it. If a checkpoint is skipped, the base does not move
 (row 212 (4)).
 
+*Base move faults.* A base move that fails before any sector is sent (for example a timeout on the
+read-modify-write read) logs `I3H log base fail event=P ckpt=N`, drops nothing and keeps the prefix; the
+next verified checkpoint moves the base. A fault after a sector of the move was sent sets the cold session's
+reset-required state, so the node stops under the existing cold rule (rows 141/198/200), as for any cold
+write. This is intended: the cold store's state on the media is then unknown. `tests/recorder_ring.py`
+`rebase-fault` covers only the first case (a fault before anything is written).
+
+*Based images and non-LITE images.* A cold image with a log base does not boot on a flag-off or 1b image:
+their `super_validate` (`src/cold.c`, the `#else` arm of the reserved-bytes check) requires the reserved
+superblock bytes to be zero and refuses the superblock (SUPERBLOCK). This is not fixed in 1c. That check is
+the flag-off image's own code: accepting a base there changes the bytes of every flag-off and 1b image,
+which must stay identical to the base, and images already built would refuse it anyway. Going back from a
+LITE image needs a fresh cold store (or compaction later).
+
 The drop is logical only. The dropped bytes stay in the 8 MiB cold chain until compaction (A/B media,
 1d, not in this PR) reclaims them, so the cold store still fills and the row 141/198/200 stop applies.
 
@@ -145,6 +159,9 @@ the heap, atom store, cold window, pill/plan/app slots and MMIO). Media: `rpi4-s
 extent at LBA `COLD_MEDIA_START_LBA + 32768`, after the cold extent (`src/cold_media.h` checks at build time
 that the two do not overlap, and at the first ring access that the card holds the whole extent); `fake` does
 the same on the fake backend (RAM, for the fault tests); semihost writes `build/ring.img`; ram keeps it in RAM.
+The plan names `cold_media_rpi4_sd.c` for the ring media code. It lives in `src/cold_media.c` instead
+(`cold_media_ring_load` / `cold_media_ring_write`), because the session, owner lock and capacity live there,
+and it serves both the rpi4-sd and fake backends; `cold_media_rpi4_sd.c` is unchanged.
 It has two 128 B header slots (gen, head, tail, seqs, wraps, evicted, blake3) and 64 B records: genesis
 (kernel blake3), ckpt (D ‖ kernel blake3 ‖ job_sum ‖ ++jam state), input (log entry jam) and wrap. A ring
 checkpoint is written every `I3_RING_EVERY` events (default 2,000; must be a multiple of K) and reuses the
@@ -167,17 +184,36 @@ intact (`status=ok`), else the other slot (`status=torn-older`), else the longes
 of either slot, committed over the broken slot (`status=torn-prefix`). It never formats after a chain check
 fails; with no valid prefix the ring stays off and the media is left as it is (`status=corrupt`).
 
-*Foreign data.* With no valid header slot the node formats only an extent that is all zero (`status=fresh`)
-or carries the ring's own magic and version (`status=reformat`; the generation continues above the highest
-one on the media). Anything else is refused: `I3H ring boot status=foreign`, ring off, nothing written. The
-on-media layout descriptor does not name the ring extent; that needs a new descriptor version (not in 1c).
+*Foreign data.* With no valid header slot for this ring size the node formats only:
+- an extent that is all zero (`status=fresh`), or
+- an extent with a whole header of its own (magic, version and checksum right) for another ring size
+  (`status=reformat`; it logs `I3H ring reformat old_bytes=X new_bytes=Y` and the generation continues
+  above the highest one on the media).
 
-**Off-device exact replay.** `tools/ring_image.py show build/ring.img` lists segments (it opens the ring as
-the node does, newest intact slot first). `tools/ring_image.py cold build/ring.img out.img oldest` builds a
-cold image (checkpoint + inputs, base = N, base job_sum from the ring checkpoint) that the same flag-on lite
-image boots. `tests/recorder_ring.py` compares its `/state-hash` with the full node's after the same causes.
-This replays on the lite image under QEMU, not on the full node: the full node boots a kernel jam and its own
-snapshots, and has no way to start from a ring checkpoint's state jam.
+Its own magic and version with no header to trust (bad checksums), or valid headers with no valid record
+prefix, is `status=corrupt`: ring off, media left as it is, and once per boot `I3H ring off reason=corrupt`
+plus an operator hint (`I3H ring hint: ...`). Anything else is refused: `I3H ring boot status=foreign`, ring
+off, nothing written. The on-media layout descriptor does not name the ring extent; that needs a new
+descriptor version, which current images refuse, so it is deferred. The build-time overlap check, the
+capacity check and these refusals are the guard.
+
+**GAP (Steward's ruling, row 212 (2)).** An all-zero range that belongs to another partition is still
+formatted as a fresh ring (`src/cold_media.h` ring layout comment, `src/i3_ring.c` `status=fresh`). Ruling:
+no rpi4-sd image with `I3_LITE_LOG` on is deployed until a layout descriptor version names the ring extent,
+and the board run uses a card whose ring area was zeroed on purpose. Cards that read erased blocks as 0xFF
+show `status=foreign` (the ring stays off) until the ring area is zeroed.
+
+**Off-device exact replay.** `tools/ring_image.py show build/ring.img` lists segments. It opens the ring as
+the node does: the newest intact slot, else the older slot, else the longest valid prefix from the tail of
+either slot (`"prefix": true`); no valid prefix is an error (the node's `status=corrupt`).
+`tools/ring_image.py cold build/ring.img out.img oldest` builds a cold image (checkpoint + inputs, base = N,
+base job_sum from the ring checkpoint) that the same flag-on lite image boots.
+
+On the full node: `tests/ring_full_replay.py RING FULL_NODE TARGET --zero CAUSES.json` writes a full-node host
+snapshot (I3SNAP, `full-node run --ephemeral --snapshot`) from the ring's oldest checkpoint, boots the full
+node from it, poke-jams the ring's inputs and reads `/state-hash` after each one. With `--zero` it also runs
+the same causes from zero and asserts every step. No full-node or kernel change is needed.
+`tests/recorder_ring.py` leg `fullreplay` runs it for the N=6, N=7 and wrap4 rings.
 
 **Measured** (QEMU, probe events, K = ring cadence = 2, 16 KiB ring):
 - ring ckpt record 5,960-5,976 B (8 B more than before for job_sum); input record 96 B per event;
