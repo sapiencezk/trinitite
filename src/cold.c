@@ -196,6 +196,76 @@ static int super_checksum_ok(const cold_super_t *s)
     return bytes_eq(digest, s->checksum, 32);
 }
 
+#if defined(COLD_LITE_LOG)
+/* Row 212 PR 1c log base, in the superblock's reserved bytes (cold.h).
+ * The superblock checksum covers only its first 64 bytes, so the base has
+ * its own check word: the first 8 bytes of BLAKE3 over those 64 bytes and
+ * the three base fields (never 0). All 32 bytes zero = no base. */
+typedef struct __attribute__((packed)) {
+    uint64_t index;
+    uint64_t off;
+    uint64_t job_sum;
+    uint64_t check;
+} cold_base_raw_t;
+typedef char cold_base_size_check[
+    sizeof(cold_base_raw_t) == sizeof(((cold_super_t *)0)->reserved) ? 1 : -1];
+
+static void base_get(const cold_super_t *s, cold_base_raw_t *b)
+{
+    uint8_t *d = (uint8_t *)b;
+    for (size_t i = 0; i < sizeof *b; i++)
+        d[i] = s->reserved[i];
+}
+
+static void base_put(cold_super_t *s, const cold_base_raw_t *b)
+{
+    const uint8_t *d = (const uint8_t *)b;
+    for (size_t i = 0; i < sizeof *b; i++)
+        s->reserved[i] = d[i];
+}
+
+static uint64_t base_check_of(const cold_super_t *s, const cold_base_raw_t *b)
+{
+    uint8_t buf[64 + 24], digest[32];
+    const uint8_t *p = (const uint8_t *)s, *q = (const uint8_t *)b;
+    uint64_t v = 0;
+    for (size_t i = 0; i < 64; i++)
+        buf[i] = p[i];
+    for (size_t i = 0; i < 24; i++)
+        buf[64 + i] = q[i];
+    blake3_hash(buf, sizeof buf, digest);
+    for (int i = 0; i < 8; i++)
+        v |= (uint64_t)digest[i] << (i * 8);
+    return v ? v : 1;
+}
+
+/* Recompute the check word after the 64 checksummed bytes changed. */
+static void super_seal(cold_super_t *s)
+{
+    cold_base_raw_t b;
+    base_get(s, &b);
+    if (b.index == 0 && b.off == 0 && b.job_sum == 0 && b.check == 0)
+        return;
+    b.check = base_check_of(s, &b);
+    base_put(s, &b);
+}
+
+static int base_reserved_ok(const cold_super_t *s)
+{
+    cold_base_raw_t b;
+    if (bytes_zero(s->reserved, sizeof s->reserved))
+        return 1;
+    base_get(s, &b);
+    return b.index != 0 && b.off >= COLD_DATA0 && (b.off & 7) == 0
+        && b.check == base_check_of(s, &b);
+}
+
+/* A move requested by cold_log_rebase, applied by the next append_obj's
+ * superblock write. off UINT64_MAX = the new data_head. */
+static cold_base_raw_t g_base_pending;
+static int g_base_pending_set;
+#endif
+
 static void object_header_digest(cold_obj_hdr_t *h)
 {
     blake3_hash((const uint8_t *)h, 72, h->header_digest);
@@ -255,7 +325,11 @@ static cold_result_t super_validate(uint64_t off, cold_super_t *out)
         return COLD_RESULT_HEADER;
     if (s.generation == 0 || s.generation == UINT64_MAX
         || s.commit != COLD_COMMIT
+#if defined(COLD_LITE_LOG)
+        || !base_reserved_ok(&s)
+#else
         || !bytes_zero(s.reserved, sizeof s.reserved)
+#endif
         || !super_checksum_ok(&s))
         return COLD_RESULT_SUPERBLOCK;
     if (s.data_head < COLD_DATA0 || s.data_head > COLD_SIZE
@@ -272,12 +346,23 @@ static cold_result_t super_validate(uint64_t off, cold_super_t *out)
     uint64_t log_count = 0;
     uint64_t latest_snap_off = 0;
     uint64_t latest_snap_generation = 0;
+#if defined(COLD_LITE_LOG)
+    cold_base_raw_t base;
+    base_get(&s, &base);
+    /* The base offset is an object boundary or data_head; entry B+1 is
+     * the first LOG object at or after it. */
+    int base_hit = base.index == 0 || base.off == s.data_head;
+#endif
     while (object_off < s.data_head) {
         cold_obj_hdr_t h;
         cold_result_t r = object_validate(
             &s, object_off, 0, expected_generation, &h);
         if (r != COLD_RESULT_VALID)
             return r;
+#if defined(COLD_LITE_LOG)
+        if (base.index != 0 && object_off == base.off)
+            base_hit = 1;
+#endif
         if (h.kind == KIND_LOG)
             log_count++;
         if (h.kind == KIND_SNAP) {
@@ -300,6 +385,10 @@ static cold_result_t super_validate(uint64_t off, cold_super_t *out)
     if (s.snap_off != latest_snap_off
         || s.snap_generation != latest_snap_generation)
         return COLD_RESULT_GENERATION;
+#if defined(COLD_LITE_LOG)
+    if (!base_hit)
+        return COLD_RESULT_OFFSET;
+#endif
     if (out)
         *out = s;
     return COLD_RESULT_VALID;
@@ -493,6 +582,16 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
     for (size_t i = 0; i < sizeof next.checksum; i++)
         next.checksum[i] = 0;
     super_checksum(&next);
+#if defined(COLD_LITE_LOG)
+    if (g_base_pending_set) {
+        cold_base_raw_t b = g_base_pending;
+        if (b.off == UINT64_MAX)
+            b.off = new_head;
+        b.check = 0;
+        base_put(&next, &b);
+    }
+    super_seal(&next);
+#endif
     uint64_t next_slot = old_slot == 0 ? COLD_SLOT1 : COLD_SLOT0;
     if (!cold_write_phase(COLD_WRITE_SUPERBLOCK, next_slot,
                           &next, sizeof next)) {
@@ -706,6 +805,9 @@ cold_deploy_result_t cold_store_deployment(noun pill_blob,
     next.snap_off = snapshot_off;
     for (size_t i = 0; i < sizeof next.checksum; i++) next.checksum[i] = 0;
     super_checksum(&next);
+#if defined(COLD_LITE_LOG)
+    super_seal(&next);
+#endif
     uint64_t next_slot = old_slot == 0 ? COLD_SLOT1 : COLD_SLOT0;
     if (!cold_write_phase(COLD_WRITE_SUPERBLOCK, next_slot,
                           &next, sizeof next)
@@ -826,6 +928,83 @@ int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
         off = next;
     }
     return 0;
+}
+#endif
+
+#if defined(COLD_LITE_LOG)
+/* Row 212 PR 1c: the log base and the logical log length (cold.h). One walk
+ * from the base offset counts the entries at or after it. */
+int cold_log_base(cold_log_base_t *out)
+{
+    cold_super_t s;
+    cold_base_raw_t b;
+    if (!out || select_super(&s, 0) != COLD_RESULT_VALID)
+        return -1;
+    base_get(&s, &b);
+    if (b.index == 0) {
+        out->index = 0;
+        out->off = COLD_DATA0;
+        out->job_sum = 0;
+        out->len = s.log_count;
+        return 0;
+    }
+    uint64_t off = b.off, n = 0;
+    while (off < s.data_head) {
+        cold_obj_hdr_t h;
+        cold_result_t r = object_validate(&s, off, 0, 0, &h);
+        if (r != COLD_RESULT_VALID) {
+            g_last_result = r;
+            return -1;
+        }
+        if (h.kind == KIND_LOG)
+            n++;
+        if (!align8_checked(off + sizeof h + h.len, &off))
+            return -1;
+    }
+    out->index = b.index;
+    out->off = b.off;
+    out->job_sum = b.job_sum;
+    out->len = b.index + n;
+    return 0;
+}
+
+int cold_log_rebase(uint64_t new_index, uint64_t job_sum, noun marker)
+{
+    cold_log_base_t cur;
+    cold_super_t s;
+    const uint8_t *bytes;
+    uint64_t len;
+    if (new_index == 0 || cold_log_base(&cur) != 0
+        || new_index < cur.index || new_index > cur.len
+        || select_super(&s, 0) != COLD_RESULT_VALID)
+        return -1;
+    /* Entry new_index+1 is the (new_index - B)-th LOG object (0-based)
+     * at or after the current base offset; data_head if there is none. */
+    uint64_t off = cur.off, skip = new_index - cur.index, found = UINT64_MAX;
+    while (off < s.data_head) {
+        cold_obj_hdr_t h;
+        if (object_validate(&s, off, 0, 0, &h) != COLD_RESULT_VALID)
+            return -1;
+        if (h.kind == KIND_LOG) {
+            if (skip == 0) {
+                found = off;
+                break;
+            }
+            skip--;
+        }
+        if (!align8_checked(off + sizeof h + h.len, &off))
+            return -1;
+    }
+    if (jam_bytes(marker, &bytes, &len) != 0)
+        return -1;
+    g_base_pending.index = new_index;
+    g_base_pending.off = found; /* UINT64_MAX: the new data_head */
+    g_base_pending.job_sum = job_sum;
+    g_base_pending.check = 0;
+    g_base_pending_set = 1;
+    int r = append_obj(KIND_BLOB, bytes, len, 0);
+    g_base_pending_set = 0;
+    return r;
 }
 #endif
 
