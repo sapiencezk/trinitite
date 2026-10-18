@@ -243,7 +243,9 @@ and off by default. Flag-off images are byte-identical (`tests/checkpoint_flag_o
   root. Replay, a stopped node and a skipped checkpoint never compact.
 - **Flip.** A transaction on the other persist half: copy the core's sample, install it, check that
   axis 27 hashes to D, then commit. Any failure aborts. The node keeps the old half and logs
-  `I3H compact skip event=N reason=code|root|copy|hash`.
+  `I3H compact skip event=N reason=code|root|copy|hash`. After the commit the
+  atom store rebuild can still be skipped (`reason=rebuild-room|rebuild-walk|rebuild-index`); the node then
+  runs on the new half with the store as it was.
 - **Atom store.** After the commit, the host walks the state, the poke and peek formulas, the
   fast-hint registry and `g_mean` (`nock_host_roots`). The walk stops at code-region cells. The atoms
   from the boot cue stay as a fixed prefix. Live atoms slide down in allocation order and the index is
