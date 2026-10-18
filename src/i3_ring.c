@@ -36,9 +36,12 @@
  * size (status=reformat), and never after a chain check fails. Its own magic
  * with no header or record to trust is status=corrupt; anything else is
  * status=foreign. Both leave the media as it is and run without the ring.
- * GAP (Steward's ruling): a zero range that belongs to someone else is still
- * formatted; see docs/lite-checkpoint-writer.md. Not measured on the board: SD append time, torn-write
- * behaviour of real cards, wear, and the boot load time.
+ * GAP (Steward's ruling): an all-zero range that belongs to another partition
+ * is still formatted. No rpi4-sd image with I3_LITE_LOG on is deployed until
+ * the layout descriptor names the ring, and the board run uses a card whose
+ * ring area was zeroed on purpose (docs/lite-checkpoint-writer.md).
+ * Not measured on the board: SD append time, torn-write behaviour of real
+ * cards, wear, and the boot load time.
  */
 #include <stddef.h>
 #include <stdint.h>

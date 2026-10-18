@@ -90,8 +90,9 @@ void cold_media_reset_session(void);
  * the ring formats only an extent that is all zero or holds a whole header of
  * its own for another ring size (src/i3_ring.c); anything else is refused.
  * GAP (Steward's ruling): an all-zero range that belongs to another partition
- * is still formatted. No rpi4-sd image with I3_LITE_LOG on is deployed until a
- * layout descriptor version names the ring (docs/lite-checkpoint-writer.md).
+ * is still formatted. No rpi4-sd image with I3_LITE_LOG on is deployed until
+ * the layout descriptor names the ring, and the board run uses a card whose
+ * ring area was zeroed on purpose (docs/lite-checkpoint-writer.md).
  *
  * Session. Ring I/O shares the backend and its owner lock with the cold
  * store, but not its reset rule: a ring fault marks only the ring as needing

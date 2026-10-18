@@ -27,6 +27,7 @@ from jam import jam  # noqa: E402
 RING_MAGIC, REC_MAGIC = 0x0031474E49523349, 0x52523349
 DATA0, SLOT, REC_HDR = 1024, 512, 64
 GENESIS, CKPT, INPUT, WRAP = 1, 2, 3, 4
+UINT64_MAX = 0xFFFF_FFFF_FFFF_FFFF  # never a valid gen, as in src/i3_ring.c (h.gen == UINT64_MAX)
 KIND = {GENESIS: "genesis", CKPT: "ckpt", INPUT: "input"}
 HDR = struct.Struct("<QIIQQQQQQQQQQ32s")
 REC = struct.Struct("<IIQQQ32s")
@@ -63,7 +64,7 @@ def headers(img: bytes) -> list[dict]:
         h = dict(zip(("magic", "version", "header_len", "ring_bytes", "gen", "head", "tail",
                       "tail_seq", "next_seq", "wraps", "evicted", "last_n", "zero", "checksum"), f))
         if (h["magic"] != RING_MAGIC or h["version"] != 1 or h["header_len"] != 128 or h["zero"]
-                or not h["gen"] or b3(raw[:96]) != h["checksum"]):
+                or not h["gen"] or h["gen"] == UINT64_MAX or b3(raw[:96]) != h["checksum"]):
             continue
         h["slot"] = slot
         out.append(h)
