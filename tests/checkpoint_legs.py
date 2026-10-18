@@ -47,13 +47,15 @@ import tools.scale_scan as sc
 REASON = {"cells": "cells", "jam": "jam-size", "stack": "stack", "wrapper": "wrapper"}
 EVENTS = 8
 # Accepted live steps before the persist stop with the flag off, measured with the 1499kernel
-# #258 kernel jam (bff56583). With the pre-#258 kernel (trinitite 9927b88c) --reserve3 was 33.
+# #258 kernel jam (bff56583) and again, unchanged, with the landing kernel jam (main 3d100787).
+# With the pre-#258 kernel (trinitite 9927b88c) --reserve3 was 33.
 FLAG_OFF_ACCEPTED = {"--reserve": 32, "--reserve3": 35, "--multiboot": 68}
 # 1b: the boot-time checkpoint search logs `I3H ckpt boot ...` lines (none/reject/load/boot) at the
 # start of replay; they are not checkpoint writes, so the misplaced-write checks skip them.
 BOOT_LINE = "I3H ckpt boot "
-# Flag-on --multiboot (I3_CHECKPOINT_EVERY=2, H=12000), pinned with the 1499kernel #258 kernel jam
-# (bff56583). Boots in order: the 8 write boots of 25 events (the first also loads the bundle and
+# Flag-on --multiboot (I3_CHECKPOINT_EVERY=2, H=12000), pinned with the landing kernel jam
+# (1499kernel main 3d100787); the counts are as at #258's head bff56583, the final hash moved
+# with the kernel jam (bff56583: 71fb60e5). Boots in order: the 8 write boots of 25 events (the first also loads the bundle and
 # %manage 2), then replay/third/fourth, each feeding one probe event.
 MULTIBOOT_ON = {
     "accepted": 203,  # in the 8 write boots: %load-bundle (2) + %manage + 200 events
@@ -70,7 +72,7 @@ MULTIBOOT_ON = {
                "write6": list(range(154, 179, 2)), "write7": list(range(180, 203, 2)),
                "replay": [204], "third": [], "fourth": [206]},
     "final_event": 206,
-    "final_hash": "71fb60e59a23e2df30d41ea12cfec5833d701ce5beb8ee4310c32113ccf37c06",
+    "final_hash": "0c36f958e76162abc5fe13e6a3b53e6710f47e4c180a2be43c6b5e991e4acdec",
 }
 
 
