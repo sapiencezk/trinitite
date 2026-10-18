@@ -130,6 +130,7 @@ uint64_t hot_entry_hits(int i);
 void     hot_hits_reset(void);
 
 void     fast_reset(void);
+void     nock_host_roots(void (*f)(noun, int)); /* row 221, I3_COMPACT only */
 uint64_t fast_clue_count(void);
 int      fast_reg_count(void);
 int      fast_first_clue_ok(void);

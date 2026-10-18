@@ -98,8 +98,8 @@ rejected with `reason=load` and the node replayed from zero. Row 219 (approved b
 trace from the kernel's `+load`; it lands with #258's re-pin (bff56583). Trinitite's `src/nock.c` is
 unchanged. Measured with that kernel jam (same app, QEMU): `I3H ckpt boot load ... abort=none
 nock_ops_used=475 nock_cells_used=163 nock_eval_stack_peak=19` at every checkpoint N tried (2, 4, 5),
-and `tests/checkpoint_boot.py` passes against it. With the landing kernel jam (1499kernel main 3d100787,
-where that row is 219): `abort=none nock_ops_used=481 nock_cells_used=166 nock_eval_stack_peak=19`.
+and `tests/checkpoint_boot.py` passes against it. With the landing kernel jam (1499kernel main 3d100787):
+`abort=none nock_ops_used=481 nock_cells_used=166 nock_eval_stack_peak=19`.
 
 ## Rotation (1c: see the PR 1c section)
 - Amended row 212 (2) (1499kernel #263): the node keeps the last verified checkpoint plus every entry after
@@ -128,8 +128,8 @@ Amended row 212 (2), (3) and (4) (1499kernel main, amendment 5091bb19). Build wi
 `{index B, off, job_sum, check}` (`check` = first 8 bytes of blake3(superblock[0..64] ‖ base[0..24]),
 never 0; all zero = no base, so a flag-off image reads unchanged). Entry B+1 is the first LOG object at
 or after `off`. When checkpoint N verifies (`I3H ckpt ok`), the previous verified checkpoint P becomes the
-base: a small `[%i3-base P N]` BLOB is appended and its superblock carries base = P, with the row 213
-job sum of entries 1..P in `job_sum`. So the node keeps checkpoint N, the previous checkpoint P until
+base: a small `[%i3-base P N]` BLOB is appended and its superblock carries base = P, with a row 213
+job sum in `job_sum` (row 221 (7): the jobs of entries P+1..N; audit only, boot does not load it). So the node keeps checkpoint N, the previous checkpoint P until
 the next one verifies, and every entry after P. Entries 1..P are dropped from replay and from
 `log_len`. Boot looks only at checkpoints with n ≥ B and replays from `off`. If no checkpoint ≥ B is valid
 and B > 0, the node stops: `I3H ckpt boot none ... fallback=stop base=B`, `I3H stop reason=rotated`

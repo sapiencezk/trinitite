@@ -175,6 +175,42 @@
 #endif
 
 /*
+ * Row 221 (row 212 (c)): the code region. Only with I3_CHECKPOINT_EVERY > 0
+ * and I3_LITE_LOG (the row 212 flags, off by default). At boot the host cues
+ * the pill's kernel and runs the kick into this fixed region once, with the
+ * poke and peek formulas. Nothing writes to it after that, and no persist
+ * flip or reset touches it. If the build overflows it, boot halts with
+ * `I3H terminal=code-region`; it never spills into a persist half.
+ */
+#if defined(I3_HOST) && defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 && defined(I3_LITE_LOG)
+#define I3_COMPACT 1
+#define I3_CODE_BASE (PLATFORM_DRAM_BASE + 0x0D000000ULL)
+#define I3_CODE_SIZE 0x00C00000ULL /* 12 MiB */
+#define I3_CODE_TOP  (I3_CODE_BASE + I3_CODE_SIZE)
+#if I3_CODE_BASE < (PLATFORM_CUE_RUB_SCRATCH + 0x00020000ULL)
+#error "code region overlaps the cue rub scratch"
+#endif
+#if I3_CODE_BASE < (PLATFORM_CUE_CACHE_BASE + 0x01800000ULL)
+#error "code region overlaps the cue cache"
+#endif
+#if I3_CODE_BASE < BSS_TOP
+#error "code region overlaps .bss"
+#endif
+#if I3_CODE_TOP > PLATFORM_PILL_BASE
+#error "code region overlaps the pill, plan and app slots"
+#endif
+#if I3_CODE_TOP > I3_RING_WINDOW_BASE
+#error "code region overlaps the ring window"
+#endif
+#if I3_CODE_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
+#error "code region overlaps MMIO"
+#endif
+#if I3_CODE_TOP > 0x100000000ULL
+#error "code region must sit below 4 GiB (32-bit cell pointers)"
+#endif
+#endif
+
+/*
  * PILL_BASE carries either:
  *   - isolated legacy I1 PILL v2: u64 len, shape, version/pad, jam at +16; or
  *   - I2 PILL2: 256-byte integrity/RuntimeIdentity header, then bounded jam.

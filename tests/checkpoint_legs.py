@@ -24,6 +24,15 @@
              boot after the first boots from the pinned checkpoint, and the final /state-hash (read by
              a flag-on boot of the last cold image) equals a flag-off replay from zero of that image
              and the pinned hash. The flag-off --multiboot leg (68 accepted, stop at 69) is unchanged.
+             --reserve/--reserve3 with CKPT_LEGS_EXTRA="I3_LITE_LOG=1" (row 221: compaction rides on
+             the row 212 flags): each verified checkpoint compacts persist back to the live set, so
+             the persist stop the flag-off legs pin no longer comes. Pinned instead (RESERVE_ON):
+             every fed step accepted, no stop in any boot, at least two compactions and no
+             compaction skip in the write boot, every compaction's atom store rebuild identical
+             (kept_digest = after_digest, missing=0) with the store back to one size, no ckpt line
+             inside a replay window, the boots after the first boot from a checkpoint, and a flag-on
+             boot of the last cold image boots from the final checkpoint and reads its D (the pinned
+             hash). Without I3_LITE_LOG (compaction off) the flag-off counts (32/35) still apply.
 
 Run from the 1499kernel root (PATH=$HOME/.cargo/bin first):
   python3 TRINITITE/tests/checkpoint_legs.py skip LEG OUT FULL_NODE
@@ -73,6 +82,13 @@ MULTIBOOT_ON = {
                "replay": [204], "third": [], "fourth": [206]},
     "final_event": 206,
     "final_hash": "0c36f958e76162abc5fe13e6a3b53e6710f47e4c180a2be43c6b5e991e4acdec",
+}
+# Row 221 compaction on (I3_LITE_LOG=1), landing kernel jam (1499kernel main 3d100787).
+RESERVE_ON = {
+    "--reserve": {"accepted": 123, "final_event": 126,
+                  "final_hash": "0c36f958e76162abc5fe13e6a3b53e6710f47e4c180a2be43c6b5e991e4acdec"},
+    "--reserve3": {"accepted": 207, "final_event": 210,
+                   "final_hash": "0c36f958e76162abc5fe13e6a3b53e6710f47e4c180a2be43c6b5e991e4acdec"},
 }
 
 
@@ -207,6 +223,9 @@ def replay_leg(out: Path, full: Path, mode: str) -> int:
         # from checkpoint; t.main() reports FAIL because no write boot stops. Pinned instead.
         print(f"(lite_replay_ceiling rc={rc}: its stop expectation is the flag-off one)")
         return multiboot_on(out)
+    if "I3_LITE_LOG=1" in os.environ.get("CKPT_LEGS_EXTRA", "").split():
+        print(f"(lite_replay_ceiling rc={rc}: its stop expectation is the flag-off one)")
+        return reserve_on(out, mode)
     writes = sorted(p for p in out.glob("write*") if (p / "uart.log").exists())
     stopped = [out / d for d in ("replay", "third", "fourth") if (out / d / "uart.log").exists()]
     ok_lines, bad, accepted = 0, [], 0
@@ -225,6 +244,64 @@ def replay_leg(out: Path, full: Path, mode: str) -> int:
           f"stopped boots={len(stopped)} misplaced={bad[:5]}")
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
+
+
+def reserve_on(out: Path, mode: str) -> int:
+    """Row 221: --reserve/--reserve3 with compaction on (see RESERVE_ON)."""
+    M, bad, accepted, cmp_ok, sizes = RESERVE_ON.get(mode), [], 0, 0, set()
+    ev = lambda l: int(l.split("event=")[1].split()[0])
+    kv = lambda l: dict(x.split("=", 1) for x in l.split()[3:] if "=" in x)
+    names = sorted(p.name for p in out.glob("write*") if (p / "uart.log").exists()) + ["replay", "third", "fourth"]
+    last_ok = {}
+    for name in names:
+        f = out / name / "uart.log"
+        if not f.exists():
+            bad.append(f"{name}:missing"); continue
+        ls = f.read_text().splitlines()
+        if name.startswith("write"):
+            accepted += sum(l.startswith("I3L1 effects name=w-") for l in ls)
+            cmp_ok += sum(l.startswith("I3H compact ok ") for l in ls)
+        elif not [l for l in ls if l.startswith("I3H ckpt boot event=")] or \
+                [l for l in ls if l.startswith("I3H ckpt boot none ")]:
+            bad.append(f"{name}:not-from-ckpt")
+        if any(l.startswith(("I3H stop reason=", "I3H trip-stop reason=", "I3H refused stopped=")) for l in ls):
+            bad.append(f"{name}:stop")
+        bad += [f"{name}: {l}" for l in ckpt_misplaced(ls)]
+        bad += [f"{name}: {l}" for l in ls if l.startswith("I3H compact skip ")]
+        for l in ls:
+            if l.startswith("I3H compact ok "):
+                d = kv(l)
+                if d.get("kept_digest") != d.get("after_digest") or d.get("missing") != "0":
+                    bad.append(f"{name}:rebuild {l[:120]}")
+                sizes.add(d.get("atom_bytes", "").split("->")[-1])
+            if l.startswith("I3H ckpt ok "):
+                last_ok[ev(l)] = l.split("sha256=")[1].split()[0]
+    if cmp_ok < 2:
+        bad.append(f"compactions={cmp_ok}")
+    if len(sizes) != 1:
+        bad.append(f"store-sizes={sorted(sizes)}")
+    fe = max(last_ok) if last_ok else None
+    if M is None:
+        bad.append(f"unpinned: accepted={accepted} final_event={fe} final_hash={last_ok.get(fe)}")
+        M = {"accepted": accepted, "final_event": fe, "final_hash": last_ok.get(fe)}
+    if accepted != M["accepted"]:
+        bad.append(f"accepted={accepted}")
+    if fe != M["final_event"] or last_ok.get(fe) != M["final_hash"]:
+        bad.append(f"final ckpt={fe}/{last_ok.get(fe)}")
+    cold, pill = out / "fourth/build/cold.img", out / "normal.pill"
+    img = next(iter(sorted(out.glob("tt-h*/kernel8.img"))), None)
+    s = lp.Steps("z"); s.steps.append(nock_cell(cord("state-hash"), cord(s._name("h")), 0))
+    mem_wait("final-ckpt boot")
+    on = t.boot(img, pill, jam_bytes(nock_list(s.steps)), out / "final-ckpt", cold)
+    h = reads(on).get("z-h") or {}
+    on_from = [ev(l) for l in on if l.startswith("I3H ckpt boot event=")]
+    if on_from != [M["final_event"]] or h.get("hash") != M["final_hash"] or h.get("event") != M["final_event"]:
+        bad.append(f"final-ckpt boot_from={on_from} read={h.get('event')}/{h.get('hash')}")
+    print(f"replay {mode} compaction on: accepted={accepted} (flag off {FLAG_OFF_ACCEPTED.get(mode)}) "
+          f"compactions in write boots={cmp_ok} store after rebuild={sorted(sizes)} "
+          f"final ckpt={fe}/{last_ok.get(fe)} final read={h.get('event')}/{h.get('hash')} bad={bad[:6]}")
+    print("PASS" if not bad else "FAIL")
+    return 0 if not bad else 1
 
 
 def main() -> int:
