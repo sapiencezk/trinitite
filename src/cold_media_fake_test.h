@@ -23,6 +23,8 @@ typedef enum {
 
 void cold_media_fake_fault_set(cold_media_fake_fault_t fault,
                                uint64_t transfer_boundary);
+void cold_media_fake_fault_arm(cold_media_fake_fault_t fault,
+                               uint64_t transfer_boundary);
 void cold_media_fake_fault_clear(void);
 uint64_t cold_media_fake_smoketest(void);
 uint64_t cold_media_fake_selftest(void);

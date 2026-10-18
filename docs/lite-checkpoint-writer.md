@@ -88,25 +88,28 @@ persisted and before replay (`ckpt_boot` in `src/i3_host.c`):
    entry 1 and the rotated-log stop cannot arise yet. A rejected attempt restores the booted core and
    event number and resets scratch; persist cells a failed persist copy took are not returned.
 
-### Former blocker (1b), resolved by row 216 (1499kernel #258)
+### Former blocker (1b), resolved by row 219 (1499kernel #258)
 The wrapper's outer `+load` began `~&  build-hash+hash` (hoon/lib/wrapper.hoon, vendored from
 NockChain). Trinitite evaluates every dynamic hint's clue (src/nock.c op 11), and that `%slog` clue
 rendered the vase with `sell` (the type printer), unjetted. With the pre-#258 kernel (box, QEMU, chain-5
 app, checkpoint at N=4) the load stopped at the cell bound (`abort=cells`, 128,000 cells, 440,489 ops),
 and with no cell limit it crashed `%meme` after 1,395,186 cells and 4,689,346 ops, so every header was
-rejected with `reason=load` and the node replayed from zero. Row 216 (approved by Guillaume) removes the
+rejected with `reason=load` and the node replayed from zero. Row 219 (approved by Guillaume) removes the
 trace from the kernel's `+load`; it lands with #258's re-pin (bff56583). Trinitite's `src/nock.c` is
 unchanged. Measured with that kernel jam (same app, QEMU): `I3H ckpt boot load ... abort=none
 nock_ops_used=475 nock_cells_used=163 nock_eval_stack_peak=19` at every checkpoint N tried (2, 4, 5),
 and `tests/checkpoint_boot.py` passes against it. With the landing kernel jam (1499kernel main 3d100787,
 where that row is 219): `abort=none nock_ops_used=481 nock_cells_used=166 nock_eval_stack_peak=19`.
 
-## Rotation (later PR, 1c)
-- Only after the newest checkpoint verified. Keep: newest verified checkpoint + the previous one until the
-  next verifies, and every entry after the oldest kept one. Retention in entries, floor = 2-3 days at cycle rate.
-- If a checkpoint cannot be written (skip), rotation stays suspended and the 141/198/213 stop applies when full.
+## Rotation (1c: see the PR 1c section)
+- Amended row 212 (2) (1499kernel #263): the node keeps the last verified checkpoint plus every entry after
+  it, and the previous checkpoint until the next one verifies. Entries before the kept checkpoint are dropped.
+  There is no time-based retention floor on the node: long-term history lives in the SD recorder ring (a
+  fixed byte budget, oldest segment overwritten first) and upstream.
+- The base moves only after the newest checkpoint verified. If a checkpoint cannot be written (skip), the
+  base does not move, and the 141/198/213 stop applies when the cold store is full.
 
-## SD log and compaction (later PR, 1c/1d)
+## SD log and compaction (base and ring in 1c; compaction 1d)
 - Today `cold_log` is an append-only chain in the same cold image as blobs; there is no way to drop a prefix.
 - Plan: a log "base" field in the superblock (first retained entry index + the checkpoint header id it
   follows). Rotation = one superblock write moving the base; replay starts at base. Compaction = copy kept
@@ -115,11 +118,119 @@ where that row is 219): `abort=none nock_ops_used=481 nock_cells_used=166 nock_e
 - Compaction also reclaims persist-reserve growth (row 213's lifetime limit) because replay then starts
   at the checkpoint, so the job sum restarts there.
 
+## PR 1c: running log + SD recorder ring (branch `feat/lite-recorder-ring`)
+Amended row 212 (2), (3) and (4) (1499kernel main, amendment 5091bb19). Build with
+`I3_CHECKPOINT_EVERY=K I3_LITE_LOG=1`; off by default. Flag-off images and 1b flag-on images
+(`I3_CHECKPOINT_EVERY` without `I3_LITE_LOG`) are byte-identical to the base
+(`tests/checkpoint_flag_off.sh 8d287abd 6613d3b6`).
+
+**Running log.** The 32 reserved superblock bytes carry a log base
+`{index B, off, job_sum, check}` (`check` = first 8 bytes of blake3(superblock[0..64] ‖ base[0..24]),
+never 0; all zero = no base, so a flag-off image reads unchanged). Entry B+1 is the first LOG object at
+or after `off`. When checkpoint N verifies (`I3H ckpt ok`), the previous verified checkpoint P becomes the
+base: a small `[%i3-base P N]` BLOB is appended and its superblock carries base = P, with the row 213
+job sum of entries 1..P in `job_sum`. So the node keeps checkpoint N, the previous checkpoint P until
+the next one verifies, and every entry after P. Entries 1..P are dropped from replay and from
+`log_len`. Boot looks only at checkpoints with n ≥ B and replays from `off`. If no checkpoint ≥ B is valid
+and B > 0, the node stops: `I3H ckpt boot none ... fallback=stop base=B`, `I3H stop reason=rotated`
+(row 212 (3), row 141 stop). A crash after a checkpoint is written but before it verifies leaves the base at
+the earlier checkpoint, so boot falls back to it. If a checkpoint is skipped, the base does not move
+(row 212 (4)).
+
+*Base move faults.* A base move that fails before any sector is sent (for example a timeout on the
+read-modify-write read) logs `I3H log base fail event=P ckpt=N`, drops nothing and keeps the prefix; the
+next verified checkpoint moves the base. A fault after a sector of the move was sent sets the cold session's
+reset-required state, so the node stops under the existing cold rule (rows 141/198/200), as for any cold
+write. This is intended: the cold store's state on the media is then unknown. `tests/recorder_ring.py`
+`rebase-fault` covers only the first case (a fault before anything is written).
+
+*Based images and non-LITE images.* A cold image with a log base does not boot on a flag-off or 1b image:
+their `super_validate` (`src/cold.c`, the `#else` arm of the reserved-bytes check) requires the reserved
+superblock bytes to be zero and refuses the superblock (SUPERBLOCK). This is not fixed in 1c. That check is
+the flag-off image's own code: accepting a base there changes the bytes of every flag-off and 1b image,
+which must stay identical to the base, and images already built would refuse it anyway. Going back from a
+LITE image needs a fresh cold store (or compaction later).
+
+The drop is logical only. The dropped bytes stay in the 8 MiB cold chain until compaction (A/B media,
+1d, not in this PR) reclaims them, so the cold store still fills and the row 141/198/200 stop applies.
+
+**Recorder ring** (`src/i3_ring.c`). This is a fixed-size byte ring: `I3_RING_BYTES`, default 64 MiB, a
+multiple of 512, at most 128 MiB. Its RAM window is at DRAM + 0x30000000 (`src/memory.h` checks it against
+the heap, atom store, cold window, pill/plan/app slots and MMIO). Media: `rpi4-sd` writes through to its own
+extent at LBA `COLD_MEDIA_START_LBA + 32768`, after the cold extent (`src/cold_media.h` checks at build time
+that the two do not overlap, and at the first ring access that the card holds the whole extent); `fake` does
+the same on the fake backend (RAM, for the fault tests); semihost writes `build/ring.img`; ram keeps it in RAM.
+The plan names `cold_media_rpi4_sd.c` for the ring media code. It lives in `src/cold_media.c` instead
+(`cold_media_ring_load` / `cold_media_ring_write`), because the session, owner lock and capacity live there,
+and it serves both the rpi4-sd and fake backends; `cold_media_rpi4_sd.c` is unchanged.
+It has two 128 B header slots (gen, head, tail, seqs, wraps, evicted, blake3) and 64 B records: genesis
+(kernel blake3), ckpt (D ‖ kernel blake3 ‖ job_sum ‖ ++jam state), input (log entry jam) and wrap. A ring
+checkpoint is written every `I3_RING_EVERY` events (default 2,000; must be a multiple of K) and reuses the
+verified running checkpoint. When the ring is full, the oldest checkpoint and the inputs after it are
+evicted together.
+
+*Faults.* A ring media fault (boot load, write or barrier) is logged (`I3H ring media fault op=... status=...`)
+and turns the ring off for the rest of the boot (`I3H ring off reason=media`; later ring checkpoints log
+`I3H ring skip ... reason=off`). The ring keeps its own reset flag in `cold_media.c`: it never sets the cold
+session's `g_reset_required`, so a ring fault never stops the cold log or the node. The boot load gets a
+fresh 5 s deadline per 256 KiB chunk and stops after 60 s in total (then the ring is off for that boot); it
+logs its time (`I3H ring load bytes=... ticks=... freq=...`).
+
+*Torn writes.* Each change writes whole sectors from the window. Per record: free space (evict, wrap), and if
+the tail or head moved: wrap marker, barrier, header commit; then the record, barrier, header commit. Each
+commit goes to the other header slot. The writer never writes into the sector that holds the oldest live
+record. The first sector of a new record can still hold the end of the last committed record, so a torn
+write there can damage that record. At boot the node opens the newest valid header slot whose chain is
+intact (`status=ok`), else the other slot (`status=torn-older`), else the longest valid prefix from the tail
+of either slot, committed over the broken slot (`status=torn-prefix`). It never formats after a chain check
+fails; with no valid prefix the ring stays off and the media is left as it is (`status=corrupt`).
+
+*Foreign data.* With no valid header slot for this ring size the node formats only:
+- an extent that is all zero (`status=fresh`), or
+- an extent with a whole header of its own (magic, version and checksum right) for another ring size
+  (`status=reformat`; it logs `I3H ring reformat old_bytes=X new_bytes=Y` and the generation continues
+  above the highest one on the media).
+
+Its own magic and version with no header to trust (bad checksums), or valid headers with no valid record
+prefix, is `status=corrupt`: ring off, media left as it is, and once per boot `I3H ring off reason=corrupt`
+plus an operator hint (`I3H ring hint: ...`). Anything else is refused: `I3H ring boot status=foreign`, ring
+off, nothing written. The on-media layout descriptor does not name the ring extent; that needs a new
+descriptor version, which current images refuse, so it is deferred. The build-time overlap check, the
+capacity check and these refusals are the guard.
+
+**GAP (Steward's ruling, row 212 (2)).** An all-zero range that belongs to another partition is still
+formatted as a fresh ring (`src/cold_media.h` ring layout comment, `src/i3_ring.c` `status=fresh`). Ruling:
+no rpi4-sd image with `I3_LITE_LOG` on is deployed until a layout descriptor version names the ring extent,
+and the board run uses a card whose ring area was zeroed on purpose. Cards that read erased blocks as 0xFF
+show `status=foreign` (the ring stays off) until the ring area is zeroed.
+
+**Off-device exact replay.** `tools/ring_image.py show build/ring.img` lists segments. It opens the ring as
+the node does: the newest intact slot, else the older slot, else the longest valid prefix from the tail of
+either slot (`"prefix": true`); no valid prefix is an error (the node's `status=corrupt`).
+`tools/ring_image.py cold build/ring.img out.img oldest` builds a cold image (checkpoint + inputs, base = N,
+base job_sum from the ring checkpoint) that the same flag-on lite image boots.
+
+On the full node: `tests/ring_full_replay.py RING FULL_NODE TARGET --zero CAUSES.json` writes a full-node host
+snapshot (I3SNAP, `full-node run --ephemeral --snapshot`) from the ring's oldest checkpoint, boots the full
+node from it, poke-jams the ring's inputs and reads `/state-hash` after each one. With `--zero` it also runs
+the same causes from zero and asserts every step. No full-node or kernel change is needed.
+`tests/recorder_ring.py` leg `fullreplay` runs it for the N=6, N=7 and wrap4 rings.
+
+**Measured** (QEMU, probe events, K = ring cadence = 2, 16 KiB ring):
+- ring ckpt record 5,960-5,976 B (8 B more than before for job_sum); input record 96 B per event;
+- kept log bytes after a rebase 6,648-6,656 B (one checkpoint + 2 entries + marker).
+
+At K=2000 that gives ≈ 5,976 + 2,000 × 96 ≈ 198 KB per segment for these events, so ≈ 339 segments fit in 64 MiB.
+Real input sizes vary.
+
+**Not measured:** SD append time, torn-write behaviour of real cards, SD wear, the rpi4 ring boot load time
+(it reads the whole ring; the node now logs it), and the extra jam per step for ring inputs.
+
 ## Boot (PR 1b)
 Newest header whose sid loads, re-hashes to D and whose kernel-blake3 equals the booted pill's `g_jam_blake3`
 (same bytes-as-read rule, so a pill re-jammed to different bytes does not match) → cue into the
 versioned `+load` → replay entries after N. Fallback per row 212 (3). Never boot from an unverified image.
-Implemented as above (PR 1b section); the `+load` blocker is resolved by row 216 (1499kernel #258).
+Implemented as above (PR 1b section); the `+load` blocker is resolved by row 219 (1499kernel #258).
 
 ## Open questions
 1. ~~Is sha256(jam(axis 6)) exactly `/state-hash` (row 199)?~~ **Answered** by the flag-on smoke run

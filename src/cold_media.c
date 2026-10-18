@@ -31,6 +31,12 @@ cold_media_status_t cold_media_fake_sector_write(
     uint64_t, const uint8_t *, uint64_t, int *);
 cold_media_status_t cold_media_fake_barrier(uint64_t);
 void cold_media_fake_backend_reset(void);
+#if defined(COLD_MEDIA_RING)
+/* The fake ring extent (cold_media_fake.c): sector s of the ring. */
+cold_media_status_t cold_media_fake_ring_read(uint64_t, uint8_t *);
+cold_media_status_t cold_media_fake_ring_write(uint64_t, const uint8_t *, int *);
+cold_media_status_t cold_media_fake_ring_barrier(void);
+#endif
 #define backend_probe cold_media_fake_probe
 #define backend_read cold_media_fake_sector_read
 #define backend_write cold_media_fake_sector_write
@@ -136,6 +142,11 @@ static cold_media_status_t validate_descriptor(
     return COLD_MEDIA_OK;
 }
 
+#if defined(COLD_MEDIA_RING)
+static uint64_t g_ring_capacity;
+static int g_ring_reset_required; /* ring only, never the cold session */
+#endif
+
 static cold_media_status_t initialize(uint64_t deadline)
 {
     if (g_initialized)
@@ -173,6 +184,9 @@ static cold_media_status_t initialize(uint64_t deadline)
         return status;
     }
     g_read_only = read_only;
+#if defined(COLD_MEDIA_RING)
+    g_ring_capacity = capacity;
+#endif
     g_active = 1;
     diag_set(COLD_MEDIA_PHASE_LAYOUT, COLD_MEDIA_OK, 0,
              COLD_MEDIA_START_LBA, 1, 0);
@@ -407,5 +421,138 @@ void cold_media_reset_session(void)
     g_read_only = 0;
     g_owner = 0;
     g_reset_required = 0;
+#if defined(COLD_MEDIA_RING)
+    g_ring_reset_required = 0;
+#endif
     diag_set(COLD_MEDIA_PHASE_NONE, COLD_MEDIA_DISABLED, 0, 0, 0, 0);
 }
+
+#if defined(COLD_MEDIA_RING)
+/* Row 212 PR 1c recorder ring extent (cold_media.h). The ring shares the
+ * backend and the owner lock with the cold store but keeps its own
+ * reset-required flag: a ring fault never sets g_reset_required, so later
+ * cold I/O is not refused because of it (row 212 (2): a ring failure never
+ * stops the node). Ring I/O does not touch the cold diag record either. */
+
+static uint64_t ring_deadline(uint64_t seconds)
+{
+    uint64_t now = runtime_counter_now(), f = runtime_counter_freq();
+    uint64_t a = f <= UINT64_MAX / seconds ? f * seconds : UINT64_MAX;
+    return a <= UINT64_MAX - now ? now + a : UINT64_MAX;
+}
+
+static cold_media_status_t ring_range(uint64_t first, uint64_t count)
+{
+    if (count == 0 || first > COLD_MEDIA_RING_SECTORS
+        || count > COLD_MEDIA_RING_SECTORS - first
+        || COLD_MEDIA_RING_START_LBA + COLD_MEDIA_RING_SECTORS > g_ring_capacity)
+        return COLD_MEDIA_RANGE;
+    return COLD_MEDIA_OK;
+}
+
+static cold_media_status_t ring_begin(int write)
+{
+    cold_media_status_t status = initialize(ring_deadline(5));
+    if (status != COLD_MEDIA_OK)
+        return status;
+    if (g_ring_reset_required)
+        return COLD_MEDIA_RESET_REQUIRED;
+    if (write && g_read_only)
+        return COLD_MEDIA_READ_ONLY;
+    if (g_owner)
+        return COLD_MEDIA_BUSY;
+    return COLD_MEDIA_OK;
+}
+
+cold_media_status_t cold_media_ring_load(uint8_t *window, uint64_t bytes)
+{
+    cold_media_status_t status = ring_begin(0);
+    if (status != COLD_MEDIA_OK)
+        return status;
+    if (bytes != (uint64_t)(I3_RING_BYTES)
+        || ring_range(0, COLD_MEDIA_RING_SECTORS) != COLD_MEDIA_OK)
+        return COLD_MEDIA_UNDERSIZED;
+    uint64_t total = ring_deadline(COLD_MEDIA_RING_LOAD_SECONDS), chunk = 0;
+    g_owner = 1;
+    for (uint64_t s = 0; s < COLD_MEDIA_RING_SECTORS; s++) {
+        if (s % COLD_MEDIA_RING_CHUNK_SECTORS == 0)
+            chunk = ring_deadline(5);
+        if (deadline_expired(chunk) || deadline_expired(total)) {
+            status = COLD_MEDIA_TIMEOUT;
+            break;
+        }
+#if defined(COLD_MEDIA_FAKE)
+        status = cold_media_fake_ring_read(s, window + s * COLD_MEDIA_SECTOR_BYTES);
+#else
+        status = backend_read(COLD_MEDIA_RING_START_LBA + s,
+                              window + s * COLD_MEDIA_SECTOR_BYTES, chunk);
+#endif
+        if (status != COLD_MEDIA_OK)
+            break;
+    }
+    g_owner = 0;
+    if (status != COLD_MEDIA_OK)
+        g_ring_reset_required = 1;
+    return status;
+}
+
+cold_media_status_t cold_media_ring_write(const uint8_t *window, uint64_t off,
+                                          uint64_t len)
+{
+    cold_media_status_t status = ring_begin(1);
+    if (status != COLD_MEDIA_OK)
+        return status;
+    if (len == 0)
+        return COLD_MEDIA_RANGE;
+    uint64_t first = off / COLD_MEDIA_SECTOR_BYTES;
+    uint64_t last = (off + len - 1) / COLD_MEDIA_SECTOR_BYTES;
+    if (off + len < off || ring_range(first, last - first + 1) != COLD_MEDIA_OK)
+        return COLD_MEDIA_RANGE;
+    uint64_t chunk = 0;
+    g_owner = 1;
+    for (uint64_t s = first; s <= last; s++) {
+        int submitted = 0;
+        if ((s - first) % COLD_MEDIA_RING_CHUNK_SECTORS == 0)
+            chunk = ring_deadline(5);
+        if (deadline_expired(chunk)) {
+            status = COLD_MEDIA_TIMEOUT;
+            break;
+        }
+#if defined(COLD_MEDIA_FAKE)
+        status = cold_media_fake_ring_write(s,
+                                            window + s * COLD_MEDIA_SECTOR_BYTES,
+                                            &submitted);
+#else
+        status = backend_write(COLD_MEDIA_RING_START_LBA + s,
+                               window + s * COLD_MEDIA_SECTOR_BYTES,
+                               chunk, &submitted);
+#endif
+        if (status != COLD_MEDIA_OK) {
+            if (submitted)
+                status = COLD_MEDIA_WRITE_UNKNOWN;
+            break; /* never retry a submitted mutation */
+        }
+    }
+    g_owner = 0;
+    if (status != COLD_MEDIA_OK)
+        g_ring_reset_required = 1;
+    return status;
+}
+
+cold_media_status_t cold_media_ring_barrier(void)
+{
+    cold_media_status_t status = ring_begin(0);
+    if (status != COLD_MEDIA_OK)
+        return status;
+    g_owner = 1;
+#if defined(COLD_MEDIA_FAKE)
+    status = cold_media_fake_ring_barrier();
+#else
+    status = backend_barrier(ring_deadline(5));
+#endif
+    g_owner = 0;
+    if (status != COLD_MEDIA_OK)
+        g_ring_reset_required = 1;
+    return status;
+}
+#endif
