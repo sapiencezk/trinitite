@@ -1735,3 +1735,27 @@ noun nock_mook(noun trace)
     }
     return res;
 }
+
+#include "memory.h"
+#if defined(I3_COMPACT)
+/* Row 221 (6) (c): the fast-hint registry's nouns and the crash trace are
+ * host roots of the atom store rebuild. kind 0 = the registry and g_mean;
+ * kind 1 = I3_L1_PROBE-only diagnostic tables (test harness roots). */
+void nock_host_roots(void (*f)(noun, int))
+{
+    int i;
+    for (i = 0; i < g_fast_len; i++)
+        f(g_fast_reg[i].battery, 0);
+    f(g_fast_first_clue, 0);
+    for (i = 0; i < g_fast_chum_n; i++)
+        f(g_fast_chums[i], 0);
+    f(g_mean, 0);
+#if defined(I3_L1_PROBE)
+    f(g_fast_first_core, 1);
+    for (i = 0; i < g_fast_core_n; i++)
+        f(g_fast_cores[i].core, 1);
+    for (i = 0; i < g_fast_walk_n; i++)
+        f(g_fast_walk[i], 1);
+#endif
+}
+#endif

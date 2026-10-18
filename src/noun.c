@@ -34,6 +34,14 @@ static uint64_t heap_noalloc_faults;
 static int      noun_tx_live;
 static int      noun_tx_mode;
 static uint8_t *noun_tx_cell_mark;
+#if defined(I3_COMPACT)
+/* Row 221 code region (memory.h). code_build: persist allocations go to the
+ * code region (boot only). code_end: its bump once the build is done. */
+static int      code_build;
+static int      code_overflow;
+static uint8_t *code_saved_ptr;
+static uint8_t *code_end = (uint8_t *)(uintptr_t)I3_CODE_BASE;
+#endif
 #if defined(M46_LIVE_REPLACEMENT)
 static uint64_t m46_heap_peak[2], m46_atom_peak, m46_atom_index_peak;
 static void m46_note_heap_peak(void)
@@ -90,6 +98,10 @@ void heap_persist_cap_extend(uint64_t cells)
 
 static uint8_t *persist_limit(int sel)
 {
+#if defined(I3_COMPACT)
+    if (code_build)
+        return (uint8_t *)(uintptr_t)I3_CODE_TOP;
+#endif
 #if defined(I3_PERSIST_HEADROOM_CELLS)
     if (persist_cap && sel == persist_sel && persist_cap < persist_base(sel) + HEAP_PERSIST_HALF)
         return persist_cap;
@@ -107,8 +119,24 @@ int heap_get_mode(void)
     return heap_mode;
 }
 
+#if defined(I3_COMPACT) && defined(I3_L1_PROBE)
+/* Row 221 tests: the L1 plan is test input, cued into the bottom of scratch
+ * (a persist flip would drop it), and every reset leaves it there. */
+static uint8_t *scratch_floor;
+void heap_scratch_floor_set(void)
+{
+    scratch_floor = scratch_ptr;
+}
+#endif
+
 void heap_scratch_reset(void)
 {
+#if defined(I3_COMPACT) && defined(I3_L1_PROBE)
+    if (scratch_floor) {
+        scratch_ptr = scratch_floor;
+        return;
+    }
+#endif
     scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
 }
 
@@ -183,8 +211,13 @@ static void *heap_alloc(size_t bytes) {
     } else {
         p   = persist_ptr;
         top = persist_limit(persist_sel);
-        if (p > top || (size_t)(top - p) < bytes)
+        if (p > top || (size_t)(top - p) < bytes) {
+#if defined(I3_COMPACT)
+            if (code_build)
+                code_overflow = 1;
+#endif
             nock_crash_meme("heap exhausted");
+        }
         persist_ptr = p + bytes;
     }
 #if defined(M38_D8_WAVE_B_B3)
@@ -219,8 +252,13 @@ static void *heap_alloc_checked(size_t bytes)
     } else {
         p = persist_ptr;
         top = persist_limit(persist_sel);
-        if (p > top || (size_t)(top - p) < bytes)
+        if (p > top || (size_t)(top - p) < bytes) {
+#if defined(I3_COMPACT)
+            if (code_build)
+                code_overflow = 1;
+#endif
             return 0;
+        }
         persist_ptr = p + bytes;
     }
 #if defined(M38_D8_WAVE_B_B3)
@@ -277,6 +315,14 @@ int alloc_cell_checked(noun head, noun tail, noun *out)
 
 void cell_inc(noun n) {
     if (!noun_is_cell(n)) return;
+#if defined(I3_COMPACT)
+    /* Row 221 (3): nothing writes the code region after the boot build. The
+     * refcount is unused on the I3 host, so its cells keep the counts they
+     * had when the build ended. */
+    if (!code_build && cell_ptr(n) >= (uint32_t)I3_CODE_BASE
+        && cell_ptr(n) < (uint32_t)I3_CODE_TOP)
+        return;
+#endif
     cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
     c->refcount++;
 }
@@ -449,6 +495,14 @@ static int cell_in_live_persist(uint32_t ptr)
     uintptr_t p = (uintptr_t)ptr;
     uintptr_t base = (uintptr_t)persist_base(persist_sel);
     uintptr_t bump = (uintptr_t)persist_ptr;
+#if defined(I3_COMPACT)
+    /* Row 221 (3): the copier keeps code-region cells as they are, the
+     * same way it keeps cells already in the live half. */
+    if (p >= (uintptr_t)I3_CODE_BASE && p < (uintptr_t)code_end)
+        return 1;
+    if (code_build)
+        return p >= (uintptr_t)I3_CODE_BASE && p < bump;
+#endif
     return p >= base && p < bump;
 }
 
@@ -1192,3 +1246,233 @@ noun pill_load(void) {
         return make_atom(limbs, sig);
     }
 }
+
+#if defined(I3_COMPACT)
+/* ── Row 221 (row 212 (c)): code region, persist flip, atom store rebuild ── */
+
+/* Boot only: persist allocations go to the code region until heap_code_end.
+ * A noun transaction (the bounded cue) marks and rewinds persist_ptr, which
+ * points into the code region meanwhile. */
+void heap_code_begin(void)
+{
+    code_saved_ptr = persist_ptr;
+    persist_ptr = (uint8_t *)(uintptr_t)I3_CODE_BASE;
+    code_overflow = 0;
+    code_build = 1;
+}
+
+void heap_code_end(void)
+{
+    code_end = persist_ptr;
+    persist_ptr = code_saved_ptr;
+    code_build = 0;
+}
+
+int heap_code_overflowed(void) { return code_overflow; }
+
+uint64_t heap_code_bytes(void)
+{
+    uint8_t *end = code_build ? persist_ptr : code_end;
+    return (uint64_t)(end - (uint8_t *)(uintptr_t)I3_CODE_BASE);
+}
+
+int heap_in_code(uint32_t ptr)
+{
+    return (uintptr_t)ptr >= (uintptr_t)I3_CODE_BASE && (uintptr_t)ptr < (uintptr_t)code_end;
+}
+
+int heap_in_live_persist(uint32_t ptr)
+{
+    uintptr_t p = (uintptr_t)ptr;
+    return p >= (uintptr_t)persist_base(persist_sel) && p < (uintptr_t)persist_ptr;
+}
+
+/* Row 221 (5): a transaction on the other persist half. Begin moves the
+ * bump to the other half's base; abort puts the old half and bump back, so
+ * the node keeps running on the old half; commit keeps the new half. Under
+ * the I3_PERSIST_HEADROOM_CELLS test knob the cap is lifted for the copy and
+ * re-armed after the commit at the new bump (H cells of headroom again). */
+static uint8_t *cmp_saved_ptr;
+static int      cmp_saved_sel;
+static int      cmp_active;
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+static uint8_t *cmp_saved_cap;
+#endif
+
+void heap_compact_begin(void)
+{
+    cmp_saved_ptr = persist_ptr;
+    cmp_saved_sel = persist_sel;
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+    cmp_saved_cap = persist_cap;
+    persist_cap = 0;
+#endif
+    cmp_active = 1;
+    persist_sel ^= 1;
+    persist_ptr = persist_base(persist_sel);
+}
+
+void heap_compact_commit(void)
+{
+    if (!cmp_active)
+        return;
+    cmp_active = 0;
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+    if (cmp_saved_cap)
+        heap_persist_cap_arm();
+#endif
+}
+
+void heap_compact_abort(void)
+{
+    if (!cmp_active)
+        return;
+    persist_ptr = cmp_saved_ptr;
+    persist_sel = cmp_saved_sel;
+#if defined(I3_PERSIST_HEADROOM_CELLS)
+    persist_cap = cmp_saved_cap;
+#endif
+    cmp_active = 0;
+}
+
+/* Row 221 (6): the atoms that exist before the first event stay as a fixed
+ * prefix; atom_store_pin marks its end once the boot build is done. */
+static uint8_t *atom_pin;
+
+void atom_store_pin(void) { atom_pin = atom_data_ptr; }
+
+uint64_t atom_store_pin_bytes(void)
+{
+    return atom_pin ? (uint64_t)(atom_pin - (uint8_t *)(uintptr_t)ATOM_DATA_BASE) : 0;
+}
+
+static uint64_t atom_rec_hash62(const atom_t *a)
+{
+    uint64_t h = ((uint64_t)a->blake3[0] | ((uint64_t)a->blake3[1] << 32))
+               & 0x3FFFFFFFFFFFFFFFULL;
+    return h ? h : 1;
+}
+
+static uint64_t atom_rec_bytes(const atom_t *a)
+{
+    return ((sizeof(atom_t) + a->size * sizeof(uint64_t)) + 7) & ~(uint64_t)7;
+}
+
+/* A check digest over records (64-bit words, in order). */
+static uint64_t rec_digest(uint64_t d, const uint8_t *p, uint64_t bytes)
+{
+    const uint64_t *w = (const uint64_t *)p;
+    for (uint64_t i = 0; i < bytes / 8; i++) {
+        d ^= w[i];
+        d *= 0x100000001B3ULL;
+        d ^= d >> 29;
+    }
+    return d;
+}
+
+/* 1 if the record's limbs still hash to the name it is filed under. */
+int atom_store_rehash_ok(uint64_t hash62)
+{
+    atom_t *a = atom_store_get(hash62);
+    uint8_t h[32];
+    uint64_t h62 = 0;
+    size_t bl;
+    if (!a || a->size == 0)
+        return 0;
+    bl = (size_t)((a->size - 1) * 8 + last_limb_bytes(a->limbs[a->size - 1]));
+    blake3_hash((const uint8_t *)a->limbs, bl, h);
+    for (int i = 0; i < 8; i++)
+        h62 |= (uint64_t)h[i] << (i * 8);
+    h62 &= 0x3FFFFFFFFFFFFFFFULL;
+    if (h62 == 0)
+        h62 = 1;
+    return h62 == hash62;
+}
+
+/* Row 221 (6): keep every record in the boot prefix or answered live by
+ * `live`, slide each kept record down in allocation order, then rebuild the
+ * 65,536-slot index in place. No second copy of the store. `mid`, if set, is
+ * called once halfway through the slide (test knob). Returns 0, touching
+ * nothing, when the index and the records disagree. */
+int atom_store_compact(int (*live)(uint64_t), void (*mid)(void), atom_compact_t *st)
+{
+    atom_index_entry_t *idx = (atom_index_entry_t *)ATOM_INDEX_BASE;
+    uint8_t *src = (uint8_t *)(uintptr_t)ATOM_DATA_BASE, *dst = src, *pin = atom_pin;
+    uint64_t t0, t1, k = 0, d = 0, n = 0, half, dg = 0xCBF29CE484222325ULL;
+    st->bytes_before = atom_store_bytes_used();
+    st->idx_before = atom_index_occupancy;
+    st->mismatch = 0;
+    if (noun_tx_live || heap_noalloc || !pin)
+        return 0;
+    while (src < atom_data_ptr) {
+        atom_t *a = (atom_t *)src;
+        if (atom_store_get(atom_rec_hash62(a)) != a)
+            st->mismatch++;
+        src += atom_rec_bytes(a);
+        n++;
+    }
+    if (st->mismatch)
+        return 0;
+    half = n / 2;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t0));
+    src = (uint8_t *)(uintptr_t)ATOM_DATA_BASE;
+    n = 0;
+    while (src < atom_data_ptr) {
+        atom_t *a = (atom_t *)src;
+        uint64_t b = atom_rec_bytes(a);
+        if (mid && n == half)
+            mid();
+        if (src < pin || live(atom_rec_hash62(a))) {
+            dg = rec_digest(dg, src, b);
+            if (dst != src) {
+                /* dst < src, both 8-aligned: a forward word copy is safe */
+                volatile uint64_t *dw = (volatile uint64_t *)dst;
+                const uint64_t *sw = (const uint64_t *)src;
+                for (uint64_t w = 0; w < b / 8; w++)
+                    dw[w] = sw[w];
+            }
+            dst += b;
+            k++;
+        } else {
+            d++;
+        }
+        src += b;
+        n++;
+    }
+    atom_data_ptr = dst;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t1));
+    st->slide_ticks = t1 - t0;
+    t0 = t1;
+    for (uint32_t i = 0; i < ATOM_INDEX_SLOTS; i++) {
+        idx[i].hash62 = 0;
+        idx[i].ptr = 0;
+    }
+    atom_index_occupancy = 0;
+    src = (uint8_t *)(uintptr_t)ATOM_DATA_BASE;
+    while (src < atom_data_ptr) {
+        atom_t *a = (atom_t *)src;
+        uint64_t h = atom_rec_hash62(a);
+        uint32_t s0 = (uint32_t)(h & ATOM_INDEX_MASK);
+        for (uint32_t i = 0; i < ATOM_INDEX_SLOTS; i++) {
+            uint32_t s1 = (s0 + i) & ATOM_INDEX_MASK;
+            if (idx[s1].ptr == 0) {
+                idx[s1].hash62 = h;
+                idx[s1].ptr = a;
+                atom_index_occupancy++;
+                break;
+            }
+        }
+        src += atom_rec_bytes(a);
+    }
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t1));
+    st->index_ticks = t1 - t0;
+    st->kept = k;
+    st->dropped = d;
+    st->kept_digest = dg;
+    st->after_digest = rec_digest(0xCBF29CE484222325ULL, (uint8_t *)(uintptr_t)ATOM_DATA_BASE,
+                                  (uint64_t)(atom_data_ptr - (uint8_t *)(uintptr_t)ATOM_DATA_BASE));
+    st->bytes_after = atom_store_bytes_used();
+    st->idx_after = atom_index_occupancy;
+    return 1;
+}
+#endif

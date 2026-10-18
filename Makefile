@@ -539,13 +539,21 @@ endif
 # crash (PR 1c) stores a damaged header for N >= I3_CKPT_TEST_FROM and stops
 # dead before verifying it (tests/recorder_ring.py crash leg); rebasefault
 # (PR 1c, COLD_MEDIA=fake) arms a cold media timeout before the first log
-# base move (tests/recorder_ring.py rebase-fault leg).
+# base move (tests/recorder_ring.py rebase-fault leg). Row 221 (row 212 (c),
+# I3_LITE_LOG=1 only): cmpbefore|cmpcopy|cmpafter|cmpflip|cmprebuild stop the
+# first compaction at N >= I3_CKPT_TEST_FROM dead at that crash point; cmpskip
+# makes that compaction's copy fail so it aborts (tests/compaction.py).
 ifneq ($(I3_CKPT_TEST),)
 ifeq ($(I3_CHECKPOINT_EVERY),)
 $(error I3_CKPT_TEST requires I3_CHECKPOINT_EVERY)
 endif
-ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper hdrshape hdrsid hdrd crash rebasefault),)
-$(error I3_CKPT_TEST must be one of cells jam stack wrapper hdrshape hdrsid hdrd crash rebasefault)
+ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper hdrshape hdrsid hdrd crash rebasefault cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip),)
+$(error I3_CKPT_TEST must be one of cells jam stack wrapper hdrshape hdrsid hdrd crash rebasefault cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip)
+endif
+ifneq ($(filter $(I3_CKPT_TEST),cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip),)
+ifneq ($(I3_LITE_LOG),1)
+$(error I3_CKPT_TEST=$(I3_CKPT_TEST) requires I3_LITE_LOG=1)
+endif
 endif
 ifeq ($(I3_CKPT_TEST),rebasefault)
 ifneq ($(COLD_MEDIA)$(I3_LITE_LOG),fake1)
@@ -555,8 +563,8 @@ endif
 CFLAGS += -DI3_CKPT_TEST_$(shell echo $(I3_CKPT_TEST) | tr a-z A-Z)=1
 endif
 ifneq ($(I3_CKPT_TEST_FROM),)
-ifeq ($(filter $(I3_CKPT_TEST),hdrshape hdrsid hdrd crash),)
-$(error I3_CKPT_TEST_FROM requires I3_CKPT_TEST=hdrshape|hdrsid|hdrd|crash)
+ifeq ($(filter $(I3_CKPT_TEST),hdrshape hdrsid hdrd crash cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip),)
+$(error I3_CKPT_TEST_FROM requires I3_CKPT_TEST=hdrshape|hdrsid|hdrd|crash|cmpbefore|cmpcopy|cmpafter|cmpflip|cmprebuild|cmpskip)
 endif
 CFLAGS += -DI3_CKPT_TEST_FROM=$(I3_CKPT_TEST_FROM)
 endif

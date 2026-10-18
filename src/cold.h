@@ -93,8 +93,10 @@ int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
 /* Row 212 (2) as amended, running log (PR 1c). The superblock's 32 reserved
  * bytes carry the log base: index B (entries 1..B are dropped), a media
  * offset (an object boundary or data_head; entry B+1 is the first LOG object
- * at or after it), the row 213
- * job-cell sum of entries 1..B, and a check word over the 64 checksummed
+ * at or after it), a row 213
+ * job-cell sum (row 221 (7): the jobs of the entries after B up to the
+ * checkpoint whose verify moved the base there; audit only, boot does not
+ * load it and counts from the base), and a check word over the 64 checksummed
  * superblock bytes plus those three fields. All zero = no base (B = 0).
  * Dropped entries still sit in the chain until compaction. The I3 host never
  * reads them again (replay and log_len start at the base), but cold_log_len
@@ -103,7 +105,7 @@ int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
 typedef struct {
     uint64_t index;    /* B */
     uint64_t off;      /* entry B+1 is the first LOG object at or after it */
-    uint64_t job_sum;  /* row 213 job-cell sum of entries 1..B */
+    uint64_t job_sum;  /* row 221 (7): jobs after B at the move; audit only */
     uint64_t len;      /* logical log length: B + entries at or after off */
 } cold_log_base_t;
 int cold_log_base(cold_log_base_t *out);

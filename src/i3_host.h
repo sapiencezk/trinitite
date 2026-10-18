@@ -47,3 +47,10 @@ int i3_host_cue_bytes(const uint8_t *bytes, uint64_t len, noun *out);
 int i3_host_load_app(const uint8_t *jam, uint64_t jam_len,
                      const char *expected_sha256, i3_host_result_t *out);
 const char *i3_host_abort_name(int jumped, uint64_t reason);
+/* Row 221 (row 212 (c)), only with I3_COMPACT (memory.h): the driver calls
+ * i3_host_handoff once it has handed off a step's effects and reset scratch;
+ * a pending compaction (after a verified checkpoint) runs there. The L1
+ * test harness cues its plan into scratch and names it as a root. */
+void i3_host_handoff(void);
+int i3_host_cue_bytes_scratch(const uint8_t *bytes, uint64_t len, noun *out);
+void i3_host_harness_root(noun plan);

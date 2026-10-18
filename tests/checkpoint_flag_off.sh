@@ -9,7 +9,8 @@
 # image (I3_CHECKPOINT_EVERY without I3_LITE_LOG) must also be byte-identical to ONBASE's,
 # and the I3_LITE_LOG=1 builds (qemu semihost, ram and fake, rpi4b rpi4-sd, small-ring
 # and the crash, fault, torn and rebasefault test knobs) must compile, and the semihost
-# one must differ from the 1b flag-on image.
+# one must differ from the 1b flag-on image. Row 221 (row 212 (c), compaction) rides on
+# I3_LITE_LOG=1: its crash-point and skip knob builds must compile too.
 # Usage: tests/checkpoint_flag_off.sh [BASE [ONBASE]]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -91,5 +92,11 @@ if [ -n "$ONBASE" ]; then
     build "$WORK/head" llrbf PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1 COLD_MEDIA=fake \
         I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_EVERY=2 I3_RING_BYTES=16384 I3_CKPT_TEST=rebasefault
     echo "PASS I3_LITE_LOG=1 builds compile [qemu ram, rpi4b rpi4-sd, qemu fake, small ring + crash, fault, torn and rebasefault knobs]"
+    # Row 221 (row 212 (c)): the compaction crash-point and skip knobs.
+    for k in cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip; do
+        build "$WORK/head" "ll$k" PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1 COLD_MEDIA=semihost \
+            I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_CKPT_TEST=$k I3_CKPT_TEST_FROM=4
+    done
+    echo "PASS row 221 compaction knob builds compile [cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip]"
 fi
 exit $fail

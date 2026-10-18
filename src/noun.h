@@ -115,6 +115,25 @@ uint64_t noun_m46_atom_peak_bytes(void);
 uint64_t noun_m46_atom_index_peak(void);
 #endif
 uint64_t atom_store_bytes_used(void);
+/* Row 221 (row 212 (c)), only with I3_COMPACT (memory.h). */
+typedef struct {
+    uint64_t bytes_before, idx_before, bytes_after, idx_after, kept, dropped, mismatch;
+    uint64_t slide_ticks, index_ticks, kept_digest, after_digest;
+} atom_compact_t;
+void heap_code_begin(void);
+void heap_code_end(void);
+int heap_code_overflowed(void);
+uint64_t heap_code_bytes(void);
+int heap_in_code(uint32_t ptr);
+int heap_in_live_persist(uint32_t ptr);
+void heap_compact_begin(void);
+void heap_compact_commit(void);
+void heap_compact_abort(void);
+void heap_scratch_floor_set(void);
+void atom_store_pin(void);
+uint64_t atom_store_pin_bytes(void);
+int atom_store_rehash_ok(uint64_t hash62);
+int atom_store_compact(int (*live)(uint64_t), void (*mid)(void), atom_compact_t *st);
 uint64_t atom_store_capacity_bytes(void);
 uint64_t atom_store_index_occupancy(void);
 uint64_t atom_store_index_capacity(void);

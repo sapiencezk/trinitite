@@ -591,6 +591,24 @@ int i3_host_cue_bytes(const uint8_t *bytes, uint64_t len, noun *out)
     return 1;
 }
 
+#if defined(I3_COMPACT)
+/* Row 221 tests: the L1 plan is cued into scratch (see i3_l1_probe.c). */
+int i3_host_cue_bytes_scratch(const uint8_t *bytes, uint64_t len, noun *out)
+{
+    cue_bounded_limits_t limits = i3_limits();
+    cue_bounded_status_t status;
+    if (!bytes || !out || len == 0 || len > I3_CUE_MAX_INPUT_BYTES)
+        return 0;
+    while (len > 1 && bytes[len - 1] == 0)
+        len--;
+    status = cue_bounded_bytes(bytes, len, &limits, HEAP_MODE_SCRATCH, out);
+    if (status != CUE_BOUNDED_OK)
+        return 0;
+    noun_tx_commit();
+    return 1;
+}
+#endif
+
 static int hex_nibble(char c, uint8_t *nib)
 {
     if (c >= '0' && c <= '9') { *nib = (uint8_t)(c - '0'); return 1; }
@@ -932,14 +950,463 @@ static int ckpt_test_crash(uint64_t n)
  * the kept checkpoint are dropped." When the checkpoint at N verifies, the
  * previous verified one (P) becomes the oldest kept: the log base moves to P
  * (entries 1..P dropped, one superblock write), so P stays a boot fallback
- * until the checkpoint after N verifies. The row 213 job-cell sum of the
- * dropped entries is kept in the base, so the reserve still counts entries
- * 1..N as in 1b. g_base is the base this boot has; g_last_ck_* the newest
- * verified checkpoint (written live, or the one this boot booted from). */
+ * until the checkpoint after N verifies. Row 221 (7) (amends row 213 (2),
+ * (5), (6)): the row 213 job sum counts from the log base. When the base
+ * moves from B to P the jobs of entries B+1..P leave the sum, and the new
+ * base record holds the jobs of entries P+1..N (audit only: boot does not
+ * load it, it counts from the base). g_base is the base this boot has;
+ * g_last_ck_n the newest verified checkpoint (written live, or the one this
+ * boot booted from) and g_last_ck_sum the jobs after the base up to it. */
 static cold_log_base_t g_base;
 static uint64_t g_last_ck_n, g_last_ck_sum;
 static int g_rotated;
 static const char STOP_ROTATED[] = "rotated";
+
+/* ── Row 221 (row 212 (c)): compaction after a verified checkpoint ──────
+ * (2) Only a running node compacts, right after checkpoint N verifies and
+ * after the host has handed off that step's effects (i3_host_handoff, which
+ * the driver calls once it has consumed the effects and reset scratch), so
+ * the effects are not a root. Replay, a stopped node and a skipped
+ * checkpoint never compact; no input is taken until it ends.
+ * (4) Only the core's sample (axis 6) is copied; the new core is
+ * [battery [new-sample context]], with battery and context still in the code
+ * region; axis 27 of the new core must hash to D before the commit.
+ * (5) The copy runs in a transaction on the other persist half; the commit
+ * stores the core root and the half selector; any failure aborts and logs
+ * `I3H compact skip event=N reason=...`, and the node runs on the old half.
+ * (6) After the commit the atom store keeps the boot prefix and every atom
+ * reachable from the state and the host roots (the poke and peek formulas,
+ * the fast-hint registry, the crash trace); the walk stops at code-region
+ * cells (their atoms are in the prefix). Work tables sit in scratch above its
+ * bump mark. (8) Nothing is written to media and no state hash changes. */
+static int g_cmp_pending;
+static uint64_t g_cmp_n;
+static uint8_t g_cmp_d[32];
+
+static void compact_arm(uint64_t n, const uint8_t d[32])
+{
+    uint32_t i;
+    for (i = 0; i < 32; i++)
+        g_cmp_d[i] = d[i];
+    g_cmp_n = n;
+    g_cmp_pending = 1;
+}
+
+#if defined(I3_CKPT_TEST_CMPBEFORE) || defined(I3_CKPT_TEST_CMPCOPY) || defined(I3_CKPT_TEST_CMPAFTER) \
+    || defined(I3_CKPT_TEST_CMPFLIP) || defined(I3_CKPT_TEST_CMPREBUILD) || defined(I3_CKPT_TEST_CMPSKIP)
+#if !defined(I3_CKPT_TEST_FROM)
+#define I3_CKPT_TEST_FROM 1
+#endif
+#define I3_CMP_TEST 1
+/* Test knobs (tests/compaction.py): the first compaction at N >= FROM stops
+ * dead at one crash point (before the copy, mid-copy, after the copy, after
+ * the flip, mid-rebuild), as a power cut there would; cmpskip makes that
+ * copy fail instead, so the transaction aborts and the node keeps running. */
+static int g_cmp_test_done;
+static void halt(void);
+static void cmp_test_stop(const char *at)
+{
+    uart_puts("I3H compact test crash event=");
+    put_u64(g_cmp_n);
+    uart_puts(" at=");
+    uart_puts(at);
+    uart_puts("\r\nI3H terminal=test-crash\r\n");
+    halt();
+}
+static int cmp_test_now(void)
+{
+    return !g_cmp_test_done && g_cmp_n >= (uint64_t)I3_CKPT_TEST_FROM;
+}
+static void cmp_test_mid(void) { cmp_test_stop("rebuild"); }
+#endif
+
+#define CMP_VIS_BITS 17u
+#define CMP_VIS_N (1u << CMP_VIS_BITS)
+#define CMP_ASET_BITS 17u
+#define CMP_ASET_N (1u << CMP_ASET_BITS)
+#define CMP_CELLS_MAX 65536u
+#define CMP_STK_N (2u * CMP_CELLS_MAX + 2u)
+#define CMP_ROOM ((uint64_t)CMP_VIS_N * 4u + (uint64_t)CMP_ASET_N * 8u + (uint64_t)CMP_STK_N * 8u)
+
+typedef struct {
+    uint32_t *vis;
+    uint64_t *aset;
+    noun *stk;
+    uint64_t cells, atoms, stk_hwm, wild, overflow, missing;
+} cmp_walk_t;
+static cmp_walk_t g_cw;
+
+static int cmp_vis_add(uint32_t p)
+{
+    uint32_t h = (p * 2654435761u) >> (32u - CMP_VIS_BITS), k;
+    for (k = 0; k < CMP_VIS_N; k++) {
+        uint32_t i = (h + k) & (CMP_VIS_N - 1u);
+        if (g_cw.vis[i] == p)
+            return 0;
+        if (g_cw.vis[i] == 0) {
+            g_cw.vis[i] = p;
+            return 1;
+        }
+    }
+    g_cw.overflow++;
+    return 0;
+}
+
+static int cmp_aset_add(uint64_t h62)
+{
+    uint32_t h = (uint32_t)((h62 * 0x9E3779B97F4A7C15ULL) >> (64u - CMP_ASET_BITS)), k;
+    for (k = 0; k < CMP_ASET_N; k++) {
+        uint32_t i = (h + k) & (CMP_ASET_N - 1u);
+        if (g_cw.aset[i] == h62)
+            return 0;
+        if (g_cw.aset[i] == 0) {
+            g_cw.aset[i] = h62;
+            return 1;
+        }
+    }
+    g_cw.overflow++;
+    return 0;
+}
+
+static int cmp_live(uint64_t h62)
+{
+    uint32_t h = (uint32_t)((h62 * 0x9E3779B97F4A7C15ULL) >> (64u - CMP_ASET_BITS)), k;
+    for (k = 0; k < CMP_ASET_N; k++) {
+        uint32_t i = (h + k) & (CMP_ASET_N - 1u);
+        if (g_cw.aset[i] == h62)
+            return 1;
+        if (g_cw.aset[i] == 0)
+            return 0;
+    }
+    return 0;
+}
+
+#if defined(I3_L1_PROBE)
+/* Test harness root (the L1 plan, cued into the bottom of scratch). */
+static noun g_cmp_harness;
+static uint64_t g_cmp_harness_top;
+void i3_host_harness_root(noun plan)
+{
+    g_cmp_harness = plan;
+    g_cmp_harness_top = HEAP_SCRATCH_BASE + heap_scratch_mark();
+}
+#endif
+
+/* Iterative walk: atoms into the atom set; cells in the live persist half
+ * are followed; code-region cells are not (their atoms are in the boot
+ * prefix); any other cell is wild (the rebuild is then skipped).
+ * verify: also re-hash every atom reached. */
+static void cmp_walk(noun root, int allow_scratch, int verify)
+{
+    uint64_t sp = 0;
+    g_cw.stk[sp++] = root;
+    while (sp) {
+        noun n = g_cw.stk[--sp];
+        if (noun_is_cell(n)) {
+            uint32_t p = cell_ptr(n);
+            cell_t *c;
+            if (heap_in_code(p))
+                continue;
+            if (!heap_in_live_persist(p)) {
+#if defined(I3_L1_PROBE)
+                if (!(allow_scratch && (uint64_t)p >= HEAP_SCRATCH_BASE
+                      && (uint64_t)p < g_cmp_harness_top)) {
+                    g_cw.wild++;
+                    continue;
+                }
+#else
+                (void)allow_scratch;
+                g_cw.wild++;
+                continue;
+#endif
+            }
+            if (!cmp_vis_add(p))
+                continue;
+            if (!allow_scratch && ++g_cw.cells > CMP_CELLS_MAX) {
+                g_cw.overflow++;
+                return;
+            }
+            c = (cell_t *)(uintptr_t)p;
+            if (sp + 2 > CMP_STK_N) {
+                g_cw.overflow++;
+                return;
+            }
+            if (!noun_is_direct(c->tail))
+                g_cw.stk[sp++] = c->tail;
+            if (!noun_is_direct(c->head))
+                g_cw.stk[sp++] = c->head;
+            if (sp > g_cw.stk_hwm)
+                g_cw.stk_hwm = sp;
+        } else if (noun_is_indirect(n)) {
+            if (!cmp_aset_add(indirect_hash(n)))
+                continue;
+            g_cw.atoms++;
+            if (verify && !atom_store_rehash_ok(indirect_hash(n)))
+                g_cw.missing++;
+        }
+    }
+}
+
+/* kind 1 (L1-only diagnostic tables, test harness): cells outside the code
+ * region are not followed. */
+static int g_cmp_verify;
+static void cmp_root_cb(noun n, int kind)
+{
+    if (kind != 0 && noun_is_cell(n) && !heap_in_code(cell_ptr(n)))
+        return;
+    cmp_walk(n, 0, g_cmp_verify);
+}
+
+/* Every host root's cell must sit in the code region (or be an atom): a
+ * cell in a persist half would be left behind by the flip. */
+static uint64_t g_cmp_bad_roots;
+static void cmp_check_root(noun n, int kind)
+{
+    if (kind == 0 && noun_is_cell(n) && !heap_in_code(cell_ptr(n)))
+        g_cmp_bad_roots++;
+}
+
+static void cmp_clear(void)
+{
+    uint32_t i;
+    for (i = 0; i < CMP_VIS_N; i++)
+        g_cw.vis[i] = 0;
+    for (i = 0; i < CMP_ASET_N; i++)
+        g_cw.aset[i] = 0;
+    g_cw.cells = g_cw.atoms = g_cw.stk_hwm = g_cw.wild = g_cw.overflow = g_cw.missing = 0;
+}
+
+/* Mark every atom reachable from the state and the host roots. */
+static void cmp_mark(int verify)
+{
+    g_cmp_verify = verify;
+    cmp_clear();
+    cmp_walk(g_kernel, 0, verify);
+    cmp_walk(g_poke_fol, 0, verify);
+    cmp_walk(g_peek_fol, 0, verify);
+    nock_host_roots(cmp_root_cb);
+#if defined(I3_L1_PROBE)
+    /* Test harness root: the L1 plan. */
+    cmp_walk(g_cmp_harness, 1, verify);
+#endif
+}
+
+static void compact_skip(uint64_t n, const char *why)
+{
+    uart_puts("I3H compact skip event=");
+    put_u64(n);
+    uart_puts(" reason=");
+    uart_puts(why);
+    uart_puts("\r\n");
+}
+
+static void compact_run(void)
+{
+    uint64_t n = g_cmp_n, mark, base, t0, t1, t2, t3, t4, before_cells, sel0;
+    noun sample, copy, core, state;
+    uint8_t dig[32];
+    int mode = heap_get_mode();
+    atom_compact_t st;
+    cell_t *kc, *pc;
+    g_cmp_pending = 0;
+    if (!g_ready || g_stop || g_replaying)
+        return;
+#if defined(I3_CMP_TEST) && defined(I3_CKPT_TEST_CMPBEFORE)
+    if (cmp_test_now())
+        cmp_test_stop("before");
+#endif
+    /* The core is [battery [sample context]] with battery and context in
+     * the code region, and every host root cell sits there too. */
+    if (!noun_is_cell(g_kernel)) {
+        compact_skip(n, "core");
+        return;
+    }
+    kc = (cell_t *)(uintptr_t)cell_ptr(g_kernel);
+    if (!noun_is_cell(kc->tail) || (noun_is_cell(kc->head) && !heap_in_code(cell_ptr(kc->head)))) {
+        compact_skip(n, "code");
+        return;
+    }
+    pc = (cell_t *)(uintptr_t)cell_ptr(kc->tail);
+    if (noun_is_cell(pc->tail) && !heap_in_code(cell_ptr(pc->tail))) {
+        compact_skip(n, "code");
+        return;
+    }
+    g_cmp_bad_roots = 0;
+    if (noun_is_cell(g_poke_fol) && !heap_in_code(cell_ptr(g_poke_fol)))
+        g_cmp_bad_roots++;
+    if (noun_is_cell(g_peek_fol) && !heap_in_code(cell_ptr(g_peek_fol)))
+        g_cmp_bad_roots++;
+    nock_host_roots(cmp_check_root);
+    if (g_cmp_bad_roots) {
+        compact_skip(n, "root");
+        return;
+    }
+    before_cells = heap_cells_used(HEAP_MODE_PERSIST);
+    sel0 = heap_persist_selector();
+    sample = pc->head;
+    /* (5) transaction on the other half */
+    t0 = cntvct();
+    heap_compact_begin();
+    heap_set_mode(HEAP_MODE_PERSIST);
+#if defined(I3_CMP_TEST) && (defined(I3_CKPT_TEST_CMPCOPY) || defined(I3_CKPT_TEST_CMPSKIP))
+    if (cmp_test_now())
+        noun_test_copy_fail_after(32);
+#endif
+    if (!noun_copy_checked(sample, &copy)) {
+#if defined(I3_CMP_TEST) && (defined(I3_CKPT_TEST_CMPCOPY) || defined(I3_CKPT_TEST_CMPSKIP))
+        noun_test_copy_fail_after(-1);
+#if defined(I3_CKPT_TEST_CMPCOPY)
+        if (cmp_test_now())
+            cmp_test_stop("copy");
+#else
+        g_cmp_test_done = 1;
+#endif
+#endif
+        heap_compact_abort();
+        heap_set_mode(mode);
+        compact_skip(n, "copy");
+        return;
+    }
+    if (!install_sample(g_kernel, copy, &core)) {
+        heap_compact_abort();
+        heap_set_mode(mode);
+        compact_skip(n, "alloc");
+        return;
+    }
+    t1 = cntvct();
+#if defined(I3_CMP_TEST) && defined(I3_CKPT_TEST_CMPAFTER)
+    if (cmp_test_now())
+        cmp_test_stop("after-copy");
+#endif
+    /* (4) axis 27 of the new core must hash to D */
+    mark = heap_scratch_mark();
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    if (!ckpt_wrapper_ok(core, &state) || !ckpt_digest(state, dig, 0) || !digest_eq(dig, g_cmp_d)) {
+        (void)heap_scratch_rewind(mark);
+        heap_compact_abort();
+        heap_set_mode(mode);
+        compact_skip(n, "hash");
+        return;
+    }
+    (void)heap_scratch_rewind(mark);
+    /* commit: the core root and the half selector */
+    g_kernel = core;
+    heap_compact_commit();
+    t2 = cntvct();
+#if defined(I3_CMP_TEST) && defined(I3_CKPT_TEST_CMPFLIP)
+    if (cmp_test_now())
+        cmp_test_stop("after-flip");
+#endif
+    /* (6) atom store rebuild, work tables in scratch above its bump mark */
+    mark = heap_scratch_mark();
+    base = (HEAP_SCRATCH_BASE + mark + 0xFFFFu) & ~(uint64_t)0xFFFFu;
+    if (base + CMP_ROOM > (uint64_t)HEAP_TOP) {
+        heap_set_mode(mode);
+        compact_skip(n, "rebuild-room");
+        return;
+    }
+    g_cw.vis = (uint32_t *)(uintptr_t)base;
+    g_cw.aset = (uint64_t *)(uintptr_t)(base + (uint64_t)CMP_VIS_N * 4u);
+    g_cw.stk = (noun *)(uintptr_t)(base + (uint64_t)CMP_VIS_N * 4u + (uint64_t)CMP_ASET_N * 8u);
+    (void)heap_scratch_rewind(base + CMP_ROOM - HEAP_SCRATCH_BASE);
+    cmp_mark(0);
+    t3 = cntvct();
+    uart_puts("I3H compact walk event=");
+    put_u64(n);
+    uart_puts(" cells=");
+    put_u64(g_cw.cells);
+    uart_puts(" atoms=");
+    put_u64(g_cw.atoms);
+    uart_puts(" stack_hwm=");
+    put_u64(g_cw.stk_hwm);
+    uart_puts(" wild=");
+    put_u64(g_cw.wild);
+    uart_puts(" overflow=");
+    put_u64(g_cw.overflow);
+    uart_puts(" ticks=");
+    put_u64(t3 - t2);
+    uart_puts("\r\n");
+    if (g_cw.wild || g_cw.overflow) {
+        (void)heap_scratch_rewind(mark);
+        heap_set_mode(mode);
+        compact_skip(n, "rebuild-walk");
+        return;
+    }
+#if defined(I3_CMP_TEST) && defined(I3_CKPT_TEST_CMPREBUILD)
+    if (!atom_store_compact(cmp_live, cmp_test_now() ? cmp_test_mid : 0, &st)) {
+#else
+    if (!atom_store_compact(cmp_live, 0, &st)) {
+#endif
+        (void)heap_scratch_rewind(mark);
+        heap_set_mode(mode);
+        compact_skip(n, "rebuild-index");
+        return;
+    }
+    /* Re-walk and re-hash every live atom (missing must be 0). */
+    cmp_mark(1);
+    t4 = cntvct();
+    (void)heap_scratch_rewind(mark);
+    heap_set_mode(mode);
+#if defined(I3_CMP_TEST)
+    if (cmp_test_now())
+        g_cmp_test_done = 1;
+#endif
+    uart_puts("I3H compact ok event=");
+    put_u64(n);
+    uart_puts(" half=");
+    put_u64(sel0);
+    uart_puts("->");
+    put_u64(heap_persist_selector());
+    uart_puts(" persist_cells=");
+    put_u64(before_cells);
+    uart_puts("->");
+    put_u64(heap_cells_used(HEAP_MODE_PERSIST));
+    uart_puts(" free=");
+    put_u64(heap_persist_free_cells());
+    uart_puts(" atom_bytes=");
+    put_u64(st.bytes_before);
+    uart_puts("->");
+    put_u64(st.bytes_after);
+    uart_puts(" atom_idx=");
+    put_u64(st.idx_before);
+    uart_puts("->");
+    put_u64(st.idx_after);
+    uart_puts(" kept=");
+    put_u64(st.kept);
+    uart_puts(" dropped=");
+    put_u64(st.dropped);
+    uart_puts(" pin_bytes=");
+    put_u64(atom_store_pin_bytes());
+    uart_puts(" kept_digest=");
+    put_hex((const uint8_t *)&st.kept_digest, 8);
+    uart_puts(" after_digest=");
+    put_hex((const uint8_t *)&st.after_digest, 8);
+    uart_puts(" verify_atoms=");
+    put_u64(g_cw.atoms);
+    uart_puts(" missing=");
+    put_u64(g_cw.missing);
+    uart_puts(" job_sum=");
+    put_u64(g_job_sum);
+    uart_puts(" copy_ticks=");
+    put_u64(t1 - t0);
+    uart_puts(" flip_ticks=");
+    put_u64(t2 - t0);
+    uart_puts(" slide_ticks=");
+    put_u64(st.slide_ticks);
+    uart_puts(" index_ticks=");
+    put_u64(st.index_ticks);
+    uart_puts(" total_ticks=");
+    put_u64(t4 - t0);
+    uart_puts("\r\n");
+}
+
+/* The driver calls this once it has handed off the effects of the step it
+ * just ran and reset scratch. */
+void i3_host_handoff(void)
+{
+    if (g_cmp_pending)
+        compact_run();
+}
 
 static void ckpt_verified(uint64_t n, noun state)
 {
@@ -950,6 +1417,9 @@ static void ckpt_verified(uint64_t n, noun state)
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (g_last_ck_n > g_base.index) {
         cold_log_base_t now;
+        /* Jobs of entries P+1..N, after the new base P = g_last_ck_n. */
+        uint64_t after = g_job_sum >= JOB_UNBOUNDED ? JOB_UNBOUNDED
+                         : g_job_sum - g_last_ck_sum;
         xs[0] = tas("i3-base");
         xs[1] = direct(g_last_ck_n);
         xs[2] = direct(n);
@@ -968,9 +1438,11 @@ static void ckpt_verified(uint64_t n, noun state)
         }
 #endif
         if (tuple(xs, 3, &marker)
-            && cold_log_rebase(g_last_ck_n, g_last_ck_sum, marker) == 0
+            && cold_log_rebase(g_last_ck_n, after, marker) == 0
             && cold_log_base(&now) == 0) {
             g_base = now;
+            /* Row 221 (7) Live: entries B+1..P leave the sum. */
+            g_job_sum = after;
             uart_puts("I3H log base event=");
             put_u64(now.index);
             uart_puts(" ckpt=");
@@ -1089,6 +1561,7 @@ static void ckpt_maybe_write(void)
     uart_puts("\r\n");
 #if defined(COLD_LITE_LOG)
     ckpt_verified(n, state);
+    compact_arm(n, dig);
 #endif
 }
 #endif
@@ -1347,8 +1820,11 @@ static int replay_log(void)
      * row 213 job sum comes from the base, and entry B+1 is the first LOG
      * object at or after the base offset. */
     uint64_t n = g_base.len, i, cur = g_base.off;
-    g_job_sum = g_base.job_sum;
-    g_last_ck_sum = g_job_sum;
+    /* Row 221 (7) Reboot: the job sum starts at 0 at the log base and adds
+     * every entry read after it (counted-only up to the checkpoint, then
+     * replayed). The base record's sum is not loaded. */
+    g_job_sum = 0;
+    g_last_ck_sum = 0;
 #else
     uint64_t n = cold_log_len(), i, cur = 0;
 #endif
@@ -1409,6 +1885,12 @@ static int replay_log(void)
     uart_puts("I3H replay done event=");
     put_u64(g_event_num);
     uart_puts("\r\n");
+#if defined(COLD_LITE_LOG)
+    /* Row 221 (7): the job sum counted from the log base. */
+    uart_puts("I3H replay job_sum=");
+    put_u64(g_job_sum);
+    uart_puts("\r\n");
+#endif
     return 1;
 }
 
@@ -1717,6 +2199,24 @@ static int lite_boot(void)
 }
 #endif
 
+/* Row 221 (3): a build that overflows the code region halts with its own
+ * terminal reason. */
+#if defined(I3_COMPACT)
+static void code_region_check(void)
+{
+    if (heap_code_overflowed()) {
+        uart_puts("I3H code region overflow bytes=");
+        put_u64(heap_code_bytes());
+        uart_puts(" size=");
+        put_u64(I3_CODE_SIZE);
+        uart_puts("\r\nI3H terminal=code-region\r\n");
+        halt();
+    }
+}
+#else
+#define code_region_check() ((void)0)
+#endif
+
 void i3_host_boot(void)
 {
     const uint8_t *jam;
@@ -1762,11 +2262,17 @@ void i3_host_boot(void)
         cue_len--;
 
     limits = i3_limits();
+#if defined(I3_COMPACT)
+    /* Row 221 (3): the cue, the formulas and the kick build in the code
+     * region, once. */
+    heap_code_begin();
+#endif
     t0 = cntvct();
     status = cue_bounded_bytes(jam, cue_len, &limits, HEAP_MODE_PERSIST, &root);
     t1 = cntvct();
     print_cue(status, t1 - t0);
     if (status != CUE_BOUNDED_OK) {
+        code_region_check();
         uart_puts("I3H terminal=cue-refuse\r\n");
         halt();
     }
@@ -1781,6 +2287,7 @@ void i3_host_boot(void)
     heap_set_mode(HEAP_MODE_PERSIST);
     if (!kick_formula(&kick_fol) || !slam_formula(&g_poke_fol)
         || !peek_formula(&g_peek_fol)) {
+        code_region_check();
         uart_puts("I3H terminal=formula-fail\r\n");
         halt();
     }
@@ -1806,9 +2313,20 @@ void i3_host_boot(void)
     uart_puts("\r\n");
     nock_budget_finish();
     if (jumped != 0 || !noun_is_cell(g_kernel)) {
+        code_region_check();
         uart_puts("I3H terminal=kick-fail\r\n");
         halt();
     }
+#if defined(I3_COMPACT)
+    heap_code_end();
+    uart_puts("I3H code region bytes=");
+    put_u64(heap_code_bytes());
+    uart_puts(" cells=");
+    put_u64(heap_code_bytes() / sizeof(cell_t));
+    uart_puts(" size=");
+    put_u64(I3_CODE_SIZE);
+    uart_puts("\r\n");
+#endif
 
     g_ready = 1;
     clear_result(&persist);
@@ -1827,6 +2345,17 @@ void i3_host_boot(void)
         g_ready = 0;
         halt();
     }
+#if defined(I3_COMPACT)
+    /* Row 221 (6): the atoms from the kernel cue are the fixed prefix. */
+    atom_store_pin();
+    uart_puts("I3H atom prefix bytes=");
+    put_u64(atom_store_pin_bytes());
+    uart_puts(" atoms=");
+    put_u64(atom_store_index_occupancy());
+    uart_puts(" persist_cells=");
+    put_u64(heap_cells_used(HEAP_MODE_PERSIST));
+    uart_puts("\r\n");
+#endif
 
 #if defined(COLD_MEDIA_SEMIHOST)
     cold_nv_arm();
