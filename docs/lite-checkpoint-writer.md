@@ -98,7 +98,8 @@ rejected with `reason=load` and the node replayed from zero. Row 216 (approved b
 trace from the kernel's `+load`; it lands with #258's re-pin (bff56583). Trinitite's `src/nock.c` is
 unchanged. Measured with that kernel jam (same app, QEMU): `I3H ckpt boot load ... abort=none
 nock_ops_used=475 nock_cells_used=163 nock_eval_stack_peak=19` at every checkpoint N tried (2, 4, 5),
-and `tests/checkpoint_boot.py` passes against it.
+and `tests/checkpoint_boot.py` passes against it. With the landing kernel jam (1499kernel main 3d100787,
+where that row is 219): `abort=none nock_ops_used=481 nock_cells_used=166 nock_eval_stack_peak=19`.
 
 ## Rotation (later PR, 1c)
 - Only after the newest checkpoint verified. Keep: newest verified checkpoint + the previous one until the
@@ -129,7 +130,8 @@ Implemented as above (PR 1b section); the `+load` blocker is resolved by row 216
    `i3_host_state_hash`) read right after the step that wrote it: N=4 `df590166…` (N=6 sequence, K=4),
    N=5 `d73a8797…` (N=6 sequence, K=5), N=4 `c47a0420…` (N=7 sequence, K=4). Equal in all three
    (pre-#258 kernel; with the #258 kernel jam at bff56583: `9f64c2d2…`, `71fb60e5…`, `c5225f7a…`, equal
-   again). The
+   again; with the landing kernel jam, 1499kernel main 3d100787: `f5764f6f…`, `0c36f958…`, `8eb95aa4…`,
+   equal again). The
    two are the same bytes hashed two ways: the host's `jam_hoon_checked` + sha256, and the kernel's
    `(shax (jam state))` through the lite `%jam`/`%shax` jets (row 211).
 2. ~~Smoke run: D was identical at N=10/20/30 with R4 `[1 1]` events.~~ **Answered** by the same run: that

@@ -59,9 +59,11 @@ BOOT_OK = re.compile(r"I3H ckpt boot event=(\d+) sha256=([0-9a-f]{64}) log=(\d+)
 REJECT = re.compile(r"I3H ckpt boot reject event=(\d+) reason=(\S+)$")
 NONE = re.compile(r"I3H ckpt boot none rejected=(\d+) fallback=zero$")
 XS = [0, 1, 0]
-# From-zero /state-hash at N with the 1499kernel #258 kernel jam (bff56583, row 216 drops the
-# wrapper +load trace; row 211 (5) as amended for the #258 re-pin). Before #258: df590166, f27d583f.
-STEWARD = {6: "9f64c2d2", 7: "46775984"}
+# From-zero /state-hash at N with the landing kernel jam, 1499kernel main 3d100787 (#258 merged;
+# row 219 on main drops the wrapper +load trace). At #258's head bff56583: 9f64c2d2, 46775984.
+# Before #258: df590166, f27d583f. The kernel jam changed between bff56583 and 3d100787 (main's
+# merges), so the state hash moved; lite = from zero = full node at both kernels.
+STEWARD = {6: "f5764f6f", 7: "bf0a761a"}
 
 
 def mem_wait(what: str) -> None:
