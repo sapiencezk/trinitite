@@ -88,13 +88,13 @@ persisted and before replay (`ckpt_boot` in `src/i3_host.c`):
    entry 1 and the rotated-log stop cannot arise yet. A rejected attempt restores the booted core and
    event number and resets scratch; persist cells a failed persist copy took are not returned.
 
-### Former blocker (1b), resolved by row 216 (1499kernel #258)
+### Former blocker (1b), resolved by row 219 (1499kernel #258)
 The wrapper's outer `+load` began `~&  build-hash+hash` (hoon/lib/wrapper.hoon, vendored from
 NockChain). Trinitite evaluates every dynamic hint's clue (src/nock.c op 11), and that `%slog` clue
 rendered the vase with `sell` (the type printer), unjetted. With the pre-#258 kernel (box, QEMU, chain-5
 app, checkpoint at N=4) the load stopped at the cell bound (`abort=cells`, 128,000 cells, 440,489 ops),
 and with no cell limit it crashed `%meme` after 1,395,186 cells and 4,689,346 ops, so every header was
-rejected with `reason=load` and the node replayed from zero. Row 216 (approved by Guillaume) removes the
+rejected with `reason=load` and the node replayed from zero. Row 219 (approved by Guillaume) removes the
 trace from the kernel's `+load`; it lands with #258's re-pin (bff56583). Trinitite's `src/nock.c` is
 unchanged. Measured with that kernel jam (same app, QEMU): `I3H ckpt boot load ... abort=none
 nock_ops_used=475 nock_cells_used=163 nock_eval_stack_peak=19` at every checkpoint N tried (2, 4, 5),
@@ -230,7 +230,7 @@ Real input sizes vary.
 Newest header whose sid loads, re-hashes to D and whose kernel-blake3 equals the booted pill's `g_jam_blake3`
 (same bytes-as-read rule, so a pill re-jammed to different bytes does not match) → cue into the
 versioned `+load` → replay entries after N. Fallback per row 212 (3). Never boot from an unverified image.
-Implemented as above (PR 1b section); the `+load` blocker is resolved by row 216 (1499kernel #258).
+Implemented as above (PR 1b section); the `+load` blocker is resolved by row 219 (1499kernel #258).
 
 ## Open questions
 1. ~~Is sha256(jam(axis 6)) exactly `/state-hash` (row 199)?~~ **Answered** by the flag-on smoke run
