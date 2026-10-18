@@ -226,6 +226,45 @@ Real input sizes vary.
 **Not measured:** SD append time, torn-write behaviour of real cards, SD wear, the rpi4 ring boot load time
 (it reads the whole ring; the node now logs it), and the extra jam per step for ring inputs.
 
+## Row 221 (row 212 (c)): compaction (branch `feat/lite-compaction`)
+Compaction is host memory management. It frees the persist heap and the atom store after a verified
+checkpoint, so a lite node can run for an unbounded time. It uses the row 212 flags: it is on when
+`I3_HOST`, `I3_CHECKPOINT_EVERY` > 0 and `I3_LITE_LOG=1` are all set (`I3_COMPACT` in `src/memory.h`),
+and off by default. Flag-off images are byte-identical (`tests/checkpoint_flag_off.sh`).
+
+- **Code region.** 12 MiB at DRAM base + 0x0D000000. At boot the host builds the pill's kernel (cue),
+  the poke and peek formulas and the kick into it, once. Build-time checks in `memory.h` keep it clear
+  of the cue rub scratch, the cue cache, .bss, the pill, the ring window, MMIO and the 4 GiB pointer
+  limit. If the build overflows, boot halts with `I3H terminal=code-region`. Boot logs
+  `I3H code region bytes= cells= size=` and `I3H atom prefix bytes= atoms= persist_cells=`. Nothing
+  writes to the region after the build, and the persist copier keeps its cells as they are.
+- **When.** Only a running node compacts: after `I3H ckpt ok event=N` and after the step's effects
+  are handed off (`i3_host_handoff`, called by the driver after the scratch reset). Effects are not a
+  root. Replay, a stopped node and a skipped checkpoint never compact.
+- **Flip.** A transaction on the other persist half: copy the core's sample, install it, check that
+  axis 27 hashes to D, then commit. Any failure aborts. The node keeps the old half and logs
+  `I3H compact skip event=N reason=code|root|copy|hash`.
+- **Atom store.** After the commit, the host walks the state, the poke and peek formulas, the
+  fast-hint registry and `g_mean` (`nock_host_roots`). The walk stops at code-region cells. The atoms
+  from the boot cue stay as a fixed prefix. Live atoms slide down in allocation order and the index is
+  rebuilt in place. Checks: the digest of the kept records before the slide equals the digest of the
+  store after it, and a second walk re-hashes every live atom to its name (`missing=0`). The result is
+  logged as `I3H compact walk ...` and `I3H compact ok event=N ...` with the tick counts.
+- **Reserve, row 221 (7).** The job sum counts from the log base. The rebase writes the jobs of
+  entries P+1..N into the base record (audit only), and the boot replay starts its sum at 0 at the
+  base. It logs `I3H replay job_sum=N`.
+- **Test knobs** (test builds, need `I3_LITE_LOG=1`): `I3_CKPT_TEST=cmpbefore|cmpcopy|cmpafter|cmpflip|
+  cmprebuild` stop dead at that point (`I3H compact test crash event=N at=...`); `cmpskip` fails the
+  copy so the transaction aborts. All use `I3_CKPT_TEST_FROM`.
+- **Tests.** `tests/compaction.py` (running, the five crash points, skip). `tests/checkpoint_legs.py
+  replay --reserve|--reserve3` with `CKPT_LEGS_EXTRA="I3_LITE_LOG=1"`: no persist stop comes, and the
+  pinned counts are in `RESERVE_ON`.
+- **Gap: kernel replacement.** The code region is built once from the pill. A new kernel needs a new
+  image and a reboot, and then every kept checkpoint names the old kernel and is rejected. No path
+  seeded from upstream exists yet.
+- **IEC 61499.** Resources keep their operational state (Part 1 4.8; 6.3.3, Figure 24, Table 9), and no
+  E_RESTART COLD or WARM fires (Part 1 6.3.2; Annex A, Table A.1). This is not a conformance claim.
+
 ## Boot (PR 1b)
 Newest header whose sid loads, re-hashes to D and whose kernel-blake3 equals the booted pill's `g_jam_blake3`
 (same bytes-as-read rule, so a pill re-jammed to different bytes does not match) → cue into the
