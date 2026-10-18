@@ -698,9 +698,9 @@ static void put_goof(noun goof)
  * and verifies both by reading back and re-hashing. kernel-blake3 is
  * g_jam_blake3: BLAKE3-256 of the pill's kernel jam bytes exactly as read
  * at boot (all jam_len bytes, trailing zero bytes included), not of a
- * re-jam of the cued kernel. N is the last event the state follows. This
- * PR only writes: boot does not read a checkpoint yet, and nothing is
- * rotated or dropped (rotation stays suspended until the boot path lands).
+ * re-jam of the cued kernel. N is the last event the state follows. PR 1b
+ * adds the boot side (ckpt_boot, below); nothing is rotated or dropped
+ * (rotation stays suspended until PR 1c).
  * A checkpoint that cannot be written or verified is skipped and logged;
  * the step itself is already committed and is not affected. The host
  * hashes and stores bytes; apart from the wrapper shape check below it
@@ -729,6 +729,18 @@ static void put_goof(noun goof)
 #define I3_CKPT_WRAPPER_TAG 1u
 #else
 #define I3_CKPT_WRAPPER_TAG 0u
+#endif
+/* Boot-side test knobs (row 212 PR 1b, tests/checkpoint_boot.py): the
+ * writer stores a deliberately bad header for every N >= I3_CKPT_TEST_FROM
+ * (default 1, i.e. all), so a flag-on boot of that log must reject it and
+ * fall back (row 212 (3)). hdrshape drops the kernel-blake3 field, hdrsid
+ * names a state id that is not in the store, hdrd flips one bit of D. The
+ * state blob itself is written and verified as usual. */
+#if defined(I3_CKPT_TEST_HDRSHAPE) || defined(I3_CKPT_TEST_HDRSID) || defined(I3_CKPT_TEST_HDRD)
+#if !defined(I3_CKPT_TEST_FROM)
+#define I3_CKPT_TEST_FROM 1
+#endif
+#define I3_CKPT_BAD_HDR(n) ((n) >= (uint64_t)I3_CKPT_TEST_FROM)
 #endif
 _Static_assert(I3_CKPT_STACK_MAX <= JOB_STACK_MAX, "ckpt stack fits");
 _Static_assert(I3_CKPT_CELLS_MAX <= JOB_CELLS_MAX, "ckpt cells fit");
@@ -906,11 +918,26 @@ static void ckpt_maybe_write(void)
              || !digest_eq(dig, dig2))
         why = "verify-state";
     else {
+        uint32_t arity = 5;
+        uint8_t hdig[32];
+        uint32_t i;
+        for (i = 0; i < 32; i++)
+            hdig[i] = dig[i];
         xs[0] = tas("i3-ckpt");
         xs[1] = direct(n);
         xs[2] = direct(sid);
-        if (!bytes_atom(dig, &xs[3]) || !bytes_atom(g_jam_blake3, &xs[4])
-            || !tuple(xs, 5, &hdr) || !ckpt_digest(hdr, hd, 0))
+#if defined(I3_CKPT_TEST_HDRSHAPE)
+        if (I3_CKPT_BAD_HDR(n))
+            arity = 4;
+#elif defined(I3_CKPT_TEST_HDRSID)
+        if (I3_CKPT_BAD_HDR(n))
+            xs[2] = direct(sid ^ 1u);
+#elif defined(I3_CKPT_TEST_HDRD)
+        if (I3_CKPT_BAD_HDR(n))
+            hdig[0] ^= 1u;
+#endif
+        if (!bytes_atom(hdig, &xs[3]) || !bytes_atom(g_jam_blake3, &xs[4])
+            || !tuple(xs, arity, &hdr) || !ckpt_digest(hdr, hd, 0))
             why = "alloc";
         /* The header read back must jam to the same bytes as the one
          * written (all five fields), not merely be a cell. */
@@ -1174,7 +1201,15 @@ static int replay_fail(uint64_t i, const char *why)
  * entry is the %crud ovo itself), its event number must be the next one,
  * and any failure stops the boot. Replay runs without the op budget
  * (decision 198); the cell and stack limits stay. */
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+/* Row 212 PR 1b: after a checkpoint boot at N, entries 1..N are read only
+ * to move the cursor and to count their jobs into g_job_sum (so the row 213
+ * reserve is the one a from-zero replay of the same log keeps); they are
+ * not run. Entries after N run exactly as below. skip = 0: replay from zero. */
+static int replay_log(uint64_t skip)
+#else
 static int replay_log(void)
+#endif
 {
     uint64_t n = cold_log_len(), i, cur = 0;
     i3_host_result_t r;
@@ -1195,6 +1230,15 @@ static int replay_log(void)
         if (!noun_is_cell(job))
             return replay_fail(i, "read");
         cell_t *jc = (cell_t *)(uintptr_t)cell_ptr(job);
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+        if (i < skip) {
+            if (!noun_is_atom(jc->head) || direct_val(jc->head) != i + 1)
+                return replay_fail(i, "event-num");
+            job_seen(job_cells(job));
+            heap_scratch_reset();
+            continue;
+        }
+#endif
         if (!noun_is_atom(jc->head) || direct_val(jc->head) != g_event_num)
             return replay_fail(i, "event-num");
         job_seen(job_cells(job));
@@ -1253,6 +1297,206 @@ static void stop_after_trip(void)
     uart_puts("\r\n");
     heap_scratch_reset();
 }
+
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+/* Row 212 PR 1b: boot from a checkpoint (docs/lite-checkpoint-writer.md,
+ * Boot). Take the newest header [%i3-ckpt N sid D kernel-blake3] that
+ * verifies: N within the log, kernel-blake3 equal to this boot's
+ * g_jam_blake3 (BLAKE3-256 of the pill's kernel jam bytes as read), the
+ * state blob sid loads and sha256(jam state) = D; then the state goes
+ * through the versioned +load (the NockApp wrapper's outer +load, arm 4,
+ * with [%0 desk-hash state]); the loaded core's state must again hash to D,
+ * and it is copied into persist. Replay then runs only the entries after N.
+ * Any failure rejects that header and the next older one is tried. Row 212
+ * (3) fallback: if none verifies and the log still starts at entry 1,
+ * replay from zero. No rotation exists yet (PR 1c), so the log always
+ * starts at entry 1 and the "log rotated: stop" branch cannot arise here.
+ * A rejected attempt leaves the booted core and event number as they were;
+ * its scratch is reset, but persist cells a failed persist copy already
+ * took are not returned (bump heap). Never boots from an unverified image:
+ * the state is installed only after every check passed. */
+#define I3_CKPT_HDR_MAX_BYTES 256u
+
+typedef struct {
+    noun tag;
+    uint64_t below;   /* only headers with N < below */
+    int found, shape_ok;
+    uint64_t n, sid;
+    uint8_t d[32], kb[32];
+} ckpt_find_t;
+
+static int ckpt_find_cb(void *ctx, noun blob)
+{
+    ckpt_find_t *f = (ckpt_find_t *)ctx;
+    noun x[5], cur = blob;
+    uint32_t i;
+    uint64_t n;
+    uint8_t d[32], kb[32];
+    int shape_ok = 1;
+    for (i = 0; i < 4; i++) {
+        cell_t *c;
+        if (!noun_is_cell(cur)) {
+            if (i < 2)
+                goto done;
+            shape_ok = 0;
+            break;
+        }
+        c = (cell_t *)(uintptr_t)cell_ptr(cur);
+        x[i] = c->head;
+        cur = c->tail;
+    }
+    x[4] = cur;
+    /* A header is a cell whose head is %i3-ckpt and whose second field is
+     * the event number; anything else in the store is not a header. */
+    if (x[0] != f->tag || !noun_is_direct(x[1]))
+        goto done;
+    n = direct_val(x[1]);
+    if (n >= f->below || (f->found && n < f->n))
+        goto done;
+    if (shape_ok)
+        shape_ok = noun_is_direct(x[2]) && noun_atom_read_fixed(x[3], d, 32)
+                   && noun_atom_read_fixed(x[4], kb, 32);
+    f->found = 1;
+    f->shape_ok = shape_ok;
+    f->n = n;
+    f->sid = shape_ok ? direct_val(x[2]) : 0;
+    for (i = 0; i < 32; i++) {
+        f->d[i] = shape_ok ? d[i] : 0;
+        f->kb[i] = shape_ok ? kb[i] : 0;
+    }
+done:
+    heap_scratch_reset();
+    return 0;
+}
+
+static int load_formula(noun *out)
+{
+    noun pul_xs[4] = {direct(9), direct(4), direct(0), direct(2)};
+    noun sam_xs[3] = {direct(6), direct(0), direct(7)};
+    noun pul, sam, fol_xs[8];
+    if (!tuple(pul_xs, 4, &pul) || !tuple(sam_xs, 3, &sam))
+        return 0;
+    fol_xs[0] = direct(8);
+    fol_xs[1] = pul;
+    fol_xs[2] = direct(9);
+    fol_xs[3] = direct(2);
+    fol_xs[4] = direct(10);
+    fol_xs[5] = sam;
+    fol_xs[6] = direct(0);
+    fol_xs[7] = direct(2);
+    return tuple(fol_xs, 8, out);
+}
+
+/* Verify one header and, if every check passes, install its state.
+ * Returns 0 on success, else the reject reason. */
+static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
+{
+    noun state, booted, desk, old, fol, subject, product, xs[3];
+    uint8_t dig[32];
+    uint64_t saved_event = g_event_num;
+    i3_host_result_t r;
+    int jumped;
+    if (!f->shape_ok)
+        return "shape";
+    if (f->n == 0 || f->n > log_len)
+        return "n";
+    if (!digest_eq(f->kb, g_jam_blake3))
+        return "kernel";
+    heap_set_mode(HEAP_MODE_SCRATCH);
+    state = cold_load_scratch(f->sid);
+    if (!noun_is_cell(state))
+        return "sid";
+    if (!ckpt_digest(state, dig, 0) || !digest_eq(dig, f->d))
+        return "hash";
+    /* The booted core must have the wrapper shape the writer saved from;
+     * its desk-hash (axis 26) is the booted build's, as on any +load. */
+    if (!ckpt_wrapper_ok(g_kernel, &booted) || !ckpt_axis(g_kernel, 26, &desk))
+        return "wrapper";
+    xs[0] = direct(0);
+    xs[1] = desk;
+    xs[2] = state;
+    if (!tuple(xs, 3, &old) || !load_formula(&fol) || !nest(g_kernel, old, &subject))
+        return "alloc";
+    /* As replay (decision 198): no op budget, the cell and stack limits stay. */
+    nock_budget_set_limits(0, I3_SLAM_MAX_CELLS);
+    nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
+    jumped = host_nock(subject, fol, &product);
+    uart_puts("I3H ckpt boot load event=");
+    put_u64(f->n);
+    uart_puts(" abort=");
+    uart_puts(i3_host_abort_name(jumped, nock_budget_abort_reason()));
+    if (jumped == NOCK_ABORT_CRASH) {
+        uint64_t m = nock_crash_mote();
+        uart_puts(" mote=");
+        while (m) {
+            uart_putc((char)(m & 0xff));
+            m >>= 8;
+        }
+    }
+    uart_puts(" nock_ops_used=");
+    put_u64(nock_ops_used());
+    uart_puts(" nock_cells_used=");
+    put_u64(nock_cells_used());
+    uart_puts(" nock_eval_stack_peak=");
+    put_u64(nock_eval_stack_peak());
+    uart_puts("\r\n");
+    nock_budget_finish();
+    if (jumped != 0 || !noun_is_cell(product))
+        return "load";
+    if (!ckpt_wrapper_ok(product, &state) || !ckpt_digest(state, dig, 0)
+        || !digest_eq(dig, f->d))
+        return "load-hash";
+    booted = g_kernel;
+    g_kernel = product;
+    clear_result(&r);
+    if (!i3_host_persist(&r)) {
+        g_kernel = booted;
+        g_event_num = saved_event;
+        return "persist";
+    }
+    g_event_num = f->n + 1;
+    return 0;
+}
+
+/* Returns the N the boot resumes after (0: replay from zero). */
+static uint64_t ckpt_boot(void)
+{
+    ckpt_find_t f;
+    uint64_t log_len = cold_log_len(), rejected = 0;
+    const char *why;
+    f.tag = tas("i3-ckpt");
+    f.below = UINT64_MAX;
+    for (;;) {
+        f.found = 0;
+        if (cold_blob_scan(I3_CKPT_HDR_MAX_BYTES, ckpt_find_cb, &f) != 0 || !f.found)
+            break;
+        why = ckpt_try(&f, log_len);
+        heap_scratch_reset();
+        if (!why) {
+            uart_puts("I3H ckpt boot event=");
+            put_u64(f.n);
+            uart_puts(" sha256=");
+            put_hex(f.d, 32);
+            uart_puts(" log=");
+            put_u64(log_len);
+            uart_puts("\r\n");
+            return f.n;
+        }
+        uart_puts("I3H ckpt boot reject event=");
+        put_u64(f.n);
+        uart_puts(" reason=");
+        uart_puts(why);
+        uart_puts("\r\n");
+        rejected++;
+        f.below = f.n;
+    }
+    heap_scratch_reset();
+    uart_puts("I3H ckpt boot none rejected=");
+    put_u64(rejected);
+    uart_puts(" fallback=zero\r\n");
+    return 0;
+}
+#endif
 
 void i3_host_boot(void)
 {
@@ -1375,7 +1619,11 @@ void i3_host_boot(void)
     uart_puts("\r\n");
 #endif
     g_persist_reserve = heap_persist_free_cells() / 16;
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+    if (!replay_log(ckpt_boot())) {
+#else
     if (!replay_log()) {
+#endif
         uart_puts("I3H terminal=replay-fail\r\n");
         g_ready = 0;
         halt();

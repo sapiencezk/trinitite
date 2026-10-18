@@ -748,7 +748,13 @@ uint64_t cold_jam_hash(noun n)
     return hash62_of(digest);
 }
 
-noun cold_load(uint64_t hash62)
+/* cold_load and (checkpoint flag only) cold_load_scratch share this body;
+ * they differ only in the heap the blob decodes into. HEAP_MODE_SCRATCH
+ * puts the cells in scratch, but an indirect atom always goes to the shared
+ * atom store (noun.c make_atom_checked: atom_store_get / atom_store_alloc_checked,
+ * whatever the heap mode), so a scratch decode can still leave atoms behind
+ * after heap_scratch_reset; it costs no persist cells. */
+static noun cold_load_in(uint64_t hash62, int heap_mode)
 {
     cold_super_t s;
     if (hash62 == 0 || select_super(&s, 0) != COLD_RESULT_VALID)
@@ -763,8 +769,7 @@ noun cold_load(uint64_t hash62)
         }
         if (h.kind == KIND_BLOB && hash62_of(h.payload_digest) == hash62) {
             noun out;
-            if (decode_object(&s, off, KIND_BLOB,
-                              HEAP_MODE_PERSIST, &out) != 0)
+            if (decode_object(&s, off, KIND_BLOB, heap_mode, &out) != 0)
                 return NOUN_ZERO;
             noun_tx_commit();
             return out;
@@ -776,33 +781,51 @@ noun cold_load(uint64_t hash62)
     return NOUN_ZERO;
 }
 
+noun cold_load(uint64_t hash62)
+{
+    return cold_load_in(hash62, HEAP_MODE_PERSIST);
+}
+
 #if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
 noun cold_load_scratch(uint64_t hash62)
 {
+    return cold_load_in(hash62, HEAP_MODE_SCRATCH);
+}
+
+/* Row 212 PR 1b (checkpoint boot): one walk of the selected chain in media
+ * order. Every BLOB whose payload is at most max_len bytes is decoded into
+ * SCRATCH and handed to fn (a blob that does not decode is passed over);
+ * fn returns nonzero to end the walk early. The caller owns scratch and may
+ * reset it inside fn. Returns 0 when the walk ended (at data_head or by fn),
+ * -1 when the superblock or an object does not validate (g_last_result set).
+ * Reads only; writes nothing to media. */
+int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
+{
     cold_super_t s;
-    if (hash62 == 0 || select_super(&s, 0) != COLD_RESULT_VALID)
-        return NOUN_ZERO;
+    if (!fn || select_super(&s, 0) != COLD_RESULT_VALID)
+        return -1;
     uint64_t off = COLD_DATA0;
     while (off < s.data_head) {
         cold_obj_hdr_t h;
+        uint64_t next;
         cold_result_t r = object_validate(&s, off, 0, 0, &h);
         if (r != COLD_RESULT_VALID) {
             g_last_result = r;
-            return NOUN_ZERO;
+            return -1;
         }
-        if (h.kind == KIND_BLOB && hash62_of(h.payload_digest) == hash62) {
+        if (!align8_checked(off + sizeof h + h.len, &next))
+            return -1;
+        if (h.kind == KIND_BLOB && h.len <= max_len) {
             noun out;
-            if (decode_object(&s, off, KIND_BLOB,
-                              HEAP_MODE_SCRATCH, &out) != 0)
-                return NOUN_ZERO;
-            noun_tx_commit();
-            return out;
+            if (decode_object(&s, off, KIND_BLOB, HEAP_MODE_SCRATCH, &out) == 0) {
+                noun_tx_commit();
+                if (fn(ctx, out))
+                    return 0;
+            }
         }
-        if (!align8_checked(off + sizeof h + h.len, &off))
-            break;
+        off = next;
     }
-    g_last_result = COLD_RESULT_ABSENT;
-    return NOUN_ZERO;
+    return 0;
 }
 #endif
 
