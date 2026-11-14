@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Row 212 PR 1a/1b: with I3_CHECKPOINT_EVERY unset neither the checkpoint
+# Row 212 PR 1a/1b: with I3_CHECKPOINT_EVERY= (empty) neither the checkpoint
 # writer (1a) nor the checkpoint boot (1b) may change the image. Builds BASE (default: 8d287abd, i3/cue-input-16m with 1a, trinitite#10)
-# and the working tree without the flag in the same configs and requires
+# and the working tree with the flag off in the same configs and requires
 # byte-identical kernel8.img; then checks the flag-on build compiles and
 # differs, and that the 1b boot-test writer knobs compile.
+# Row 317 (3): an I3_HOST build with no flag is the K=2000 build (the writer
+# is on by default), so the flag-off head builds pass I3_CHECKPOINT_EVERY=.
 # Usage: tests/checkpoint_flag_off.sh [BASE]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -33,8 +35,9 @@ i=0
 for cfg in "${CONFIGS[@]}"; do
     # shellcheck disable=SC2086
     build "$WORK/base" "b$i" $cfg
+    off=""; case "$cfg" in *I3_HOST=1*) off="I3_CHECKPOINT_EVERY=";; esac
     # shellcheck disable=SC2086
-    build "$WORK/head" "h$i" $cfg
+    build "$WORK/head" "h$i" $cfg $off
     if cmp -s "$WORK/b$i.img" "$WORK/h$i.img"; then
         echo "PASS flag-off identical [${cfg:-default}] sha256=$(sha256sum "$WORK/h$i.img" | cut -c1-16)"
     else
@@ -47,6 +50,12 @@ if cmp -s "$WORK/h0.img" "$WORK/on.img"; then
     echo "FAIL flag-on image equals flag-off image"; fail=1
 else
     echo "PASS flag-on build compiles and differs"
+fi
+build "$WORK/head" dflt PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1 COLD_MEDIA=semihost
+if cmp -s "$WORK/on.img" "$WORK/dflt.img"; then
+    echo "PASS no flag is K=2000 (row 317 (3)) sha256=$(sha256sum "$WORK/dflt.img" | cut -c1-16)"
+else
+    echo "FAIL an I3_HOST build with no flag is not the K=2000 build"; fail=1
 fi
 build "$WORK/head" knob PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1 COLD_MEDIA=semihost \
     I3_CHECKPOINT_EVERY=2 I3_CKPT_TEST=hdrd I3_CKPT_TEST_FROM=3

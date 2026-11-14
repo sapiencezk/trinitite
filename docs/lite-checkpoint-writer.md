@@ -101,6 +101,19 @@ nock_ops_used=475 nock_cells_used=163 nock_eval_stack_peak=19` at every checkpoi
 and `tests/checkpoint_boot.py` passes against it. With the landing kernel jam (1499kernel main 3d100787,
 where that row is 219): `abort=none nock_ops_used=481 nock_cells_used=166 nock_eval_stack_peak=19`.
 
+## Row 317 (3): on by default (1499kernel row 317 step 2, stage 1)
+1499kernel PLAN row 317 (3) turns the writer on at row 212's cadence. Every `I3_HOST=1` build with no
+`I3_CHECKPOINT_EVERY` on the make line is now the K = 2,000 build: the writer (1a) and the checkpoint boot (1b)
+are compiled in. `I3_CHECKPOINT_EVERY=` (empty) compiles both out, and that image is byte-identical to the
+earlier flag-off image (`tests/checkpoint_flag_off.sh`, which also checks that no flag equals K = 2000).
+Non-`I3_HOST` builds are unchanged. The boot rule, the fallback and the bounds are the 1b ones above; there is
+still no rotation (the ring, 1c) and no compaction (row 221), so the per-boot ceiling of row 200/213 is unchanged.
+The lite legs that check it on the current kernel run in 1499kernel's lite-probe row
+(`tools/lite_checkpoint_boot.py`): a checkpoint at 2,000 with the default image, boot from it plus the tail,
+K = 4/5 against a from-zero replay and the full node, and the six fallback legs. The pinned expectations in
+`tests/checkpoint_boot.py` are for the October kernel (1499kernel 3d100787) and are not updated here.
+Not measured: per-step SD append, torn writes and checkpoint cost on the board (rpi4-sd, row 200).
+
 ## Rotation (later PR, 1c)
 - Only after the newest checkpoint verified. Keep: newest verified checkpoint + the previous one until the
   next verifies, and every entry after the oldest kept one. Retention in entries, floor = 2-3 days at cycle rate.

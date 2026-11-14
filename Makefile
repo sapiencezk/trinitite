@@ -475,7 +475,13 @@ $(error I3_PERSIST_HEADROOM_CELLS requires I3_HOST=1)
 endif
 CFLAGS += -DI3_PERSIST_HEADROOM_CELLS=$(I3_PERSIST_HEADROOM_CELLS)
 endif
-# Row 212 PR 1a: lite checkpoint writer every K accepted entries (default off).
+# Row 212 PR 1a: lite checkpoint writer every K accepted entries, and (1b) boot
+# from the newest verified checkpoint. Row 317 (3) turns it on for every
+# I3_HOST image at row 212's cadence, K = 2,000; I3_CHECKPOINT_EVERY= (empty)
+# compiles both out, as before.
+ifeq ($(I3_HOST),1)
+I3_CHECKPOINT_EVERY ?= 2000
+endif
 ifneq ($(I3_CHECKPOINT_EVERY),)
 ifneq ($(I3_HOST),1)
 $(error I3_CHECKPOINT_EVERY requires I3_HOST=1)
