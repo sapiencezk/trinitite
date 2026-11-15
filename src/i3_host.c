@@ -687,8 +687,32 @@ int i3_host_load_app(const uint8_t *jam, uint64_t jam_len,
     put_hex(digest, 32);
     uart_puts(gated ? " match=yes\r\n" : " gate=no\r\n");
 
+#if defined(I3_CHECKPOINT_EVERY)
+    /* Row 317 step 2 (Round 5): name the first cue bound a refused bundle hits.
+     * i3_host_cue_bytes inlined to keep the status; under the checkpoint flag
+     * only, so flag-off images stay byte-identical (row 221 (11)). */
+    {
+        cue_bounded_limits_t limits = i3_limits();
+        cue_bounded_status_t status;
+        uint64_t len = jam_len;
+#if defined(I3_CKPT_TEST_APPCELLS)
+        limits.max_cells = 1000u; /* test build: a bundle meets the cells bound */
+#endif
+        while (len > 1 && jam[len - 1] == 0)
+            len--;
+        status = cue_bounded_bytes(jam, len, &limits, HEAP_MODE_PERSIST, &app_noun);
+        if (status != CUE_BOUNDED_OK) {
+            uart_puts("I3H app cue refused reason=");
+            uart_puts(cue_bounded_status_name(status));
+            uart_puts("\r\n");
+            return 0;
+        }
+        noun_tx_commit();
+    }
+#else
     if (!i3_host_cue_bytes(jam, jam_len, &app_noun))
         return 0;
+#endif
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (!nest(tas("load-bundle"), app_noun, &cause))
         return 0;
