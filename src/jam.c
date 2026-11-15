@@ -99,7 +99,13 @@ static void do_mat(jambuf_t *jb, noun k) {
 
 typedef struct { noun key; uint64_t pos; int used; } jcent_t;
 
-static jcent_t g_jcache[JAM_CACHE_SZ];
+#ifndef JAM_TABLE    /* ckpt_jam.c places its tables in the I3_CKPT_JAM region */
+#define JAM_TABLE(type, name, n) static type name[n]
+#endif
+#ifndef JAM_MUG_GEN_INIT
+#define JAM_MUG_GEN_INIT
+#endif
+JAM_TABLE(jcent_t, g_jcache, JAM_CACHE_SZ);
 /* 0: structural noun_eq (M8 trampoline battery digest).
  * 1: pointer identity (host Python jam of ResourceProgram). */
 static int g_jam_identity_keys;
@@ -151,8 +157,8 @@ static uint32_t jcache_ptr_hash(noun n) {
 #define JAM_MUG_MEMO 65536u      /* 16 B an entry: 1 MiB static */
 #define JAM_HOON_DEPTH 1024u     /* deepest noun the jet takes; else Nock */
 typedef struct { noun key; uint32_t mug; uint32_t gen; } jmug_t;
-static jmug_t g_jmug[JAM_MUG_MEMO];
-static uint32_t g_jmug_gen;
+JAM_TABLE(jmug_t, g_jmug, JAM_MUG_MEMO);
+static uint32_t g_jmug_gen JAM_MUG_GEN_INIT;
 static int g_jam_cache_full;
 
 static uint64_t jam_mix(uint64_t x) {

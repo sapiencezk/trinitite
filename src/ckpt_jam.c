@@ -29,7 +29,23 @@
 #define I2_JAM_CACHE_ENTRIES CKPT_JAM_CACHE_ENTRIES
 #undef I2_JAM_CACHE_ADMITTED
 #define I2_JAM_CACHE_ADMITTED CKPT_JAM_CACHE_ADMITTED
+/* The backref cache (6 MiB) and the mug memo (1 MiB) live in the fixed
+ * I3_CKPT_JAM region (memory.h), not in .bss: with them .bss would pass its
+ * 24 MiB bound in the fake-media builds. Region memory is not zeroed at
+ * boot: jam.c clears the cache on every jam, and the memo's generation
+ * starts at its last value so the first jam wraps it and clears the memo. */
+#include "memory.h"
+#define JAM_TABLE(type, name, n) \
+    static type (*const name##_at)[n] = (type (*)[n])(uintptr_t)(I3_CKPT_JAM_##name)
+#define I3_CKPT_JAM_g_jcache I3_CKPT_JAM_BASE
+#define I3_CKPT_JAM_g_jmug (I3_CKPT_JAM_BASE + I3_CKPT_JAM_MEMO_OFF)
+#define g_jcache (*g_jcache_at)
+#define g_jmug (*g_jmug_at)
+#define JAM_MUG_GEN_INIT = 0xFFFFFFFFu
 #include "jam.c"
+
+_Static_assert(sizeof g_jcache <= I3_CKPT_JAM_MEMO_OFF, "ckpt jam cache fits under the memo");
+_Static_assert(I3_CKPT_JAM_MEMO_OFF + sizeof g_jmug <= I3_CKPT_JAM_SIZE, "ckpt jam memo fits the region");
 
 _Static_assert(JAM_MAX_LIMBS * 8u == CKPT_JAM_MAX_BYTES, "ckpt jam buffer is the capacity");
 _Static_assert(CKPT_JAM_CACHE_ADMITTED * 4u == CKPT_JAM_CACHE_ENTRIES * 3u, "ckpt cache 75% admitted");

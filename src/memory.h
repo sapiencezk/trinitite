@@ -211,6 +211,36 @@
 #endif
 
 /*
+ * Row 317 (3), Q7: the checkpoint jam's tables (ckpt_jam.c: the 262,144-entry
+ * backref cache at the base, the mug memo at +8 MiB). With I3_CHECKPOINT_EVERY
+ * > 0 only. Between the code region (or .bss and the cue scratch) and the pill.
+ */
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#define I3_CKPT_JAM_BASE (PLATFORM_DRAM_BASE + 0x0E000000ULL)
+#define I3_CKPT_JAM_SIZE 0x01000000ULL /* 16 MiB */
+#define I3_CKPT_JAM_TOP  (I3_CKPT_JAM_BASE + I3_CKPT_JAM_SIZE)
+#define I3_CKPT_JAM_MEMO_OFF 0x00800000ULL
+#if I3_CKPT_JAM_BASE < BSS_TOP
+#error "checkpoint jam region overlaps .bss"
+#endif
+#if I3_CKPT_JAM_BASE < (PLATFORM_CUE_CACHE_BASE + 0x01800000ULL)
+#error "checkpoint jam region overlaps the cue cache"
+#endif
+#if I3_CKPT_JAM_BASE < (PLATFORM_CUE_RUB_SCRATCH + 0x00020000ULL)
+#error "checkpoint jam region overlaps the cue rub scratch"
+#endif
+#if defined(I3_CODE_TOP) && I3_CKPT_JAM_BASE < I3_CODE_TOP
+#error "checkpoint jam region overlaps the code region"
+#endif
+#if I3_CKPT_JAM_TOP > PLATFORM_PILL_BASE
+#error "checkpoint jam region overlaps the pill, plan and app slots"
+#endif
+#if I3_CKPT_JAM_TOP > 0x100000000ULL
+#error "checkpoint jam region must sit below 4 GiB"
+#endif
+#endif
+
+/*
  * PILL_BASE carries either:
  *   - isolated legacy I1 PILL v2: u64 len, shape, version/pad, jam at +16; or
  *   - I2 PILL2: 256-byte integrity/RuntimeIdentity header, then bounded jam.
