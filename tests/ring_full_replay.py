@@ -23,11 +23,12 @@ with no change to the full node or the kernel:
      and reads /state-hash after each one. Every step is then asserted: the snapshot boot's hash
      equals the from-zero hash at N, and the hash after each ring input n equals the from-zero
      hash at n. (N=6 and wrap4 start and end at the same hash, so the final hash alone is weak.)
-     O is 1 when lite event 1 is [%target %full-node], which the full node takes as --target.
+     O is 1 when lite event 1 is the %manifest, which the full node logs itself (the current
+     kernel, 1499kernel row 276; the landing kernel took [%target %full-node] as --target).
 
   python3 TRINITITE/tests/ring_full_replay.py RING FULL_NODE TARGET [FROM] [--zero F] [--out DIR]
-Run from a 1499kernel checkout (its build/kernel/kernel.jam). TARGET is full-node or lite-node
-(the --target the write boot's causes were made for). FROM is oldest (default), newest or N.
+Run from a 1499kernel checkout (its build/kernel/kernel.jam). TARGET is kept for the command
+line only: the current full node has no --target (1499kernel row 317 step 2, Round 3 Q14 A). FROM is oldest (default), newest or N.
 Prints one JSON line; exit 0 when the full node accepted every input, answered /state-hash and
 (with --zero) every step matched.
 """
@@ -77,7 +78,7 @@ class Node:
         self.log = (d / "node.log").open("w")
         self.p = subprocess.Popen([str(full), "run", "--kernel", str(kernel), "--ephemeral",
                                    "--snapshot", str(snap), "--control", str(sock), "--diagnostic",
-                                   "--no-clock", "--target", target],
+                                   "--no-clock"],
                                   stdout=self.log, stderr=subprocess.STDOUT)
         t = time.monotonic()
         while not sock.exists() and time.monotonic() - t < 120:

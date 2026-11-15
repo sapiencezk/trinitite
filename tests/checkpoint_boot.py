@@ -6,19 +6,21 @@ Every hash compared here is computed by a node (the lite /state-hash peek, the
 writer's `I3H ckpt ok ... sha256=D` line, or the full node's /state-hash); none in Python.
 
 Event sequences (N = accepted log entries; %load-bundle is two logged steps, the bundle
-then its %trace re-poke), the chain-5 app of 1499kernel tools/lite_state_hash.py:
-  N=6: %load-bundle, %trace, %manage 2, REQ [0 1], REQ [1 1], REQ [0 1]
-       (lite_state_hash.py cross-host leg, full node --target lite-node)
-  N=7: [%target %full-node], then the N=6 sequence
-       (lite_state_hash.py cross-host leg, full node --target full-node)
+then its %trace re-poke), the chain-5 app of 1499kernel tools/lite_state_hash.py. On the
+current kernel (1499kernel row 276) the full node logs its own %manifest as event 1, so every
+lite sequence starts with that %manifest poke (1499kernel row 317 step 2, Round 3 Q14 A):
+  N=7: %manifest, %load-bundle, %trace, %manage 2, REQ [0 1], REQ [1 1], REQ [0 1]
+       (lite_state_hash.py cross-host sequence; full node 6b0b2657 at 7)
+  N=6: the N=7 sequence without its last REQ
 
   boot legs (N, K) = (6, 4), (6, 5), (7, 4): a write boot with I3_CHECKPOINT_EVERY=K (one
       checkpoint, at N=K) takes the sequence with a /state-hash read after every step; a reboot
       of its cold image with the same image must log `I3H ckpt boot event=K`, replay only the
       entries after K (`I3H replay done event=N+1`), and read the same /state-hash as a
       flag-off reboot of the same cold image (replay from zero), as the write boot's own read
-      at N, and as the full node after the same causes. (6, 5) is there because at (6, 4) the
-      state at N=4 already hashes like N=6 (REQ [1 1] then [0 1] moves it away and back).
+      at N, and as the full node after the same causes. (6, 5) checkpoints a state one step
+      later (on the landing kernel N=4 already hashed like N=6; on main's kernel D at 4 is
+      cea1f2a3, at 5 6b0b2657, the final state at 6 c857e9ff).
       It also records open question 1: each checkpoint digest D (sha256(jam(axis 27))) against
       the lite /state-hash peek at the same N in the same boot.
   fallback legs (N=6 sequence, I3_CHECKPOINT_EVERY=2, headers at N=2,4,6), each rebooted with
@@ -52,6 +54,7 @@ from tools.oracle.basicfb_trace import event_cause
 from tools.oracle.ir_to_noun import app_to_noun, cord, id_tables, nock_cell, nock_list
 from tools.oracle.resident_turn_trace import turn_cause
 from tools.lite_state_hash import full_hash, reads
+from tools.oracle.limits import FRESH, FULL, manifest_cause, record_hash
 import tools.scale_scan as sc
 
 CKPT_OK = re.compile(r"I3H ckpt ok event=(\d+) bytes=\d+ sha256=([0-9a-f]{64})$")
@@ -59,11 +62,10 @@ BOOT_OK = re.compile(r"I3H ckpt boot event=(\d+) sha256=([0-9a-f]{64}) log=(\d+)
 REJECT = re.compile(r"I3H ckpt boot reject event=(\d+) reason=(\S+)$")
 NONE = re.compile(r"I3H ckpt boot none rejected=(\d+) fallback=zero$")
 XS = [0, 1, 0]
-# From-zero /state-hash at N with the landing kernel jam, 1499kernel main 3d100787 (#258 merged;
-# row 219 on main drops the wrapper +load trace). At #258's head bff56583: 9f64c2d2, 46775984.
-# Before #258: df590166, f27d583f. The kernel jam changed between bff56583 and 3d100787 (main's
-# merges), so the state hash moved; lite = from zero = full node at both kernels.
-STEWARD = {6: "f5764f6f", 7: "bf0a761a"}
+# From-zero /state-hash at N with main's kernel jam (1499kernel bc311dcc, pin 8d287abd; Round 3
+# Q14 A): the full node's own /state-hash after the N=6 and N=7 causes (it logs %manifest first).
+# Landing kernel 3d100787: f5764f6f, bf0a761a, with --target instead of %manifest.
+STEWARD = {6: "c857e9ff", 7: "6b0b2657"}
 
 
 def mem_wait(what: str) -> None:
@@ -99,27 +101,27 @@ def main() -> int:
 
     ld = lp.load_bundle_cause(app)
     go = turn_cause(LocalRequest.manage(2), None, None, tabs, None)
-    tg = nock_cell(cord("target"), cord("full-node"))
+    mf = manifest_cause(record_hash(FRESH), FULL)
     evs = [event_cause(tabs, "B0", "REQ", [x, 1]) for x in XS]
 
-    def plan(tag: str, target: bool, reads_each: bool = True, live: bool = True) -> bytes:
+    def plan(tag: str, n_want: int, reads_each: bool = True, live: bool = True) -> bytes:
         s, n = lp.Steps(tag), 0
         def peek():
             if reads_each:
                 s.steps.append(nock_cell(cord("state-hash"), cord(s._name(f"h{n}")), 0))
         if live:
-            if target:
-                s.poke("tg", tg); n += 1; peek()
+            s.poke("mf", mf); n += 1; peek()
             s.poke("ld", ld); n += 2; peek()
             s.poke("go", go); n += 1; peek()
-            for i, e in enumerate(evs):
+            for i, e in enumerate(evs[:n_want - 4]):
                 s.poke(f"e{i}", e); n += 1; peek()
         if not live or not reads_each:
             s.steps.append(nock_cell(cord("state-hash"), cord(s._name("z")), 0))
         return jam_bytes(nock_list(s.steps))
 
-    reboot = plan("r", False, live=False)
-    img_off = build(out / "img-off", [])
+    reboot = plan("r", 0, live=False)
+    # Row 317 (3): no flag is the K=2000 build; flag off is I3_CHECKPOINT_EVERY= (empty).
+    img_off = build(out / "img-off", ["I3_CHECKPOINT_EVERY="])
     imgs = {k: build(out / f"img-k{k}", [f"I3_CHECKPOINT_EVERY={k}"]) for k in (4, 5)}
     img_k2 = build(out / "img-k2", ["I3_CHECKPOINT_EVERY=2"])
     bad: list[str] = []
@@ -132,10 +134,9 @@ def main() -> int:
         return reads(ls).get("r-z")
 
     zero6 = None
-    for n_want, k, target, tname in ((6, 4, False, "lite-node"), (6, 5, False, "lite-node"),
-                                     (7, 4, True, "full-node")):
+    for n_want, k, tname in ((6, 4, "n6"), (6, 5, "n6"), (7, 4, "n7")):
         tag, img_k = f"n{n_want}k{k}", imgs[k]
-        wl = boot(img_k, pill, plan("w", target), out / f"{tag}-write")
+        wl = boot(img_k, pill, plan("w", n_want), out / f"{tag}-write")
         wr = reads(wl)
         live = wr.get(f"w-h{n_want}")
         ck = {int(m.group(1)): m.group(2) for l in wl for m in [CKPT_OK.match(l)] if m}
@@ -151,8 +152,8 @@ def main() -> int:
         bo = [m.groups() for l in cl for m in [BOOT_OK.match(l)] if m]
         rep = [l for l in cl if l.startswith("I3H replay done")]
         loads = [l for l in cl if l.startswith("I3H ckpt boot load ")]
-        # The full node with --target full-node logs [%target %full-node] itself as event 1.
-        causes = [ld, nock_cell(cord("trace"), 0), go] + evs
+        # The full node logs its own %manifest as event 1 (the lite plan pokes it).
+        causes = [ld, nock_cell(cord("trace"), 0), go] + evs[:n_want - 4]
         fr = full_hash(full, tname, causes) or {}
         row = {"K": k, "ckpts": ck, "live": live, "zero": z, "ckpt_boot": cb, "boot_line": bo,
                "load": loads, "replay": rep,
@@ -183,7 +184,7 @@ def main() -> int:
     for name, extra, bpill, off, want_rej, want_boot in legs:
         wimg = img_off if off else (build(out / f"img-{name}", ["I3_CHECKPOINT_EVERY=2"] + extra)
                                     if extra else img_k2)
-        wl = boot(wimg, pill, plan("w", False, reads_each=False), out / f"fb-{name}-write")
+        wl = boot(wimg, pill, plan("w", 6, reads_each=False), out / f"fb-{name}-write")
         w = reads(wl).get("w-z")
         cold = out / f"fb-{name}-write/build/cold.img"
         cl = boot(img_k2, bpill, reboot, out / f"fb-{name}-boot", cold)

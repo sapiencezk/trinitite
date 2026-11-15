@@ -4,8 +4,10 @@
 
 Images: I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 (compaction rides on the row 212 flags), qemu-virt,
 I3_HOST, semihost cold image; the control image is flag off (no checkpoint, no compaction).
-App: the chain-5 app of 1499kernel tools/lite_state_hash.py. Sequence: %load-bundle (two
-logged steps), %manage 2, then REQ [x 1] with x = 0,1,0,1,... Every hash compared is computed by
+App: the chain-5 app of 1499kernel tools/lite_state_hash.py. Sequence: %manifest (the full
+node logs its own as event 1 on the current kernel, 1499kernel row 276; 1499kernel row 317
+step 2 Round 3 Q14 A), %load-bundle (two logged steps), %manage 2, then REQ [x 1] with
+x = 0,1,0,1,... Every hash compared is computed by
 a node (the lite /state-hash peek, the `I3H ckpt ok ... sha256=D` line, the full node).
 
   running   N = 6 + EXTRA (16) with a /state-hash read after every step. Every checkpoint (2, 4, ..
@@ -14,12 +16,13 @@ a node (the lite /state-hash peek, the `I3H ckpt ok ... sha256=D` line, the full
             digest over the kept records before the slide equals the one over the store after
             it) with every live atom re-hashed to its name (missing=0) and no wild root. Each
             checkpoint's D and every per-step read equal the flag-off control run's read at that
-            N, and the final read equals the full node. The store returns to the same size after
+            N (no read at 2: the bundle and its %trace re-poke are one plan step), and the final read equals the full node. The store returns to the same size after
             each rebuild. A reboot of the cold image boots from 16 and reads the same hash;
             row 221 (7): its job sum counted from the log base (`I3H replay job_sum=`) equals the
             live node's after the compaction at 16 and the base record's audit field.
   crash-P   for P in before, copy, after-copy, after-flip, rebuild (writer knobs cmpbefore,
-            cmpcopy, cmpafter, cmpflip, cmprebuild, I3_CKPT_TEST_FROM=4): the N=6 sequence; the
+            cmpcopy, cmpafter, cmpflip, cmprebuild, I3_CKPT_TEST_FROM=4): the N=6 sequence
+            (%manifest, %load-bundle, %manage 2, REQ [0 1], REQ [1 1]); the
             compaction after checkpoint 4 stops dead at P (`I3H compact test crash event=4
             at=P`). The reboot (plain image) boots from 4, reads the control hash at 4, takes the
             remaining two REQ events and reads the full node's hash at 6.
@@ -48,6 +51,7 @@ from tools.oracle.basicfb_trace import event_cause
 from tools.oracle.ir_to_noun import app_to_noun, cord, id_tables, nock_cell, nock_list
 from tools.oracle.resident_turn_trace import turn_cause
 from tools.lite_state_hash import full_hash, reads
+from tools.oracle.limits import FRESH, FULL, manifest_cause, record_hash
 import tools.scale_scan as sc
 
 EXTRA = 10
@@ -101,9 +105,10 @@ def main() -> int:
     pill = out / "k.pill"; pill.write_bytes(lp.pack_pill(Path("build/kernel/kernel.jam").read_bytes()))
     ld = lp.load_bundle_cause(app)
     go = turn_cause(LocalRequest.manage(2), None, None, tabs, None)
-    xs = [i % 2 for i in range(3 + EXTRA)]
+    mf = manifest_cause(record_hash(FRESH), FULL)
+    xs = [i % 2 for i in range(2 + EXTRA)]
     evs = [event_cause(tabs, "B0", "REQ", [x, 1]) for x in xs]
-    n_all = 3 + len(evs)
+    n_all = 4 + len(evs)
 
     def plan(tag: str, causes: list, start: int, each: bool) -> bytes:
         """causes: (name, cause, logged steps); a /state-hash read after each (or at the end)."""
@@ -120,9 +125,10 @@ def main() -> int:
             peek("z")
         return jam_bytes(nock_list(s.steps))
 
-    seq = [("ld", ld, 2), ("go", go, 1)] + [(f"e{i}", e, 1) for i, e in enumerate(evs)]
-    full_causes = [ld, nock_cell(cord("trace"), 0), go] + evs
-    img_off = build(out / "img-off", [])
+    seq = [("mf", mf, 1), ("ld", ld, 2), ("go", go, 1)] + [(f"e{i}", e, 1) for i, e in enumerate(evs)]
+    full_causes = [ld, nock_cell(cord("trace"), 0), go] + evs  # the full node logs its own %manifest
+    # Row 317 (3): no flag is the K=2000 build; flag off is I3_CHECKPOINT_EVERY= (empty).
+    img_off = build(out / "img-off", ["I3_CHECKPOINT_EVERY="])
     img_on = build(out / "img-on", ON)
     bad: list[str] = []
     rep: dict = {}
@@ -131,7 +137,7 @@ def main() -> int:
     cl = boot(img_off, pill, plan("w", seq, 0, True), out / "control")
     ctl = {int(k[3:]): v for k, v in reads(cl).items() if k.startswith("w-h")}
     fr = full_hash(full, "lite-node", full_causes) or {}
-    fr6 = full_hash(full, "lite-node", full_causes[:6]) or {}
+    fr6 = full_hash(full, "lite-node", full_causes[:5]) or {}
     rep["control"] = {n: v.get("hash") for n, v in sorted(ctl.items())}
     rep["full"] = {"16": fr.get("hash"), "6": fr6.get("hash")}
     if (ctl.get(n_all) or {}).get("hash") != fr.get("hash") or not fr.get("hash"):
@@ -164,7 +170,11 @@ def main() -> int:
     row["atom_bytes_after"] = sorted(after)
     if len(after) != 1:
         bad.append(f"running:store-size {sorted(after)}")
+    # N=2 is the bundle before its %trace re-poke (one plan step logs entries 2 and 3, after the
+    # %manifest at 1), so no read is taken there; every other checkpoint has a control read.
     for n, d in ck.items():
+        if n == 2 and n not in ctl:
+            continue
         if (ctl.get(n) or {}).get("hash") != d:
             bad.append(f"running:D@{n}")
     for n in range(1, n_all + 1):
@@ -189,8 +199,8 @@ def main() -> int:
     print("running:", json.dumps(row), flush=True)
 
     # crash points
-    seq6 = seq[:5]  # ld go e0 e1 e2 -> N=6
-    rest = [(f"e{i}", evs[i], 1) for i in (1, 2)]
+    seq6 = seq[:5]  # mf ld go e0 e1 -> N=6
+    rest = [(f"e{i}", evs[i], 1) for i in (0, 1)]  # entries 5 and 6 after the boot from 4
     for at, knob in CRASH_LEGS:
         img = build(out / f"img-{knob}", ON + [f"I3_CKPT_TEST={knob}", "I3_CKPT_TEST_FROM=4"])
         w = boot(img, pill, plan("w", seq6, 0, False), out / f"crash-{at}")

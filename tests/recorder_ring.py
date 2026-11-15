@@ -11,19 +11,20 @@ is valid and the log has been rotated, the node stops (row 141 stop) and reports
 
 Images: I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_EVERY=2 I3_RING_BYTES=RING (small, so the
 ring wraps within a few events), qemu-virt, I3_HOST, semihost cold and ring files. The event
-sequences are those of tests/checkpoint_boot.py (chain-5 app): N=6 (%load-bundle, %trace,
-%manage 2, REQ [0 1], [1 1], [0 1]; full node --target lite-node) and N=7 ([%target %full-node]
-first; full node --target full-node). Every hash compared is computed by a node.
+sequences are those of tests/checkpoint_boot.py (chain-5 app; 1499kernel row 317 step 2 Round 3
+Q14 A: on the current kernel the full node logs its own %manifest as event 1, so the lite
+sequences start with that %manifest poke): N=6 (%manifest, %load-bundle, %trace, %manage 2,
+REQ [0 1], [1 1]) and N=7 (N=6 then REQ [0 1]). Every hash compared is computed by a node.
 
   running   N=6 write boot, a /state-hash read after every step: checkpoints at 2, 4, 6; no base
             move at 2, `I3H log base event=2` right after the checkpoint at 4 verifies, `event=4`
             after 6 (the previous checkpoint stays until the next one verifies; entries before it
             are dropped); the cold superblock's base is 4. A reboot of the cold image reads base 4,
             boots from 6, replays nothing, and reads the same /state-hash as the write boot at 6
-            and the full node (f5764f6f).
+            and the full node (c857e9ff).
   crash     I3_CKPT_TEST=crash I3_CKPT_TEST_FROM=6: the checkpoint at 6 is stored damaged and the
             node stops dead before verifying it. The reboot rejects 6 (reason=hash), boots from 4
-            (kept: the base is still 2), replays 5 and 6 and reads f5764f6f.
+            (kept: the base is still 2), replays 5 and 6 and reads c857e9ff.
   rotated   the running cold image (base 4) rebooted with the pill's jam plus one zero byte (so
             no checkpoint's kernel-blake3 matches): rejects 6 and 4 (reason=kernel), logs
             `fallback=stop base=4`, `I3H stop reason=rotated`, replays nothing, refuses the poke
@@ -35,12 +36,12 @@ first; full node --target full-node). Every hash compared is computed by a node.
   offdevice for N=6 and N=7: tools/ring_image.py turns the write boot's ring image into a cold
             image from its oldest kept checkpoint; the same flag-on image boots it (no ring
             loaded), replays every later ring input and reads /state-hash, which must equal the
-            full node's after the same causes (N=6 f5764f6f, N=7 bf0a761a).
+            full node's after the same causes (N=6 c857e9ff, N=7 6b0b2657).
   wrap4     the wrap leg's ring (4+ wraps): a cold image from its oldest kept checkpoint boots on the
             same lite image and reads the full node's /state-hash after all N=6+EXTRA causes; the
             image's base job_sum comes from the ring checkpoint record (row 221 (7): the jobs
             after the device's log base when it was written; audit only, boot counts from the base).
-  torn      I3_RING_TEST=torn, 32 KiB ring: the first wrap marker never lands, the moved header does,
+  torn      I3_RING_TEST=torn, RING_BIG (64 KiB) ring: the first wrap marker never lands, the moved header does,
             then a power cut. The reboot opens the older slot (status=torn-older, never formats), the
             ring keeps its older segments and grows.
   prefix    the torn image with the older slot damaged too: status=torn-prefix (longest valid prefix
@@ -50,9 +51,9 @@ first; full node --target full-node). Every hash compared is computed by a node.
             non-zero data): status=foreign, ring off, nothing written, the node runs as usual.
   reformat  ring6 with whole headers of our own for another size (ring_bytes 8192, checksums
             recomputed): status=reformat, gen above the highest on the media,
-            `I3H ring reformat old_bytes=8192 new_bytes=16384`.
-  reformat-size  a 32 KiB ring's first 16 KiB booted by the 16 KiB build (valid own headers, other
-            size): status=reformat and `I3H ring reformat old_bytes=32768 new_bytes=16384`.
+            `I3H ring reformat old_bytes=8192 new_bytes=32768`.
+  reformat-size  a 64 KiB ring's first 32 KiB booted by the 32 KiB build (valid own headers, other
+            size): status=reformat and `I3H ring reformat old_bytes=65536 new_bytes=32768`.
   corrupt   ring6 with the tail record broken (valid slots, no valid prefix): status=corrupt, ring
             off, media untouched, the off line and the operator hint exactly once, node as usual.
   corrupt-hdr  ring6 with both slot checksums broken (own magic and version, no header to trust):
@@ -90,14 +91,20 @@ from tools.oracle.basicfb_trace import event_cause
 from tools.oracle.ir_to_noun import app_to_noun, cord, id_tables, nock_cell, nock_list
 from tools.oracle.resident_turn_trace import turn_cause
 from tools.lite_state_hash import full_hash, reads
+from tools.oracle.limits import FRESH, FULL, manifest_cause, record_hash
 import tools.scale_scan as sc
 
-RING = int(os.environ.get("RING_BYTES", "16384"))
+# Round 3 Q14 A: main's kernel's checkpoint record (++jam of the state, 14,838 bytes at N=2) does
+# not fit a 16 KiB ring (`I3H ring skip reason=size` at every N), so the default ring is 32 KiB
+# and the torn/prefix/reformat-size ring twice that (landing kernel: 16 KiB and 32 KiB).
+RING = int(os.environ.get("RING_BYTES", "32768"))
+RING_BIG = 2 * RING
 EXTRA = 10
 RING_ADDR = 0x70000000  # PLATFORM_DRAM_BASE + 0x30000000 on qemu-virt (src/i3_ring.c)
-# Full-node /state-hash at N with the landing kernel jam, 1499kernel main 3d100787 (at #258's
-# head bff56583: 9f64c2d2, 46775984; the kernel jam changed between the two).
-STEWARD = {6: "f5764f6f", 7: "bf0a761a"}
+# Full-node /state-hash at N with main's kernel jam (1499kernel bc311dcc, pin 8d287abd; Round 3
+# Q14 A), as tests/checkpoint_boot.py. Landing kernel 3d100787 (--target, no %manifest):
+# f5764f6f, bf0a761a.
+STEWARD = {6: "c857e9ff", 7: "6b0b2657"}
 CKPT_OK = re.compile(r"I3H ckpt ok event=(\d+) ")
 BASE = re.compile(r"I3H log base event=(\d+) ckpt=(\d+) kept_entries=(\d+) kept_bytes=(\d+) chain_bytes=(\d+)$")
 BOOT_OK = re.compile(r"I3H ckpt boot event=(\d+) ")
@@ -180,7 +187,7 @@ def main() -> int:
     padded = out / "k-pad.pill"; padded.write_bytes(lp.pack_pill(jam + b"\0"))
     ld = lp.load_bundle_cause(app)
     go = turn_cause(LocalRequest.manage(2), None, None, tabs, None)
-    tg = nock_cell(cord("target"), cord("full-node"))
+    mf = manifest_cause(record_hash(FRESH), FULL)
     ev = lambda x: event_cause(tabs, "B0", "REQ", [x, 1])
     evs = [ev(x) for x in XS]
     more = [ev(i % 2) for i in range(EXTRA)]
@@ -195,9 +202,11 @@ def main() -> int:
             s.steps.append(nock_cell(cord("state-hash"), cord(s._name("z")), 0))
         return jam_bytes(nock_list(s.steps))
 
-    seq6 = [(ld, 2), (go, 1)] + [(e, 1) for e in evs]          # (cause, logged entries)
-    seq7 = [(tg, 1)] + seq6
-    full6 = [ld, nock_cell(cord("trace"), 0), go] + evs        # full node causes
+    seq6 = [(mf, 1), (ld, 2), (go, 1)] + [(e, 1) for e in evs[:2]]  # (cause, logged entries)
+    seq7 = seq6 + [(evs[2], 1)]
+    # Full node causes: it logs its own %manifest as lite event 1.
+    full6 = [ld, nock_cell(cord("trace"), 0), go] + evs[:2]
+    full7 = full6 + [evs[2]]
     peek = plan("r", [])
     ll = ["I3_CHECKPOINT_EVERY=2", "I3_LITE_LOG=1", "I3_RING_EVERY=2", f"I3_RING_BYTES={RING}"]
     mem_wait("make img-ll"); img = flag_build(out / "img-ll", ll)
@@ -205,7 +214,7 @@ def main() -> int:
     bad: list[str] = []
     rep: dict = {"ring_bytes": RING}
     fh6 = (full_hash(full, "lite-node", full6) or {})
-    fh7 = (full_hash(full, "full-node", full6) or {})
+    fh7 = (full_hash(full, "full-node", full7) or {})
     rep["full"] = {"6": fh6, "7": fh7}
     if not fh6.get("hash", "").startswith(STEWARD[6]) or not fh7.get("hash", "").startswith(STEWARD[7]):
         bad.append("full-node-steward")
@@ -344,9 +353,9 @@ def main() -> int:
     # checkpoint and for each input. (N=6 and wrap4 start and end at the same hash.)
     rep["fullreplay"] = {}
     for name, src, tgt, n, fh, causes, off in (
-            ("6", ring6, "lite-node", 6, fh6, full6, 0),
-            ("7", out / "off7-write/build/ring.img", "full-node", 7, fh7, full6, 1),
-            ("wrap4", ringw, "lite-node", nw, fhw, full6 + more, 0)):
+            ("6", ring6, "full-node", 6, fh6, full6, 1),
+            ("7", out / "off7-write/build/ring.img", "full-node", 7, fh7, full7, 1),
+            ("wrap4", ringw, "full-node", nw, fhw, full6 + more, 1)):
         mem_wait(f"fullreplay {name}")
         rd = out / f"fullreplay-{name}"
         shutil.rmtree(rd, ignore_errors=True)
@@ -375,8 +384,8 @@ def main() -> int:
     # torn: the first wrap marker never lands, the moved header does, then a power cut.
     # The reboot must open the older header slot (status=torn-older), never format,
     # and keep extending the ring.
-    # A 32 KiB ring, so that segments survive the wrap (in 16 KiB a wrap evicts every segment).
-    ll32 = [x for x in ll if not x.startswith("I3_RING_BYTES=")] + ["I3_RING_BYTES=32768"]
+    # A ring of RING_BIG, so that segments survive the wrap (in RING a wrap evicts every segment).
+    ll32 = [x for x in ll if not x.startswith("I3_RING_BYTES=")] + [f"I3_RING_BYTES={RING_BIG}"]
     mem_wait("make img-32"); img32 = flag_build(out / "img-32", ll32)
     mem_wait("make img-torn"); img_torn = flag_build(out / "img-torn", ll32 + ["I3_RING_TEST=torn"])
     tl = boot(img_torn, pill, plan("w", wseq), out / "torn-write")
@@ -468,8 +477,8 @@ def main() -> int:
             and sz == [f"I3H ring reformat old_bytes=8192 new_bytes={RING}"]):
         bad.append("reformat")
 
-    # reformat-size: a ring the 32 KiB build wrote, as the 16 KiB build loads it (its first
-    # 16 KiB). Valid own headers with another ring size: reformat, logging both sizes in bytes.
+    # reformat-size: a ring the RING_BIG build wrote, as the RING build loads it (its first
+    # RING bytes). Valid own headers with another ring size: reformat, logging both sizes in bytes.
     big = (out / "prefix-boot/build/ring.img").read_bytes()
     rsz = out / "reformat-size.ring"; rsz.write_bytes(big[:RING])
     big_rb = struct.unpack_from("<Q", big, 16)[0]
@@ -481,8 +490,8 @@ def main() -> int:
            "show_after": {k: v for k, v in rshow.items() if k != "segments"}}
     rep["reformat_size"] = row
     print("reformat-size:", json.dumps(row), flush=True)
-    if not (big_rb == 32768 and rb and " status=reformat " in rb[0]
-            and sz == [f"I3H ring reformat old_bytes=32768 new_bytes={RING}"]
+    if not (big_rb == RING_BIG and rb and " status=reformat " in rb[0]
+            and sz == [f"I3H ring reformat old_bytes={RING_BIG} new_bytes={RING}"]
             and rshow.get("ok") and rshow.get("last_n") == 6):
         bad.append("reformat-size")
 
