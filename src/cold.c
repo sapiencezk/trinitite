@@ -26,7 +26,14 @@
 #define KIND_LOG   2u
 #define KIND_SNAP  3u
 
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+/* Round 3, Q11 B: a checkpoint object (CKPT_JAM_MAX_BYTES) passes through
+ * both scratches, so with the checkpoint flag they are 4 MiB each, in the
+ * I3_CKPT_JAM region (memory.h), not in .bss. */
+#define JAM_SCRATCH_MAX ((uint32_t)I3_CKPT_COLD_SCRATCH_BYTES)
+#else
 #define JAM_SCRATCH_MAX (256u * 1024u)
+#endif
 
 typedef struct __attribute__((packed)) {
     uint64_t magic;
@@ -60,10 +67,15 @@ typedef char cold_super_size_check[
 typedef char cold_obj_size_check[
     sizeof(cold_obj_hdr_t) == COLD_OBJ_SIZE ? 1 : -1];
 
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#define jam_scratch ((uint8_t *)(uintptr_t)(I3_CKPT_JAM_BASE + I3_CKPT_JAM_COLD_OFF))
+#define append_scratch ((uint8_t *)(uintptr_t)(I3_CKPT_JAM_BASE + I3_CKPT_JAM_APPEND_OFF))
+#else
 static uint8_t jam_scratch[JAM_SCRATCH_MAX];
 /* append_obj() validates the currently selected object before writing. That
  * validation also uses jam_scratch, so preserve the new payload separately. */
 static uint8_t append_scratch[JAM_SCRATCH_MAX];
+#endif
 static cold_result_t g_last_result = COLD_RESULT_EMPTY;
 static uint64_t g_selected_generation;
 static uint64_t g_selected_data_head;

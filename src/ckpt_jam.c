@@ -1,8 +1,8 @@
 /* Row 317 (3), Q7 (row 212 (4)): the lite checkpoint writer's own jam.
  *
  * jam.c compiled a second time, with every public name prefixed ckpt_, a
- * CKPT_JAM_MAX_BYTES (256 KiB) output buffer and a CKPT_JAM_CACHE_ENTRIES
- * backref cache. Its statics are this file's own, so the %jam jet, the log
+ * CKPT_JAM_MAX_BYTES (4 MiB, Round 3 Q11) output buffer and a
+ * CKPT_JAM_CACHE_ENTRIES backref cache (sizes: ckpt_jam.h). Its statics are this file's own, so the %jam jet, the log
  * writer and every other jam.c caller keep their 128 KiB buffer and
  * 98,304-entry cache, and a flag-off image does not link this file at all
  * (Makefile CKPT_OBJS). The encoding rules are jam.c's: the default writer
@@ -32,11 +32,13 @@
 #define I2_JAM_CACHE_ENTRIES CKPT_JAM_CACHE_ENTRIES
 #undef I2_JAM_CACHE_ADMITTED
 #define I2_JAM_CACHE_ADMITTED CKPT_JAM_CACHE_ADMITTED
-/* The backref cache (6 MiB) and the mug memo (1 MiB) live in the fixed
- * I3_CKPT_JAM region (memory.h), not in .bss: with them .bss would pass its
- * 24 MiB bound in the fake-media builds. Region memory is not zeroed at
- * boot: jam.c clears the cache on every jam, and the memo's generation
- * starts at its last value so the first jam wraps it and clears the memo. */
+/* The backref cache (12 MiB), the mug memo (4 MiB) and the 4 MiB buffer
+ * live in the fixed I3_CKPT_JAM region (memory.h), not in .bss: with them
+ * .bss would pass its 24 MiB bound in the fake-media builds. Region memory
+ * is not zeroed at boot: ckpt_jam_reset clears the cache and the memo once
+ * before first use; besides, jam.c clears the cache's used flags and the
+ * buffer on every jam, and the memo's generation starts at its last value
+ * so a first jam without the reset would wrap it and clear the memo. */
 #include "memory.h"
 #define JAM_TABLE(type, name, n) \
     static type (*const name##_at)[n] = (type (*)[n])(uintptr_t)(I3_CKPT_JAM_##name)
@@ -45,10 +47,41 @@
 #define g_jcache (*g_jcache_at)
 #define g_jmug (*g_jmug_at)
 #define JAM_MUG_GEN_INIT = 0xFFFFFFFFu
+#define JAM_MUG_MEMO CKPT_JAM_MUG_MEMO
+#define JAM_BUF_DECL \
+    static jambuf_t *const g_jambuf_at = (jambuf_t *)(uintptr_t)(I3_CKPT_JAM_BASE + I3_CKPT_JAM_BUF_OFF)
+#define g_jambuf (*g_jambuf_at)
 #include "jam.c"
 
+_Static_assert(sizeof g_jambuf <= I3_CKPT_JAM_COLD_OFF - I3_CKPT_JAM_BUF_OFF, "ckpt jam buffer fits its slot");
+_Static_assert(CKPT_JAM_CACHE_ADMITTED >= 2u * CKPT_CUE_MAX_CELLS + 1u, "a cache entry for every distinct noun");
+_Static_assert(CKPT_JAM_MUG_MEMO >= 2u * CKPT_CUE_MAX_CELLS, "mug memo at most half full");
+_Static_assert((2ull * CKPT_CUE_MAX_CELLS + (CKPT_CUE_MAX_CELLS + 1ull) * CKPT_JAM_LEAF_BITS
+                + 8ull * I3_CUE_MAX_TOTAL_ATOM_BYTES + 7ull) / 8ull <= CKPT_JAM_MAX_BYTES,
+               "the jam of any state the checkpoint cue admits fits the buffer");
+
 _Static_assert(sizeof g_jcache <= I3_CKPT_JAM_MEMO_OFF, "ckpt jam cache fits under the memo");
-_Static_assert(I3_CKPT_JAM_MEMO_OFF + sizeof g_jmug <= I3_CKPT_JAM_SIZE, "ckpt jam memo fits the region");
+_Static_assert(I3_CKPT_JAM_MEMO_OFF + sizeof g_jmug <= I3_CKPT_JAM_BUF_OFF, "ckpt jam memo fits under the buffer");
+
+void ckpt_jam_reset(void)
+{
+#if defined(I3_CKPT_TEST_DIRTY)
+    volatile uint64_t *p = (volatile uint64_t *)(uintptr_t)I3_CKPT_JAM_BASE;
+    for (uint64_t i = 0; i < I3_CKPT_JAM_SIZE / 8u; i++)
+        p[i] = 0xA5A5A5A5A5A5A5A5ULL;
+#endif
+    for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) {
+        g_jcache[i].key = 0;
+        g_jcache[i].pos = 0;
+        g_jcache[i].used = 0;
+    }
+    for (uint32_t i = 0; i < JAM_MUG_MEMO; i++) {
+        g_jmug[i].key = 0;
+        g_jmug[i].mug = 0;
+        g_jmug[i].gen = 0;
+    }
+    g_jmug_gen = 0;
+}
 
 _Static_assert(JAM_MAX_LIMBS * 8u == CKPT_JAM_MAX_BYTES, "ckpt jam buffer is the capacity");
 _Static_assert(CKPT_JAM_CACHE_ADMITTED * 4u == CKPT_JAM_CACHE_ENTRIES * 3u, "ckpt cache 75% admitted");

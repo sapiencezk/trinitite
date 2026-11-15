@@ -154,7 +154,9 @@ static uint32_t jcache_ptr_hash(noun n) {
  * is written. An atom's noun word is already its value (direct) or its content
  * hash (indirect). A cell's hash mixes its children's; a per-jam memo keyed by
  * address only saves recomputing it, it never decides equality. */
+#ifndef JAM_MUG_MEMO
 #define JAM_MUG_MEMO 65536u      /* 16 B an entry: 1 MiB static */
+#endif
 #ifndef JAM_HOON_DEPTH
 #define JAM_HOON_DEPTH 1024u     /* deepest noun the jet takes; else Nock */
 #endif
@@ -283,7 +285,10 @@ static int jcache_put(noun n, uint64_t pos) {
 
 /* ── jam recursive core ───────────────────────────────────────────────────── */
 
-static jambuf_t g_jambuf;
+#ifndef JAM_BUF_DECL         /* ckpt_jam.c places its buffer in the I3_CKPT_JAM region */
+#define JAM_BUF_DECL static jambuf_t g_jambuf
+#endif
+JAM_BUF_DECL;
 
 static void do_jam(noun n) {
     if (g_jam_budget && g_jam_budget->exhausted)

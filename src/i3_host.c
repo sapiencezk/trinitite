@@ -765,11 +765,11 @@ static void put_goof(noun goof)
  * cue fits the 128k-cell cue bound, in place of #10's stand-in (65,536
  * cells and jam.c's 128 KiB writer). The bound is ckpt_cue_limits: the
  * host's cue limits with at most I3_CKPT_CUE_MAX_CELLS cells and at most
- * CKPT_JAM_MAX_BYTES (256 KiB, the checkpoint object capacity) of input.
+ * CKPT_JAM_MAX_BYTES (4 MiB, the checkpoint object capacity) of input.
  * The writer's read-back and the checkpoint boot cue with it; the cell walk
  * and the size check below only skip a state that cannot fit before it is
  * written to media. */
-#define I3_CKPT_CUE_MAX_CELLS 128000u
+#define I3_CKPT_CUE_MAX_CELLS CKPT_CUE_MAX_CELLS /* ckpt_jam.h */
 #if defined(I3_CKPT_TEST_CELLS)
 #define I3_CKPT_CELLS_MAX 8u
 #else
@@ -2513,6 +2513,7 @@ void i3_host_boot(void)
 #endif
     g_persist_reserve = heap_persist_free_cells() / 16;
 #if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+    ckpt_jam_reset(); /* region memory is not zeroed at boot */
 #if defined(I3_CKPT_TEST_PERSIST)
     g_boot_persist_free = 0;
 #else

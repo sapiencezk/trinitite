@@ -211,15 +211,32 @@
 #endif
 
 /*
- * Row 317 (3), Q7: the checkpoint jam's tables (ckpt_jam.c: the 262,144-entry
- * backref cache at the base, the mug memo at +8 MiB). With I3_CHECKPOINT_EVERY
- * > 0 only. Between the code region (or .bss and the cue scratch) and the pill.
+ * Row 317 (3), Q7, sized in Round 3 (Q11 B, ckpt_jam.h): the checkpoint
+ * region. With I3_CHECKPOINT_EVERY > 0 only. Between the code region (or
+ * .bss and the cue scratch) and the pill:
+ *   +0x0000000  ckpt jam backref cache, 2^19 entries      12 MiB
+ *   +0x0C00000  ckpt jam mug memo, 2^18 entries             4 MiB
+ *   +0x1000000  ckpt jam buffer (CKPT_JAM_MAX_BYTES + cur)  5 MiB slot
+ *   +0x1500000  cold.c object scratch (jam_scratch)         4 MiB
+ *   +0x1900000  cold.c append scratch                       4 MiB
+ * Not zeroed at boot: i3_host_boot calls ckpt_jam_reset before first use;
+ * the buffer and the scratches are written before they are read.
  */
 #if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
 #define I3_CKPT_JAM_BASE (PLATFORM_DRAM_BASE + 0x0E000000ULL)
-#define I3_CKPT_JAM_SIZE 0x01000000ULL /* 16 MiB */
+#define I3_CKPT_JAM_SIZE 0x01D00000ULL /* 29 MiB */
 #define I3_CKPT_JAM_TOP  (I3_CKPT_JAM_BASE + I3_CKPT_JAM_SIZE)
-#define I3_CKPT_JAM_MEMO_OFF 0x00800000ULL
+#define I3_CKPT_JAM_MEMO_OFF 0x00C00000ULL
+#define I3_CKPT_JAM_BUF_OFF  0x01000000ULL
+#define I3_CKPT_JAM_COLD_OFF 0x01500000ULL
+#define I3_CKPT_JAM_APPEND_OFF 0x01900000ULL
+#define I3_CKPT_COLD_SCRATCH_BYTES 0x00400000ULL
+#if I3_CKPT_JAM_APPEND_OFF + I3_CKPT_COLD_SCRATCH_BYTES > I3_CKPT_JAM_SIZE
+#error "checkpoint region slots exceed the region"
+#endif
+#if I3_CKPT_JAM_COLD_OFF + I3_CKPT_COLD_SCRATCH_BYTES > I3_CKPT_JAM_APPEND_OFF
+#error "cold object scratch overlaps the append scratch"
+#endif
 #if I3_CKPT_JAM_BASE < BSS_TOP
 #error "checkpoint jam region overlaps .bss"
 #endif
@@ -237,6 +254,12 @@
 #endif
 #if I3_CKPT_JAM_TOP > 0x100000000ULL
 #error "checkpoint jam region must sit below 4 GiB"
+#endif
+#if defined(I3_RING_WINDOW_BASE) && I3_CKPT_JAM_TOP > I3_RING_WINDOW_BASE && I3_CKPT_JAM_BASE < I3_RING_WINDOW_TOP
+#error "checkpoint jam region overlaps the ring window"
+#endif
+#if I3_CKPT_JAM_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
+#error "checkpoint jam region overlaps MMIO"
 #endif
 #endif
 
