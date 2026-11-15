@@ -46,6 +46,11 @@ static const char STOP_PERSIST[] = "persist";
  * reserve is what lets the next boot replay every entry the live boot
  * appended before it stopped. */
 static uint64_t g_persist_reserve;
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+/* Q10: persist free cells right after this image's kernel cue, which every
+ * boot of the image (same kernel, kernel-blake3 in the header) starts from. */
+static uint64_t g_boot_persist_free;
+#endif
 /* The 1/16 share alone is not enough (row 200 amendment): a replayed step
  * decodes its job into scratch, so its persist copy pays for every kept
  * cell of that job, while the live step may share cells already in persist
@@ -805,7 +810,7 @@ static void put_goof(noun goof)
 #define I3_CKPT_BAD_HDR(n) ((n) >= (uint64_t)I3_CKPT_TEST_FROM)
 #endif
 _Static_assert(I3_CKPT_STACK_MAX <= I3_CKPT_STACK_SLOTS, "ckpt stack fits");
-_Static_assert(I3_CKPT_STACK_SLOTS > I3_CUE_MAX_DEPTH + 1u, "ckpt stack holds any cueable depth");
+_Static_assert(I3_CKPT_STACK_SLOTS > I3_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN + 1u, "ckpt stack holds any cueable depth");
 _Static_assert(I3_CKPT_CELLS_MAX <= I3_CKPT_CUE_MAX_CELLS, "ckpt cells fit");
 _Static_assert(I3_CKPT_SET_SIZE >= 2u * I3_CKPT_CUE_MAX_CELLS, "ckpt set at most half full");
 _Static_assert(I3_CKPT_JAM_MAX <= CKPT_JAM_MAX_BYTES, "ckpt jam fits");
@@ -1579,6 +1584,16 @@ static void ckpt_maybe_write(void)
     }
     if (ckpt_jam_size_checked(state, I3_CKPT_JAM_MAX, &stored) != 0) {
         ckpt_skip(n, "jam-size");
+        return;
+    }
+    /* Q10 (row 212 (4)): a boot from this checkpoint must hold the state in
+     * persist. ckpt_try decodes it and copies it (and, for a state deeper
+     * than the copy walks, decodes it once more into PERSIST after a failed
+     * copy), so it needs up to twice its cells, plus the persist share every
+     * boot keeps (g_persist_reserve), out of what the boot has free after the
+     * kernel. A state that cannot fit is skipped, nothing goes to media. */
+    if (add_sat(add_sat(cells, cells), g_persist_reserve) > g_boot_persist_free) {
+        ckpt_skip(n, "persist");
         return;
     }
     uart_puts("I3H ckpt size event=");
@@ -2498,6 +2513,11 @@ void i3_host_boot(void)
 #endif
     g_persist_reserve = heap_persist_free_cells() / 16;
 #if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(I3_CKPT_TEST_PERSIST)
+    g_boot_persist_free = 0;
+#else
+    g_boot_persist_free = heap_persist_free_cells();
+#endif
     {
         /* Q8: replay decodes each entry under the live admission limits,
          * with the depth of the log entry's wrapper on top (ckpt_jam.h). */

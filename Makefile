@@ -541,7 +541,9 @@ $(error I3_RING_TEST must be fault or torn)
 endif
 endif
 # Test builds only: I3_CKPT_TEST=cells|jam|stack|wrapper shrinks one checkpoint
-# bound so tests/checkpoint_legs.py reaches that skip leg; hdrshape|hdrsid|hdrd
+# bound so tests/checkpoint_legs.py reaches that skip leg; persist (row 317
+# Q10) makes the writer see no boot persist room, so every checkpoint skips
+# reason=persist (1499kernel lite_checkpoint_boot.py persist leg); hdrshape|hdrsid|hdrd
 # make the writer store a bad header for every N >= I3_CKPT_TEST_FROM (default 1)
 # so tests/checkpoint_boot.py reaches each boot fallback leg (default unset);
 # crash (PR 1c) stores a damaged header for N >= I3_CKPT_TEST_FROM and stops
@@ -555,8 +557,8 @@ ifneq ($(I3_CKPT_TEST),)
 ifeq ($(I3_CHECKPOINT_EVERY),)
 $(error I3_CKPT_TEST requires I3_CHECKPOINT_EVERY)
 endif
-ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper hdrshape hdrsid hdrd crash rebasefault cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip),)
-$(error I3_CKPT_TEST must be one of cells jam stack wrapper hdrshape hdrsid hdrd crash rebasefault cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip)
+ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper persist hdrshape hdrsid hdrd crash rebasefault cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip),)
+$(error I3_CKPT_TEST must be one of cells jam stack wrapper persist hdrshape hdrsid hdrd crash rebasefault cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip)
 endif
 ifneq ($(filter $(I3_CKPT_TEST),cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip),)
 ifneq ($(I3_LITE_LOG),1)
