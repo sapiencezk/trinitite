@@ -293,6 +293,9 @@ static int do_poke(noun cause, const char *name)
     if (ok)
         print_persist(name, &r);
     heap_scratch_reset();
+#if defined(I3_COMPACT)
+    i3_host_handoff(); /* row 221: effects handed off, scratch reset */
+#endif
     return ok;
 }
 
@@ -491,6 +494,9 @@ static int do_load_app(const char *name)
     if (ok)
         print_persist(name, &r);
     heap_scratch_reset();
+#if defined(I3_COMPACT)
+    i3_host_handoff(); /* row 221: effects handed off, scratch reset */
+#endif
     return ok;
 }
 
@@ -616,11 +622,25 @@ void i3_l1_probe_boot(void)
     uint64_t plan_cells0 = heap_cells_used(HEAP_MODE_PERSIST);
 #endif
     if (plan_len != 0) {
+#if defined(I3_COMPACT)
+        /* Row 221: the plan is test input; a persist flip would drop it, so
+         * it is cued into the bottom of scratch, which every reset keeps,
+         * and it is a harness root of the atom store rebuild. */
+        heap_scratch_reset();
+        heap_set_mode(HEAP_MODE_SCRATCH);
+        if (!i3_host_cue_bytes_scratch(plan_bytes, plan_len, &plan)) {
+            uart_puts("I3L1 terminal=plan-cue-refuse\r\n");
+            return;
+        }
+        heap_scratch_floor_set();
+        i3_host_harness_root(plan);
+#else
         heap_set_mode(HEAP_MODE_PERSIST);
         if (!i3_host_cue_bytes(plan_bytes, plan_len, &plan)) {
             uart_puts("I3L1 terminal=plan-cue-refuse\r\n");
             return;
         }
+#endif
     }
 #if defined(I3_PERSIST_HEADROOM_CELLS)
     /* The plan is test input, not node state: move the cap past it, and

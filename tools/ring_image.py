@@ -236,6 +236,9 @@ def cold_image(path, out, start="oldest") -> dict:
         hdr = (cord("i3-ckpt"), (seg["n"], (sid, (int.from_bytes(seg["d"], "little"),
                                                   int.from_bytes(seg["kb"], "little")))))
         put(KIND_BLOB, atom_bytes(jam(hdr)))
+        # Row 221 (7): the record's job_sum (jobs after the device's log base when it was
+        # written) goes into the base record as is. Boot does not load that field (it counts
+        # the row 213 job sum from the base), so it is audit only.
         base, job_sum = seg["n"], seg["job_sum"]
     for r in inputs:
         at = put(KIND_LOG, r["payload"]); logs += 1

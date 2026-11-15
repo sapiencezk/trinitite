@@ -38,7 +38,8 @@ first; full node --target full-node). Every hash compared is computed by a node.
             full node's after the same causes (N=6 f5764f6f, N=7 bf0a761a).
   wrap4     the wrap leg's ring (4+ wraps): a cold image from its oldest kept checkpoint boots on the
             same lite image and reads the full node's /state-hash after all N=6+EXTRA causes; the
-            image's base job_sum comes from the ring checkpoint record.
+            image's base job_sum comes from the ring checkpoint record (row 221 (7): the jobs
+            after the device's log base when it was written; audit only, boot counts from the base).
   torn      I3_RING_TEST=torn, 32 KiB ring: the first wrap marker never lands, the moved header does,
             then a power cut. The reboot opens the older slot (status=torn-older, never formats), the
             ring keeps its older segments and grows.
