@@ -89,6 +89,12 @@ noun cold_load(uint64_t hash62);
 noun cold_load_scratch(uint64_t hash62, const cue_bounded_limits_t *limits);
 /* cold_store through the checkpoint writer's own jam (ckpt_jam.h). */
 uint64_t cold_store_ckpt(noun n);
+/* Q8: the cue limits LOG entries decode with (the host's live admission). */
+void cold_set_log_limits(const cue_bounded_limits_t *limits);
+/* Q8: the heap LOG entries decode into (HEAP_MODE_SCRATCH by default). */
+void cold_set_log_heap_mode(int heap_mode);
+/* cold_load_scratch into the given heap. */
+noun cold_load_limits(uint64_t hash62, const cue_bounded_limits_t *limits, int heap_mode);
 /* Row 212 PR 1b: walk the BLOBs of at most max_len payload bytes in media
  * order, each decoded into SCRATCH, for the checkpoint header search. */
 int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx);

@@ -817,6 +817,8 @@ static cue_bounded_limits_t ckpt_cue_limits(void)
     cue_bounded_limits_t limits = i3_limits();
     limits.max_cells = I3_CKPT_CUE_MAX_CELLS;
     limits.max_input_bytes = CKPT_JAM_MAX_BYTES;
+    /* Q8: a state as deep as live admission lets it grow (ckpt_jam.h). */
+    limits.max_depth = I3_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN;
     return limits;
 }
 
@@ -1926,6 +1928,23 @@ static int replay_log(void)
 #endif
         noun job, subject, product;
         int jumped;
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+        /* Q8: a live job sits in PERSIST (i3_host_cue_bytes), so the state
+         * it leaves may hold it deeper than noun_copy_checked's 256 frames
+         * walk: only the new cells are copied. Its replay decodes into
+         * SCRATCH, and the copy of such a state fails. Then the entry runs
+         * once more from the same state with its job decoded into PERSIST,
+         * as live had it. */
+        noun before = g_kernel;
+        uint64_t at = cur, sum_before = g_job_sum;
+        int in_persist = 0;
+again:
+        heap_set_mode(in_persist ? HEAP_MODE_PERSIST : HEAP_MODE_SCRATCH);
+        cold_set_log_heap_mode(in_persist ? HEAP_MODE_PERSIST : HEAP_MODE_SCRATCH);
+        job = cold_log_next(&cur);
+        cold_set_log_heap_mode(HEAP_MODE_SCRATCH);
+        heap_set_mode(HEAP_MODE_SCRATCH);
+#else
         /* The job decodes into SCRATCH, as a live step's job does, and is
          * dropped by heap_scratch_reset below; i3_host_persist copies only
          * what the new state keeps. Decoding it into the persist heap left
@@ -1933,6 +1952,7 @@ static int replay_log(void)
          * persist (reason=persist) before live use did. */
         heap_set_mode(HEAP_MODE_SCRATCH);
         job = cold_log_next(&cur);
+#endif
         if (!noun_is_cell(job))
             return replay_fail(i, "read");
         cell_t *jc = (cell_t *)(uintptr_t)cell_ptr(job);
@@ -1963,8 +1983,20 @@ static int replay_log(void)
         g_kernel = ((cell_t *)(uintptr_t)cell_ptr(product))->tail;
         g_event_num++;
         clear_result(&r);
-        if (!i3_host_persist(&r))
+        if (!i3_host_persist(&r)) {
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+            if (!in_persist) {
+                heap_scratch_reset();
+                g_kernel = before;
+                g_event_num--;
+                g_job_sum = sum_before;
+                cur = at;
+                in_persist = 1;
+                goto again;
+            }
+#endif
             return replay_fail(i, "persist");
+        }
         heap_scratch_reset();
     }
     g_replaying = 0;
@@ -2126,9 +2158,14 @@ static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
         return "n";
     if (!digest_eq(f->kb, g_jam_blake3))
         return "kernel";
-    heap_set_mode(HEAP_MODE_SCRATCH);
+    int in_persist = 0;
     limits = ckpt_cue_limits();
-    state = cold_load_scratch(f->sid, &limits);
+again:
+    /* Q8: as replay_log, a state deeper than noun_copy_checked walks is
+     * decoded once more into PERSIST, where the live node held it. */
+    state = cold_load_limits(f->sid, &limits,
+                             in_persist ? HEAP_MODE_PERSIST : HEAP_MODE_SCRATCH);
+    heap_set_mode(HEAP_MODE_SCRATCH);
     if (!noun_is_cell(state))
         return "sid";
     if (!ckpt_digest(state, dig, 0) || !digest_eq(dig, f->d))
@@ -2177,6 +2214,11 @@ static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
     if (!i3_host_persist(&r)) {
         g_kernel = booted;
         g_event_num = saved_event;
+        if (!in_persist) {
+            heap_scratch_reset();
+            in_persist = 1;
+            goto again;
+        }
         return "persist";
     }
     g_event_num = f->n + 1;
@@ -2455,6 +2497,15 @@ void i3_host_boot(void)
     uart_puts("\r\n");
 #endif
     g_persist_reserve = heap_persist_free_cells() / 16;
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+    {
+        /* Q8: replay decodes each entry under the live admission limits,
+         * with the depth of the log entry's wrapper on top (ckpt_jam.h). */
+        cue_bounded_limits_t log_limits = i3_limits();
+        log_limits.max_depth = I3_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN;
+        cold_set_log_limits(&log_limits);
+    }
+#endif
 #if defined(COLD_LITE_LOG)
     if (!lite_boot()) {
 #elif defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0

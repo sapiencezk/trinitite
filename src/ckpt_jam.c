@@ -22,6 +22,9 @@
 #include "jam.h"
 #include "i2_admission_envelope.h"
 #include "ckpt_jam.h"
+#include "i3_admission.h"
+/* Q8: ++jam of a checkpoint state as deep as live admission allows. */
+#define JAM_HOON_DEPTH (I3_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN)
 #undef JAM_MAX_BYTES
 #define JAM_MAX_BYTES CKPT_JAM_MAX_BYTES
 #define JAM_MAX_LIMBS (CKPT_JAM_MAX_BYTES / 8u)

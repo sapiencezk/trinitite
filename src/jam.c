@@ -155,7 +155,9 @@ static uint32_t jcache_ptr_hash(noun n) {
  * hash (indirect). A cell's hash mixes its children's; a per-jam memo keyed by
  * address only saves recomputing it, it never decides equality. */
 #define JAM_MUG_MEMO 65536u      /* 16 B an entry: 1 MiB static */
+#ifndef JAM_HOON_DEPTH
 #define JAM_HOON_DEPTH 1024u     /* deepest noun the jet takes; else Nock */
+#endif
 typedef struct { noun key; uint32_t mug; uint32_t gen; } jmug_t;
 JAM_TABLE(jmug_t, g_jmug, JAM_MUG_MEMO);
 static uint32_t g_jmug_gen JAM_MUG_GEN_INIT;

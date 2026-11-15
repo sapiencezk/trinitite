@@ -615,6 +615,29 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
     return 0;
 }
 
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+/* Row 317 (3), Q8 (rows 212 (3), 213 (4), decision 131): the host sets the
+ * cue limits a LOG entry decodes with on replay (and in the 1b checkpoint
+ * boot's read of the skipped entries) to its live admission limits, so an
+ * entry accepted live replays. Unset (a non-host image), cue_i2_limits. */
+static cue_bounded_limits_t g_log_limits;
+static int g_log_limits_set;
+
+void cold_set_log_limits(const cue_bounded_limits_t *limits)
+{
+    if (!limits) {
+        g_log_limits_set = 0;
+        return;
+    }
+    g_log_limits = *limits;
+    g_log_limits_set = 1;
+}
+/* Q8: the heap a LOG entry decodes into; SCRATCH unless the host asks for
+ * PERSIST, where a live job sat when it was admitted. */
+static int g_log_heap_mode = HEAP_MODE_SCRATCH;
+void cold_set_log_heap_mode(int heap_mode) { g_log_heap_mode = heap_mode; }
+#endif
+
 static int decode_object(const cold_super_t *s, uint64_t off,
                          uint32_t kind, int heap_mode, noun *out)
 {
@@ -626,6 +649,10 @@ static int decode_object(const cold_super_t *s, uint64_t off,
     }
     /* object_validate left the verified payload in jam_scratch */
     cue_bounded_limits_t limits = cue_i2_limits;
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+    if (kind == KIND_LOG && g_log_limits_set)
+        limits = g_log_limits;
+#endif
     limits.max_input_bytes = JAM_SCRATCH_MAX;
     cue_bounded_status_t cue_status = cue_bounded_bytes(
         jam_scratch, h.len, &limits, heap_mode, out);
@@ -917,6 +944,11 @@ static int decode_object_limits(const cold_super_t *s, uint64_t off, uint32_t ki
 
 noun cold_load_scratch(uint64_t hash62, const cue_bounded_limits_t *limits)
 {
+    return cold_load_limits(hash62, limits, HEAP_MODE_SCRATCH);
+}
+
+noun cold_load_limits(uint64_t hash62, const cue_bounded_limits_t *limits, int heap_mode)
+{
     cold_super_t s;
     if (hash62 == 0 || !limits || select_super(&s, 0) != COLD_RESULT_VALID)
         return NOUN_ZERO;
@@ -930,7 +962,7 @@ noun cold_load_scratch(uint64_t hash62, const cue_bounded_limits_t *limits)
         }
         if (h.kind == KIND_BLOB && hash62_of(h.payload_digest) == hash62) {
             noun out;
-            if (decode_object_limits(&s, off, KIND_BLOB, HEAP_MODE_SCRATCH, limits, &out) != 0)
+            if (decode_object_limits(&s, off, KIND_BLOB, heap_mode, limits, &out) != 0)
                 return NOUN_ZERO;
             noun_tx_commit();
             return out;
@@ -1162,8 +1194,12 @@ noun cold_log_next(uint64_t *cursor)
             break;
         if (h.kind == KIND_LOG) {
             noun out;
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+            if (decode_object(s, off, KIND_LOG, g_log_heap_mode, &out) != 0)
+#else
             if (decode_object(s, off, KIND_LOG,
                               HEAP_MODE_SCRATCH, &out) != 0)
+#endif
                 return NOUN_ZERO;
             noun_tx_commit();
             *cursor = next;
