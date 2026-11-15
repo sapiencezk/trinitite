@@ -145,6 +145,36 @@
 #endif
 
 /*
+ * Row 212 PR 1c: the recorder ring's RAM window (src/i3_ring.c), only with
+ * I3_CHECKPOINT_EVERY > 0 and I3_LITE_LOG. It starts at DRAM + 0x30000000,
+ * above every region below it (heap incl. the I3_UNJETTED scratch, atom
+ * store, cold window, pill scratch, and the pill, plan and app slots, which
+ * end by PILL_BASE + 0x10000000), and must end below MMIO.
+ */
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 && defined(I3_LITE_LOG)
+#ifndef I3_RING_BYTES
+#define I3_RING_BYTES 67108864ULL
+#endif
+#define I3_RING_WINDOW_BASE (PLATFORM_DRAM_BASE + 0x30000000ULL)
+#define I3_RING_WINDOW_TOP  (I3_RING_WINDOW_BASE + (I3_RING_BYTES))
+#if HEAP_TOP > I3_RING_WINDOW_BASE
+#error "noun heap overlaps the ring window"
+#endif
+#if ATOM_DATA_TOP > I3_RING_WINDOW_BASE
+#error "atom store overlaps the ring window"
+#endif
+#if (PLATFORM_COLD_BASE + 0x00800000ULL) > I3_RING_WINDOW_BASE
+#error "cold window overlaps the ring window"
+#endif
+#if (PLATFORM_PILL_BASE + 0x10000000ULL) > I3_RING_WINDOW_BASE
+#error "pill, plan and app slots overlap the ring window"
+#endif
+#if I3_RING_WINDOW_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
+#error "ring window overlaps MMIO"
+#endif
+#endif
+
+/*
  * PILL_BASE carries either:
  *   - isolated legacy I1 PILL v2: u64 len, shape, version/pad, jam at +16; or
  *   - I2 PILL2: 256-byte integrity/RuntimeIdentity header, then bounded jam.

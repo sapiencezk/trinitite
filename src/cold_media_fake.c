@@ -93,6 +93,9 @@ cold_media_status_t cold_media_fake_probe(
     if (g_fault == COLD_MEDIA_FAKE_ABSENT || g_fake_removed)
         return COLD_MEDIA_ABSENT;
     *capacity = COLD_MEDIA_START_LBA + COLD_MEDIA_EXTENT_SECTORS;
+#if defined(COLD_MEDIA_RING)
+    *capacity = COLD_MEDIA_RING_START_LBA + COLD_MEDIA_RING_SECTORS;
+#endif
     if (g_fault == COLD_MEDIA_FAKE_UNDERSIZED)
         *capacity = COLD_MEDIA_START_LBA + 1;
     *read_only = g_fault == COLD_MEDIA_FAKE_READ_ONLY;
@@ -246,6 +249,14 @@ void cold_media_fake_fault_set(cold_media_fake_fault_t fault,
 {
     arm_fault(fault, transfer_boundary);
     cold_media_reset_session();
+}
+
+/* Arm a fault for the next transfers without resetting the media session
+ * (test knob I3_CKPT_TEST=rebasefault, src/i3_host.c). */
+void cold_media_fake_fault_arm(cold_media_fake_fault_t fault,
+                               uint64_t transfer_boundary)
+{
+    arm_fault(fault, transfer_boundary);
 }
 
 void cold_media_fake_fault_clear(void)
@@ -602,3 +613,48 @@ uint64_t cold_media_fake_selftest(void)
     }
     return failures;
 }
+
+#if defined(COLD_MEDIA_RING)
+/* Row 212 PR 1c: the fake ring extent, for the ring fault legs of
+ * tests/recorder_ring.py. It is separate from the cold extent and from its
+ * transfer counter, so arming a cold fault never hits a ring transfer and
+ * the reverse. It lives in .bss, so the ring must be small here. Test knob
+ * I3_RING_TEST=fault I3_RING_TEST_AT=K: the K-th ring sector write (1-based)
+ * writes half the sector and reports WRITE_UNKNOWN. */
+_Static_assert(COLD_MEDIA_RING_SECTORS <= 2048u,
+               "COLD_MEDIA=fake keeps the ring in .bss: I3_RING_BYTES <= 1 MiB");
+static uint8_t g_fake_ring[COLD_MEDIA_RING_SECTORS][COLD_MEDIA_SECTOR_BYTES];
+static uint64_t g_fake_ring_writes;
+
+cold_media_status_t cold_media_fake_ring_read(uint64_t s, uint8_t *dst)
+{
+    if (s >= COLD_MEDIA_RING_SECTORS || g_fake_removed)
+        return COLD_MEDIA_REMOVED;
+    for (uint64_t i = 0; i < COLD_MEDIA_SECTOR_BYTES; i++)
+        dst[i] = g_fake_ring[s][i];
+    return COLD_MEDIA_OK;
+}
+
+cold_media_status_t cold_media_fake_ring_write(uint64_t s, const uint8_t *src,
+                                               int *submitted)
+{
+    uint64_t n = COLD_MEDIA_SECTOR_BYTES;
+    *submitted = 0;
+    if (s >= COLD_MEDIA_RING_SECTORS || g_fake_removed)
+        return COLD_MEDIA_REMOVED;
+    g_fake_ring_writes++;
+    *submitted = 1;
+#if defined(I3_RING_TEST_FAULT)
+    if (g_fake_ring_writes == (uint64_t)(I3_RING_TEST_AT))
+        n /= 2;
+#endif
+    for (uint64_t i = 0; i < n; i++)
+        g_fake_ring[s][i] = src[i];
+    return n == COLD_MEDIA_SECTOR_BYTES ? COLD_MEDIA_OK : COLD_MEDIA_WRITE_UNKNOWN;
+}
+
+cold_media_status_t cold_media_fake_ring_barrier(void)
+{
+    return g_fake_removed ? COLD_MEDIA_REMOVED : COLD_MEDIA_OK;
+}
+#endif

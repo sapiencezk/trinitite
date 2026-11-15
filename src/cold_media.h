@@ -74,3 +74,58 @@ cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
 int cold_media_active(void);
 const cold_media_diag_t *cold_media_last_diag(void);
 void cold_media_reset_session(void);
+
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 \
+    && defined(I3_LITE_LOG) && (defined(COLD_MEDIA_RPI4_SD) || defined(COLD_MEDIA_FAKE))
+/* Row 212 PR 1c recorder ring (src/i3_ring.c) on sector media: rpi4-sd, and
+ * the fake backend for the fault tests (tests/recorder_ring.py fault legs).
+ *
+ * Layout. The ring has its own extent, I3_RING_BYTES / 512 sectors from
+ * COLD_MEDIA_RING_START_LBA, after the cold extent (descriptor sector plus
+ * COLD_MEDIA_EXTENT_SECTORS). The two extents may not overlap (checked
+ * here at build time) and the medium must hold the whole ring extent
+ * (checked at the first ring access; if not, the ring stays off and the cold
+ * store is unaffected). The on-media layout descriptor does not name the
+ * ring extent: that would need a new descriptor version (deferred). Instead
+ * the ring formats only an extent that is all zero or holds a whole header of
+ * its own for another ring size (src/i3_ring.c); anything else is refused.
+ * GAP (Steward's ruling): an all-zero range that belongs to another partition
+ * is still formatted. No rpi4-sd image with I3_LITE_LOG on is deployed until
+ * the layout descriptor names the ring, and the board run uses a card whose
+ * ring area was zeroed on purpose (docs/lite-checkpoint-writer.md).
+ *
+ * Session. Ring I/O shares the backend and its owner lock with the cold
+ * store, but not its reset rule: a ring fault marks only the ring as needing
+ * a reset (the ring stays off until the next boot). It never sets the cold
+ * session's reset-required state, so a ring fault cannot stop the cold log.
+ * If the controller itself fails, the cold store's own next transfer fails
+ * and the cold rules apply as before.
+ *
+ * Deadlines. Every chunk of COLD_MEDIA_RING_CHUNK_SECTORS sectors gets its
+ * own 5 s deadline, and the boot load stops after COLD_MEDIA_RING_LOAD_SECONDS
+ * in total (then the ring stays off for that boot). The ring's RAM window is
+ * the source of every write: each touched sector is written whole from it (no
+ * read-modify-write). Not measured on the board. */
+#ifndef COLD_MEDIA_RING_START_LBA
+#define COLD_MEDIA_RING_START_LBA (COLD_MEDIA_START_LBA + 32768ULL)
+#endif
+#ifndef I3_RING_BYTES
+#define I3_RING_BYTES 67108864ULL
+#endif
+#define COLD_MEDIA_RING_SECTORS ((uint64_t)(I3_RING_BYTES) / COLD_MEDIA_SECTOR_BYTES)
+#define COLD_MEDIA_RING_CHUNK_SECTORS 512u
+#ifndef COLD_MEDIA_RING_LOAD_SECONDS
+#define COLD_MEDIA_RING_LOAD_SECONDS 60u
+#endif
+#define COLD_MEDIA_RING 1
+_Static_assert(COLD_MEDIA_RING_START_LBA
+                   >= COLD_MEDIA_START_LBA + 1 + COLD_MEDIA_EXTENT_SECTORS,
+               "ring extent overlaps the cold extent");
+_Static_assert(COLD_MEDIA_RING_START_LBA + COLD_MEDIA_RING_SECTORS
+                   > COLD_MEDIA_RING_START_LBA,
+               "ring extent wraps the LBA space");
+cold_media_status_t cold_media_ring_load(uint8_t *window, uint64_t bytes);
+cold_media_status_t cold_media_ring_write(const uint8_t *window, uint64_t off,
+                                          uint64_t len);
+cold_media_status_t cold_media_ring_barrier(void);
+#endif
