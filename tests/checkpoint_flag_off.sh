@@ -15,7 +15,8 @@
 # is on by default), so the flag-off head builds pass I3_CHECKPOINT_EVERY=.
 # Row 317 step 2 (Q13 A): Q7, the headroom trigger and Round 3 (Q8, Q10, Q11) change
 # the 1b flag-on image by design, so ONBASE must be at or after 175f888 and at or
-# after the last of those commits (14d4828); an older ONBASE fails the 1b equality.
+# after the last of those commits; an older ONBASE fails the 1b equality. Round 5's
+# refused-bundle reason line (f87076f, flag-on only) changes it again: ONBASE=f87076f or later.
 # Usage: tests/checkpoint_flag_off.sh [BASE [ONBASE]]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

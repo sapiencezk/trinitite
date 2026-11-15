@@ -173,6 +173,11 @@ All with the checkpoint flag only; `I3_CHECKPOINT_EVERY=` images keep `cue_i2_li
 - Q13 A. `tests/checkpoint_flag_off.sh` ONBASE must be at or after 175f888 (Q7 and the headroom trigger change
   the 1b flag-on image by design), and at or after the last Round 3 commit that changes it (Q8 3c0a79d,
   Q10 de85981, Q11 14d4828): ONBASE=14d4828 or later.
+- Round 5. A refused %load-bundle prints `I3H app cue refused reason=<name>` (the first cue bound
+  hit, e.g. depth or cells), under I3_CHECKPOINT_EVERY only, so flag-off images stay byte-identical
+  (row 221 (11)). The 1b flag-on image changes, so the flag-off gate's ONBASE moves to f87076f
+  (as in Q13): run `tests/checkpoint_flag_off.sh 8d287abd f87076f` (or later). Test knob
+  `I3_CKPT_TEST=appcells` sets the bundle cue's cells bound to 1,000 (reason=cells).
 
 ## Row 317 (3), 212 (4): the headroom trigger (1499kernel row 317 step 2, stage 2)
 A checkpoint is written every K accepted entries **or** when persist headroom falls under one checkpoint
