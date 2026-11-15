@@ -17,7 +17,7 @@ when N = event_num-1 is a multiple of K:
 1. Wrapper check: the core's sample (axis 6) must be `[%0 desk-hash internal]`, i.e. axis 12 is the atom 0
    and axis 13 is a cell (so axes 26 and 27 exist); the walk never crashes on an atom. Otherwise
    `I3H ckpt skip reason=wrapper`. Then `state` = axis 27, internal.outer, which is exactly what `/state-hash` jams.
-2. Bounds: skip when the state has **> 65,536** distinct cells (65,536 itself is accepted; same walk and
+2. Bounds (1a; replaced by the cue bound in the row 317 (3) Q7 section): skip when the state has **> 65,536** distinct cells (65,536 itself is accepted; same walk and
    limit as `job_cells`, `I2_CUE_MAX_CELLS`, a conservative stand-in for row 212's 128k-cell cue bound),
    or when the jam is > `JAM_MAX_BYTES` (128 KiB, the cold writer's buffer). Logs
    `I3H ckpt skip reason=cells|jam-size`. If the walk's stack would overflow it logs `reason=stack`, never
@@ -114,6 +114,29 @@ K = 4/5 against a from-zero replay and the full node, and the six fallback legs.
 `tests/checkpoint_boot.py` are for the October kernel (1499kernel 3d100787) and are not updated here.
 Not measured: per-step SD append, torn writes and checkpoint cost on the board (rpi4-sd, row 200).
 
+## Row 317 (3), Q7: the 128k-cell cue bound (1499kernel row 317 step 2, stage 2 step 1)
+Row 212 (4): a checkpoint is written only if its cue fits the 128k-cell cue bound. That bound now replaces
+#10's stand-in (more than 65,536 distinct cells, or more than `JAM_MAX_BYTES`, 128 KiB, of jam):
+- `ckpt_cue_limits` is the host's cue limits (`i3_admission.h`) with at most 128,000 cells and at most
+  `CKPT_JAM_MAX_BYTES` (256 KiB, the cold object capacity `JAM_SCRATCH_MAX`) of input. The writer's read-back
+  and the checkpoint boot cue with it (`cold_load_scratch(id, &limits)`); before this they cued with the log's
+  `cue_i2_limits`, whose depth (256) and cache (98,304) bounds failed the read-back of states well under the
+  stand-in (`reason=verify-state`, e.g. one 40-statement algorithm).
+- Before anything is written, the cell walk (its own 2^18-slot visited set) skips a state of more than 128,000
+  distinct cells (`reason=cells`), and the size check skips one whose stored jam is more than 256 KiB
+  (`reason=jam-size`). The writer logs `I3H ckpt size event=N cells=C stored=S` before it writes; the
+  `I3H ckpt ok` line is unchanged.
+- The state blob and D use the writer's own jam, `src/ckpt_jam.c`: jam.c built again with a 256 KiB buffer and
+  a 2^18-entry backref cache (196,608 admitted), linked only with the flag. The `%jam` jet, the log and every
+  other caller keep jam.c's 128 KiB writer and cache, so no budget, refusal or log bound moves, and the flag-off
+  image is unchanged. A state whose ++jam needs more cache entries skips with `reason=jam`.
+- The `I3_CKPT_TEST=cells|jam|stack` knobs still shrink the same three bounds.
+The lite leg `large` in 1499kernel's `tools/lite_checkpoint_boot.py` loads the largest application one job can
+log (65,536 job cells, the 128 KiB log writer) and checks that its state, stored jam over 128 KiB and under
+128,000 cells, is written, booted from and equals the live and full-node state. Not covered: states past
+65,536 cells (one load cannot make one), and the log's own cue bound on replay (`cue_i2_limits`), which this
+does not change.
+
 ## Rotation (later PR, 1c)
 - Only after the newest checkpoint verified. Keep: newest verified checkpoint + the previous one until the
   next verifies, and every entry after the oldest kept one. Retention in entries, floor = 2-3 days at cycle rate.
@@ -150,7 +173,8 @@ Implemented as above (PR 1b section); the `+load` blocker is resolved by row 216
 2. ~~Smoke run: D was identical at N=10/20/30 with R4 `[1 1]` events.~~ **Answered** by the same run: that
    digest covered axis 6. On axis 27 with events `1,1,1,1,0,1,0,1`, D moves exactly where `/state-hash`
    moves (3 distinct of 5: N=2; N=4=6; N=8=10).
-3. Real cue bound: replace the 65,536 job counter with the 128k-cell cue bound check proper.
+3. ~~Real cue bound: replace the 65,536 job counter with the 128k-cell cue bound check proper.~~ Done in
+   row 317 (3), Q7 (section above).
 4. Does a checkpoint BLOB written during cold-store pressure need its own headroom rule (cold media full)?
 5. Cadence on persist headroom ("or when headroom falls under one checkpoint plus margin") is not in 1a.
 6. Cost of writing a checkpoint every K steps (time, cold bytes) is not measured; no board run.

@@ -13,6 +13,9 @@
 #include "i3_l1_probe.h"
 #endif
 #include "jam.h"
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#include "ckpt_jam.h"
+#endif
 #include "nock.h"
 #include "setjmp.h"
 #include "sha256.h"
@@ -709,21 +712,36 @@ static void put_goof(noun goof)
 
 /* Bounds. Defaults are the production rule; the I3_CKPT_TEST_* knobs
  * (Makefile I3_CKPT_TEST=cells|jam|stack|wrapper, test builds only) shrink
- * one bound so a QEMU run reaches that skip leg with a real state. */
+ * one bound so a QEMU run reaches that skip leg with a real state.
+ * Row 317 (3), Q7: row 212 (4)'s rule, a checkpoint is written only if its
+ * cue fits the 128k-cell cue bound, in place of #10's stand-in (65,536
+ * cells and jam.c's 128 KiB writer). The bound is ckpt_cue_limits: the
+ * host's cue limits with at most I3_CKPT_CUE_MAX_CELLS cells and at most
+ * CKPT_JAM_MAX_BYTES (256 KiB, the checkpoint object capacity) of input.
+ * The writer's read-back and the checkpoint boot cue with it; the cell walk
+ * and the size check below only skip a state that cannot fit before it is
+ * written to media. */
+#define I3_CKPT_CUE_MAX_CELLS 128000u
 #if defined(I3_CKPT_TEST_CELLS)
 #define I3_CKPT_CELLS_MAX 8u
 #else
-#define I3_CKPT_CELLS_MAX JOB_CELLS_MAX
+#define I3_CKPT_CELLS_MAX I3_CKPT_CUE_MAX_CELLS
 #endif
 #if defined(I3_CKPT_TEST_JAM)
 #define I3_CKPT_JAM_MAX 8u
 #else
-#define I3_CKPT_JAM_MAX JAM_MAX_BYTES
+#define I3_CKPT_JAM_MAX CKPT_JAM_MAX_BYTES
 #endif
+/* The walk's own visited set (at most half full) and stack. A pending entry
+ * is a sibling left on the way down, so the stack holds at most the noun's
+ * depth plus one; past I3_CUE_MAX_DEPTH the state could not cue anyway. */
+#define I3_CKPT_SET_BITS 18u
+#define I3_CKPT_SET_SIZE (1u << I3_CKPT_SET_BITS)
+#define I3_CKPT_STACK_SLOTS 65536u
 #if defined(I3_CKPT_TEST_STACK)
 #define I3_CKPT_STACK_MAX 2u
 #else
-#define I3_CKPT_STACK_MAX JOB_STACK_MAX
+#define I3_CKPT_STACK_MAX I3_CKPT_STACK_SLOTS
 #endif
 #if defined(I3_CKPT_TEST_WRAPPER)
 #define I3_CKPT_WRAPPER_TAG 1u
@@ -742,25 +760,33 @@ static void put_goof(noun goof)
 #endif
 #define I3_CKPT_BAD_HDR(n) ((n) >= (uint64_t)I3_CKPT_TEST_FROM)
 #endif
-_Static_assert(I3_CKPT_STACK_MAX <= JOB_STACK_MAX, "ckpt stack fits");
-_Static_assert(I3_CKPT_CELLS_MAX <= JOB_CELLS_MAX, "ckpt cells fit");
-_Static_assert(I3_CKPT_JAM_MAX <= JAM_MAX_BYTES, "ckpt jam fits");
+_Static_assert(I3_CKPT_STACK_MAX <= I3_CKPT_STACK_SLOTS, "ckpt stack fits");
+_Static_assert(I3_CKPT_STACK_SLOTS > I3_CUE_MAX_DEPTH + 1u, "ckpt stack holds any cueable depth");
+_Static_assert(I3_CKPT_CELLS_MAX <= I3_CKPT_CUE_MAX_CELLS, "ckpt cells fit");
+_Static_assert(I3_CKPT_SET_SIZE >= 2u * I3_CKPT_CUE_MAX_CELLS, "ckpt set at most half full");
+_Static_assert(I3_CKPT_JAM_MAX <= CKPT_JAM_MAX_BYTES, "ckpt jam fits");
+_Static_assert(I3_CKPT_CUE_MAX_CELLS <= I3_CUE_MAX_CELLS, "ckpt cue bound within the host's");
+_Static_assert(CKPT_JAM_MAX_BYTES <= I3_CUE_MAX_INPUT_BYTES, "ckpt cue input within the host's");
 
-/* sha256 of ++jam's bytes (jam_hoon_checked, the %jam jet's writer), as
- * the kernel's (shax (jam state)): the atom's (met 3) little-endian bytes.
+static cue_bounded_limits_t ckpt_cue_limits(void)
+{
+    cue_bounded_limits_t limits = i3_limits();
+    limits.max_cells = I3_CKPT_CUE_MAX_CELLS;
+    limits.max_input_bytes = CKPT_JAM_MAX_BYTES;
+    return limits;
+}
+
+/* sha256 of ++jam's bytes, as the kernel's (shax (jam state)): the atom's
+ * (met 3) little-endian bytes, from the checkpoint writer's ++jam
+ * (ckpt_jam_hoon_bytes; jam_hoon_checked's rule, CKPT_JAM_MAX_BYTES).
  * The default writer's backref choice differs from ++jam (row 211 (6)). */
-static uint8_t g_ckpt_buf[JAM_MAX_BYTES];
 static int ckpt_digest(noun state, uint8_t out[32], uint64_t *bytes)
 {
-    noun a;
+    const uint8_t *b;
     uint64_t n;
-    if (jam_hoon_checked(state, &a) != 0 || !noun_is_atom(a))
+    if (ckpt_jam_hoon_bytes(state, &b, &n) != 0)
         return 0;
-    n = (bn_met(a) + 7) / 8;
-    if (n == 0 || n > sizeof g_ckpt_buf
-        || !noun_atom_read_fixed(a, g_ckpt_buf, (size_t)n))
-        return 0;
-    sha256_hash(g_ckpt_buf, n, out);
+    sha256_hash(b, n, out);
     if (bytes)
         *bytes = n;
     return 1;
@@ -829,34 +855,36 @@ static int ckpt_wrapper_ok(noun core, noun *state)
     return ckpt_axis(core, I3_CKPT_STATE_AXIS, state);
 }
 
-/* Distinct cells in `state` (job_cells' walk and its visited set, kept
- * separate so the flag-off image is unchanged). Returns 0 when at most
- * I3_CKPT_CELLS_MAX (65,536) cells, else the skip reason: "cells" past the
- * limit (skip only when > 65,536), "stack" if the walk stack would
- * overflow. With the default bounds "stack" cannot happen (each cell
- * popped pushes at most two, so depth <= cells + 1 <= 65,537 < 131,072);
- * it is a separate reason so it is never reported as a cell count. */
-static const char *ckpt_cells(noun state)
+/* Distinct cells in `state`, the walk job_cells makes with its own
+ * visited set and stack (row 317 (3): sized for I3_CKPT_CUE_MAX_CELLS).
+ * Returns 0 with *out the count when at most I3_CKPT_CELLS_MAX cells, else
+ * the skip reason: "cells" past the limit, "stack" if the walk stack would
+ * overflow (deeper than any state that cues, see I3_CKPT_STACK_SLOTS); it is
+ * a separate reason so it is never reported as a cell count. */
+static uint32_t g_ckpt_set[I3_CKPT_SET_SIZE];
+static uint32_t g_ckpt_stack[I3_CKPT_STACK_SLOTS];
+static const char *ckpt_cells(noun state, uint32_t *out)
 {
     uint32_t sp = 0, cells = 0, i;
-    for (i = 0; i < JOB_SET_SIZE; i++)
-        g_job_set[i] = 0;
+    for (i = 0; i < I3_CKPT_SET_SIZE; i++)
+        g_ckpt_set[i] = 0;
+    *out = 0;
     if (!noun_is_cell(state))
         return 0;
-    g_job_stack[sp++] = cell_ptr(state);
+    g_ckpt_stack[sp++] = cell_ptr(state);
     while (sp) {
-        uint32_t op = g_job_stack[--sp], k, h;
+        uint32_t op = g_ckpt_stack[--sp], k, h;
         int seen = 0;
         cell_t *c;
-        h = (op * 2654435761u) >> (32u - JOB_SET_BITS);
-        for (k = 0; k < JOB_SET_SIZE; k++) {
-            uint32_t slot_i = (h + k) & (JOB_SET_SIZE - 1u);
-            if (g_job_set[slot_i] == op) {
+        h = (op * 2654435761u) >> (32u - I3_CKPT_SET_BITS);
+        for (k = 0; k < I3_CKPT_SET_SIZE; k++) {
+            uint32_t slot_i = (h + k) & (I3_CKPT_SET_SIZE - 1u);
+            if (g_ckpt_set[slot_i] == op) {
                 seen = 1;
                 break;
             }
-            if (g_job_set[slot_i] == 0) {
-                g_job_set[slot_i] = op;
+            if (g_ckpt_set[slot_i] == 0) {
+                g_ckpt_set[slot_i] = op;
                 break;
             }
         }
@@ -868,14 +896,15 @@ static const char *ckpt_cells(noun state)
         if (noun_is_cell(c->head)) {
             if (sp >= I3_CKPT_STACK_MAX)
                 return "stack";
-            g_job_stack[sp++] = cell_ptr(c->head);
+            g_ckpt_stack[sp++] = cell_ptr(c->head);
         }
         if (noun_is_cell(c->tail)) {
             if (sp >= I3_CKPT_STACK_MAX)
                 return "stack";
-            g_job_stack[sp++] = cell_ptr(c->tail);
+            g_ckpt_stack[sp++] = cell_ptr(c->tail);
         }
     }
+    *out = cells;
     return 0;
 }
 
@@ -883,7 +912,9 @@ static void ckpt_maybe_write(void)
 {
     noun state, loaded, hdr, xs[5];
     uint8_t dig[32], dig2[32], hd[32], hd2[32];
-    uint64_t n = g_event_num - 1, bytes = 0, sid, hid;
+    uint64_t n = g_event_num - 1, bytes = 0, stored = 0, sid, hid;
+    uint32_t cells = 0;
+    cue_bounded_limits_t limits = ckpt_cue_limits();
     int mode = heap_get_mode();
     const char *why = 0;
     /* Never during replay and never once stopped: only a committed live
@@ -899,22 +930,32 @@ static void ckpt_maybe_write(void)
         ckpt_skip(n, "wrapper");
         return;
     }
-    /* Conservative stand-in for the 128k-cell cue bound: skip when the
-     * state has more than I2_CUE_MAX_CELLS (65,536) distinct cells. */
-    if ((why = ckpt_cells(state)) != 0) {
+    /* Before anything goes to media: a state past the cue bound's cells
+     * (I3_CKPT_CELLS_MAX) or past the checkpoint object (I3_CKPT_JAM_MAX,
+     * the stored bytes) cannot fit, so it is skipped. */
+    if ((why = ckpt_cells(state, &cells)) != 0) {
         ckpt_skip(n, why);
         return;
     }
-    if (jam_size_checked(state, I3_CKPT_JAM_MAX, &bytes) != 0) {
+    if (ckpt_jam_size_checked(state, I3_CKPT_JAM_MAX, &stored) != 0) {
         ckpt_skip(n, "jam-size");
         return;
     }
+    uart_puts("I3H ckpt size event=");
+    put_u64(n);
+    uart_puts(" cells=");
+    put_u64(cells);
+    uart_puts(" stored=");
+    put_u64(stored);
+    uart_puts("\r\n");
     heap_set_mode(HEAP_MODE_SCRATCH);
+    /* The read-back cues with the checkpoint cue bound, as the boot does:
+     * a state that does not fit it is not written as a checkpoint. */
     if (!ckpt_digest(state, dig, &bytes))
         why = "jam";
-    else if (!(sid = cold_store(state)))
+    else if (!(sid = cold_store_ckpt(state)))
         why = "store-state";
-    else if (!noun_is_cell(loaded = cold_load_scratch(sid)) || !ckpt_digest(loaded, dig2, 0)
+    else if (!noun_is_cell(loaded = cold_load_scratch(sid, &limits)) || !ckpt_digest(loaded, dig2, 0)
              || !digest_eq(dig, dig2))
         why = "verify-state";
     else {
@@ -941,7 +982,7 @@ static void ckpt_maybe_write(void)
             why = "alloc";
         /* The header read back must jam to the same bytes as the one
          * written (all five fields), not merely be a cell. */
-        else if (!(hid = cold_store(hdr)) || !noun_is_cell(loaded = cold_load_scratch(hid))
+        else if (!(hid = cold_store(hdr)) || !noun_is_cell(loaded = cold_load_scratch(hid, &limits))
                  || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2))
             why = "verify-header";
     }
@@ -1393,6 +1434,7 @@ static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
 {
     noun state, booted, desk, old, fol, subject, product, xs[3];
     uint8_t dig[32];
+    cue_bounded_limits_t limits;
     uint64_t saved_event = g_event_num;
     i3_host_result_t r;
     int jumped;
@@ -1403,7 +1445,8 @@ static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
     if (!digest_eq(f->kb, g_jam_blake3))
         return "kernel";
     heap_set_mode(HEAP_MODE_SCRATCH);
-    state = cold_load_scratch(f->sid);
+    limits = ckpt_cue_limits();
+    state = cold_load_scratch(f->sid, &limits);
     if (!noun_is_cell(state))
         return "sid";
     if (!ckpt_digest(state, dig, 0) || !digest_eq(dig, f->d))

@@ -9,7 +9,9 @@
 /* ── Bitstream writer ─────────────────────────────────────────────────────── */
 
 /* I2 hybrid gates jam ~10KB; headroom for live state + tarms (~1 Mbit). */
+#ifndef JAM_MAX_LIMBS          /* ckpt_jam.c builds this file again, larger */
 #define JAM_MAX_LIMBS 16384   /* 1 Mbit max jam output */
+#endif
 
 typedef struct {
     uint64_t buf[JAM_MAX_LIMBS];

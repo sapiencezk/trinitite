@@ -8,6 +8,9 @@
 #include "bounded_cue.h"
 #include "cold_media.h"
 #include "runtime_stats.h"
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#include "ckpt_jam.h"
+#endif
 
 #define COLD_MAGIC       0x32444C4F433249ULL /* "I2COLD2\0" LE */
 #define COLD_VERSION     2u
@@ -787,9 +790,70 @@ noun cold_load(uint64_t hash62)
 }
 
 #if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
-noun cold_load_scratch(uint64_t hash62)
+_Static_assert(CKPT_JAM_MAX_BYTES <= JAM_SCRATCH_MAX, "a checkpoint object fits the scratch");
+
+/* Row 317 (3), Q7: the checkpoint's reads cue with the caller's limits (the
+ * 128k-cell checkpoint cue bound, row 212 (4)), not the log's cue_i2_limits.
+ * decode_object and cold_load_in with a limits argument; they are kept
+ * apart from those two so the flag-off image is unchanged. */
+static int decode_object_limits(const cold_super_t *s, uint64_t off, uint32_t kind,
+                                int heap_mode, const cue_bounded_limits_t *limits,
+                                noun *out)
 {
-    return cold_load_in(hash62, HEAP_MODE_SCRATCH);
+    cold_obj_hdr_t h;
+    cold_result_t r = object_validate(s, off, kind, 0, &h);
+    if (r != COLD_RESULT_VALID) {
+        g_last_result = r;
+        return -1;
+    }
+    if (cue_bounded_bytes(jam_scratch, h.len, limits, heap_mode, out) != CUE_BOUNDED_OK) {
+        g_last_result = COLD_RESULT_CUE;
+        return -1;
+    }
+    return 0; /* noun transaction remains active */
+}
+
+noun cold_load_scratch(uint64_t hash62, const cue_bounded_limits_t *limits)
+{
+    cold_super_t s;
+    if (hash62 == 0 || !limits || select_super(&s, 0) != COLD_RESULT_VALID)
+        return NOUN_ZERO;
+    uint64_t off = COLD_DATA0;
+    while (off < s.data_head) {
+        cold_obj_hdr_t h;
+        cold_result_t r = object_validate(&s, off, 0, 0, &h);
+        if (r != COLD_RESULT_VALID) {
+            g_last_result = r;
+            return NOUN_ZERO;
+        }
+        if (h.kind == KIND_BLOB && hash62_of(h.payload_digest) == hash62) {
+            noun out;
+            if (decode_object_limits(&s, off, KIND_BLOB, HEAP_MODE_SCRATCH, limits, &out) != 0)
+                return NOUN_ZERO;
+            noun_tx_commit();
+            return out;
+        }
+        if (!align8_checked(off + sizeof h + h.len, &off))
+            break;
+    }
+    g_last_result = COLD_RESULT_ABSENT;
+    return NOUN_ZERO;
+}
+
+/* cold_store through the checkpoint writer (ckpt_jam.c, CKPT_JAM_MAX_BYTES). */
+uint64_t cold_store_ckpt(noun n)
+{
+    const uint8_t *bytes;
+    uint64_t len, off;
+    if (ckpt_jam_encode_bytes_checked(n, &bytes, &len) != 0
+        || append_obj(KIND_BLOB, bytes, len, &off) != 0)
+        return 0;
+    cold_super_t s;
+    cold_obj_hdr_t h;
+    if (select_super(&s, 0) != COLD_RESULT_VALID
+        || object_validate(&s, off, KIND_BLOB, 0, &h) != COLD_RESULT_VALID)
+        return 0;
+    return hash62_of(h.payload_digest);
 }
 
 /* Row 212 PR 1b (checkpoint boot): one walk of the selected chain in media

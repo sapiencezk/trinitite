@@ -74,10 +74,14 @@ cold_deploy_result_t cold_store_deployment(noun pill_blob,
 uint64_t cold_jam_hash(noun n);
 noun cold_load(uint64_t hash62);
 #if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#include "bounded_cue.h"
 /* Row 212 checkpoint verify: cold_load, but the noun is decoded into SCRATCH
- * (the caller resets scratch), so a read-back costs no persist cells.
+ * (the caller resets scratch), so a read-back costs no persist cells, and
+ * (row 317 (3), Q7) cued with `limits`, the checkpoint cue bound.
  * Compiled only with the checkpoint flag, so flag-off images are unchanged. */
-noun cold_load_scratch(uint64_t hash62);
+noun cold_load_scratch(uint64_t hash62, const cue_bounded_limits_t *limits);
+/* cold_store through the checkpoint writer's own jam (ckpt_jam.h). */
+uint64_t cold_store_ckpt(noun n);
 /* Row 212 PR 1b: walk the BLOBs of at most max_len payload bytes in media
  * order, each decoded into SCRATCH, for the checkpoint header search. */
 int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx);
