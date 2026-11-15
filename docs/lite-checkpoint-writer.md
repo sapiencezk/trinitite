@@ -130,6 +130,10 @@ Row 212 (4): a checkpoint is written only if its cue fits the 128k-cell cue boun
   a 2^18-entry backref cache (196,608 admitted), linked only with the flag. The `%jam` jet, the log and every
   other caller keep jam.c's 128 KiB writer and cache, so no budget, refusal or log bound moves, and the flag-off
   image is unchanged. A state whose ++jam needs more cache entries skips with `reason=jam`.
+  The cache (6 MiB) and the mug memo (1 MiB) are not in .bss (they put it past its 24 MiB bound in the
+  `COLD_MEDIA=fake` builds) but in a fixed region, `I3_CKPT_JAM_BASE` = DRAM base + 0x0E000000, 16 MiB
+  (`src/memory.h`, with build-time checks against .bss, the cue cache and rub scratch, the code region and the
+  pill). The memo's generation starts at 0xFFFFFFFF, so the first jam clears the region's memory.
 - The `I3_CKPT_TEST=cells|jam|stack` knobs still shrink the same three bounds.
 The lite leg `large` in 1499kernel's `tools/lite_checkpoint_boot.py` loads the largest application one job can
 log (65,536 job cells, the 128 KiB log writer) and checks that its state, stored jam over 128 KiB and under
