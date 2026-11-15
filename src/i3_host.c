@@ -1505,6 +1505,43 @@ static void ckpt_verified(uint64_t n, noun state)
 }
 #endif
 
+/* Row 212 (4), row 317 (3): besides every K accepted entries, a checkpoint
+ * is written when persist headroom falls under one checkpoint plus margin.
+ * One checkpoint is the state's cells at the last walk (at least
+ * I3_CKPT_HEADROOM_MIN before the first); the margin is one more, on top of
+ * the reserve a live step must leave (live_reserve). A verified checkpoint
+ * lets compaction (row 221, I3_LITE_LOG=1) free the persist half. The
+ * trigger fires once each time headroom falls under the line and re-arms
+ * when it is back above it, so a node that cannot compact (a 1b image, a
+ * skipped checkpoint or compaction) writes one extra checkpoint, not one per
+ * step; the row 200 persist stop still applies. */
+#define I3_CKPT_HEADROOM_MIN 4096u
+static uint64_t g_ckpt_state_cells;
+static int g_ckpt_hr_fired;
+
+static int ckpt_headroom_due(uint64_t n)
+{
+    uint64_t one = g_ckpt_state_cells > I3_CKPT_HEADROOM_MIN
+                   ? g_ckpt_state_cells : I3_CKPT_HEADROOM_MIN;
+    uint64_t need = add_sat(live_reserve(0), add_sat(one, one));
+    uint64_t free = heap_persist_free_cells();
+    if (free >= need) {
+        g_ckpt_hr_fired = 0;
+        return 0;
+    }
+    if (g_ckpt_hr_fired)
+        return 0;
+    g_ckpt_hr_fired = 1;
+    uart_puts("I3H ckpt headroom event=");
+    put_u64(n);
+    uart_puts(" free=");
+    put_u64(free);
+    uart_puts(" need=");
+    put_u64(need);
+    uart_puts("\r\n");
+    return 1;
+}
+
 static void ckpt_maybe_write(void)
 {
     noun state, loaded, hdr, xs[5];
@@ -1516,7 +1553,9 @@ static void ckpt_maybe_write(void)
     const char *why = 0;
     /* Never during replay and never once stopped: only a committed live
      * step reaches here, and the guard makes it explicit. */
-    if (g_replaying || g_stop || n == 0 || n % (uint64_t)I3_CHECKPOINT_EVERY)
+    if (g_replaying || g_stop || n == 0)
+        return;
+    if (n % (uint64_t)I3_CHECKPOINT_EVERY && !ckpt_headroom_due(n))
         return;
     /* The application state is internal.outer: the core's sample (axis 6) is
      * the NockApp wrapper's outer-state [%0 desk-hash internal], so the
@@ -1530,7 +1569,9 @@ static void ckpt_maybe_write(void)
     /* Before anything goes to media: a state past the cue bound's cells
      * (I3_CKPT_CELLS_MAX) or past the checkpoint object (I3_CKPT_JAM_MAX,
      * the stored bytes) cannot fit, so it is skipped. */
-    if ((why = ckpt_cells(state, &cells)) != 0) {
+    why = ckpt_cells(state, &cells);
+    g_ckpt_state_cells = why ? I3_CKPT_CELLS_MAX : cells;
+    if (why) {
         ckpt_skip(n, why);
         return;
     }
