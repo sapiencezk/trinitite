@@ -141,6 +141,39 @@ log (65,536 job cells, the 128 KiB log writer) and checks that its state, stored
 65,536 cells (one load cannot make one), and the log's own cue bound on replay (`cue_i2_limits`), which this
 does not change.
 
+## Row 317 step 2, Round 3: replay of what live accepts, persist fit, capacity, region
+All with the checkpoint flag only; `I3_CHECKPOINT_EVERY=` images keep `cue_i2_limits` and SCRATCH decode.
+- Q8 (rows 212 (3), 213 (4), decision 131). LOG entries decode with the live admission limits (`i3_limits`)
+  instead of `cue_i2_limits`; the depth is `I3_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN` (1,024 + 64,
+  `src/ckpt_jam.h`), because a logged entry (event number and cause) and a checkpoint state wrap the job or
+  application live admission cued at 1,024. The checkpoint cue and the checkpoint writer's ++jam
+  (`JAM_HOON_DEPTH`, overridable in jam.c; the `%jam` jet's stays 1,024) take the same depth. A replayed entry
+  or a checkpoint state whose persist copy fails from SCRATCH (`noun_copy_checked` walks 256 frames; live, the
+  job was cued into PERSIST and was not walked) runs once more decoded into PERSIST. 1499kernel leg `depth`:
+  an app of one 138-statement algorithm (139 is refused live) replays from zero and from a K=4 checkpoint to
+  the full node's state. The live `/state-hash` peek of such a state is refused (its ++jam runs as Nock past
+  the jet's depth and meets the peek's 128,000-cell limit); the leg reads the state as the checkpoint's D.
+- Q10 B (row 212 (4)). Before anything goes to media the writer skips `reason=persist` a state whose boot
+  would not fit: `2 * cells + g_persist_reserve` above the persist free right after this image's kernel cue
+  (decode plus copy, or the PERSIST retry). Knob `I3_CKPT_TEST=persist`; leg `persist`.
+- Q11 B. Capacity sized from the 128,000-cell bound (`src/ckpt_jam.h`): backref cache 2^19 entries
+  (393,216 admitted >= 2 * 128,000 + 1 distinct nouns), mug memo 2^18 (cells only, at most half full),
+  buffer 4 MiB (2 bits a cell, at most 117 bits a leaf, plus the cue's 2 MiB of atom bytes: 4,001,167 bytes,
+  asserted). The cold store's object and append scratches hold a checkpoint object, so with the flag they are
+  4 MiB each. All five live in the region below, so .bss shrinks (fake LITE 24,513,064 -> 23,727,688; rpi4b
+  16,105,320 -> 15,319,976).
+- Region `I3_CKPT_JAM_BASE` = DRAM base + 0x0E000000, 29 MiB, top +0x0FD00000: cache +0, memo +0x0C00000,
+  buffer +0x1000000 (5 MiB slot), object scratch +0x1500000, append scratch +0x1900000 (`src/memory.h`).
+  Build-time checks against .bss, the cue cache and rub scratch, the code region, the pill, 4 GiB, the ring
+  window (LITE) and MMIO (DRAM + 0x3F000000). The region is not zeroed at boot: `i3_host_boot` calls
+  `ckpt_jam_reset` (cache and memo cleared, memo generation 0) before any checkpoint jam; the buffer and the
+  scratches are written before they are read. Knob `I3_CKPT_TEST=dirty` fills the whole region with 0xA5
+  first, as stale RAM; leg `dirty`. (The per-jam clears already tolerate stale contents: the leg also passes
+  with the reset removed, so it guards against a regression rather than proving the reset.)
+- Q13 A. `tests/checkpoint_flag_off.sh` ONBASE must be at or after 175f888 (Q7 and the headroom trigger change
+  the 1b flag-on image by design), and at or after the last Round 3 commit that changes it (Q8 3c0a79d,
+  Q10 de85981, Q11 14d4828): ONBASE=14d4828 or later.
+
 ## Row 317 (3), 212 (4): the headroom trigger (1499kernel row 317 step 2, stage 2)
 A checkpoint is written every K accepted entries **or** when persist headroom falls under one checkpoint
 plus margin (row 212 (4)). The line is `need = live_reserve(0) + 2 * one`, where `one` is the state cells
