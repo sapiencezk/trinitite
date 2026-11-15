@@ -137,6 +137,23 @@ log (65,536 job cells, the 128 KiB log writer) and checks that its state, stored
 65,536 cells (one load cannot make one), and the log's own cue bound on replay (`cue_i2_limits`), which this
 does not change.
 
+## Row 317 (3), 212 (4): the headroom trigger (1499kernel row 317 step 2, stage 2)
+A checkpoint is written every K accepted entries **or** when persist headroom falls under one checkpoint
+plus margin (row 212 (4)). The line is `need = live_reserve(0) + 2 * one`, where `one` is the state cells
+of the last checkpoint walk (at least 4,096 before the first walk; the cue-bound maximum after a skipped
+walk). When `heap_persist_free_cells() < need` the next accepted entry writes a checkpoint out of cadence
+and logs `I3H ckpt headroom event=N free=F need=M` first. It fires once and re-arms when headroom is back
+above the line, so a node that cannot free persist (no compaction: flag-off `I3_LITE_LOG`) writes one
+extra checkpoint, not one per step. The write itself, the 128k-cell cue bound and the persist fit are the
+Q7 rules above; the trigger only moves *when*.
+
+- With `I3_LITE_LOG=1` (running log, ring, compaction) a verified checkpoint compacts the persist half, so
+  the trigger is what lifts the per-boot persist ceiling: `tools/lite_replay_ceiling.py --lifted` in
+  1499kernel, H = 60,000, 3,000 events: without the trigger the node stops `reason=persist` at event 488;
+  with it, checkpoints at 402, 754, 1168, 1587, 2000, 2405, 2825 (six from the trigger), a compaction after
+  each, no stop, and the final /state-hash equals the full node's.
+- Flag-off images (`I3_CHECKPOINT_EVERY` unset) do not compile the trigger; they stay byte-identical.
+
 ## Rotation (1c: see the PR 1c section)
 - Amended row 212 (2) (1499kernel #263): the node keeps the last verified checkpoint plus every entry after
   it, and the previous checkpoint until the next one verifies. Entries before the kept checkpoint are dropped.
@@ -328,5 +345,6 @@ Implemented as above (PR 1b section); the `+load` blocker is resolved by row 219
 3. ~~Real cue bound: replace the 65,536 job counter with the 128k-cell cue bound check proper.~~ Done in
    row 317 (3), Q7 (section above).
 4. Does a checkpoint BLOB written during cold-store pressure need its own headroom rule (cold media full)?
-5. Cadence on persist headroom ("or when headroom falls under one checkpoint plus margin") is not in 1a.
+5. ~~Cadence on persist headroom ("or when headroom falls under one checkpoint plus margin") is not in 1a.~~
+   Done in row 317 (3), 212 (4) (headroom trigger section above).
 6. Cost of writing a checkpoint every K steps (time, cold bytes) is not measured; no board run.
