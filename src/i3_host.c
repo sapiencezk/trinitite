@@ -851,38 +851,41 @@ static cue_bounded_limits_t ckpt_cue_limits(void)
     return limits;
 }
 
-/* sha256 of ++jam's bytes, as the kernel's (shax (jam state)): the atom's
- * (met 3) little-endian bytes, from the checkpoint writer's ++jam
- * (ckpt_jam_hoon_bytes; jam_hoon_checked's rule, CKPT_JAM_MAX_BYTES).
- * The default writer's backref choice differs from ++jam (row 211 (6)). */
-static int ckpt_digest(noun state, uint8_t out[32], uint64_t *bytes)
+/* Row 328: D is the kernel's /state-hash of the state, (digest state), a
+ * Tip5 noun digest (I3_DIGEST_BYTES little-endian bytes), computed by the
+ * same C walk the kernel's hash-hashable-noun jet runs (nock_tip5_digest).
+ * It was sha256 of ++jam's bytes, the old (shax (jam state)). bytes, when
+ * asked, is the length of ++jam's bytes from the checkpoint writer's ++jam
+ * (ckpt_jam_hoon_bytes; jam_hoon_checked's rule, CKPT_JAM_MAX_BYTES). */
+static int ckpt_digest(noun state, uint8_t out[I3_DIGEST_BYTES], uint64_t *bytes)
 {
     const uint8_t *b;
     uint64_t n;
-    if (ckpt_jam_hoon_bytes(state, &b, &n) != 0)
-        return 0;
-    sha256_hash(b, n, out);
-    if (bytes)
+    if (bytes) {
+        if (ckpt_jam_hoon_bytes(state, &b, &n) != 0)
+            return 0;
         *bytes = n;
-    return 1;
+    }
+    return nock_tip5_digest(state, out);
 }
 
-static int digest_eq(const uint8_t a[32], const uint8_t b[32])
+static int digest_eq(const uint8_t *a, const uint8_t *b, uint32_t len)
 {
     uint32_t i;
     uint8_t d = 0;
-    for (i = 0; i < 32; i++)
+    for (i = 0; i < len; i++)
         d |= (uint8_t)(a[i] ^ b[i]);
     return d == 0;
 }
 
-static int bytes_atom(const uint8_t b[32], noun *out)
+/* len (at most 40) little-endian bytes as an atom */
+static int bytes_atom(const uint8_t *b, uint32_t len, noun *out)
 {
-    uint64_t limbs[4] = {0, 0, 0, 0};
+    uint64_t limbs[5] = {0, 0, 0, 0, 0};
     uint32_t i;
-    for (i = 0; i < 32; i++)
+    for (i = 0; i < len && i < 40; i++)
         limbs[i / 8] |= (uint64_t)b[i] << (8 * (i % 8));
-    return make_atom_checked(limbs, 4, out);
+    return make_atom_checked(limbs, 5, out);
 }
 
 static void ckpt_skip(uint64_t n, const char *why)
@@ -1041,12 +1044,12 @@ static const char STOP_ROTATED[] = "rotated";
  * bump mark. (8) Nothing is written to media and no state hash changes. */
 static int g_cmp_pending;
 static uint64_t g_cmp_n;
-static uint8_t g_cmp_d[32];
+static uint8_t g_cmp_d[I3_DIGEST_BYTES];
 
-static void compact_arm(uint64_t n, const uint8_t d[32])
+static void compact_arm(uint64_t n, const uint8_t d[I3_DIGEST_BYTES])
 {
     uint32_t i;
-    for (i = 0; i < 32; i++)
+    for (i = 0; i < I3_DIGEST_BYTES; i++)
         g_cmp_d[i] = d[i];
     g_cmp_n = n;
     g_cmp_pending = 1;
@@ -1264,7 +1267,7 @@ static void compact_run(void)
 {
     uint64_t n = g_cmp_n, mark, base, t0, t1, t2, t3, t4, before_cells, sel0;
     noun sample, copy, core, state;
-    uint8_t dig[32];
+    uint8_t dig[I3_DIGEST_BYTES];
     int mode = heap_get_mode();
     atom_compact_t st;
     cell_t *kc, *pc;
@@ -1341,7 +1344,7 @@ static void compact_run(void)
     /* (4) axis 27 of the new core must hash to D */
     mark = heap_scratch_mark();
     heap_set_mode(HEAP_MODE_SCRATCH);
-    if (!ckpt_wrapper_ok(core, &state) || !ckpt_digest(state, dig, 0) || !digest_eq(dig, g_cmp_d)) {
+    if (!ckpt_wrapper_ok(core, &state) || !ckpt_digest(state, dig, 0) || !digest_eq(dig, g_cmp_d, I3_DIGEST_BYTES)) {
         (void)heap_scratch_rewind(mark);
         heap_compact_abort();
         heap_set_mode(mode);
@@ -1576,7 +1579,7 @@ static int ckpt_headroom_due(uint64_t n)
 static void ckpt_maybe_write(void)
 {
     noun state, loaded, hdr, xs[5];
-    uint8_t dig[32], dig2[32], hd[32], hd2[32];
+    uint8_t dig[I3_DIGEST_BYTES], dig2[I3_DIGEST_BYTES], hd[I3_DIGEST_BYTES], hd2[I3_DIGEST_BYTES];
     uint64_t n = g_event_num - 1, bytes = 0, stored = 0, sid, hid;
     uint32_t cells = 0;
     cue_bounded_limits_t limits = ckpt_cue_limits();
@@ -1635,13 +1638,13 @@ static void ckpt_maybe_write(void)
     else if (!(sid = cold_store_ckpt(state)))
         why = "store-state";
     else if (!noun_is_cell(loaded = cold_load_scratch(sid, &limits)) || !ckpt_digest(loaded, dig2, 0)
-             || !digest_eq(dig, dig2))
+             || !digest_eq(dig, dig2, I3_DIGEST_BYTES))
         why = "verify-state";
     else {
         uint32_t arity = 5;
-        uint8_t hdig[32];
+        uint8_t hdig[I3_DIGEST_BYTES];
         uint32_t i;
-        for (i = 0; i < 32; i++)
+        for (i = 0; i < I3_DIGEST_BYTES; i++)
             hdig[i] = dig[i];
         xs[0] = tas("i3-ckpt");
         xs[1] = direct(n);
@@ -1656,7 +1659,7 @@ static void ckpt_maybe_write(void)
         if (I3_CKPT_BAD_HDR(n))
             hdig[0] ^= 1u;
 #endif
-        if (!bytes_atom(hdig, &xs[3]) || !bytes_atom(g_jam_blake3, &xs[4])
+        if (!bytes_atom(hdig, I3_DIGEST_BYTES, &xs[3]) || !bytes_atom(g_jam_blake3, 32, &xs[4])
             || !tuple(xs, arity, &hdr) || !ckpt_digest(hdr, hd, 0))
             why = "alloc";
         /* The header read back must jam to the same bytes as the one
@@ -1664,11 +1667,11 @@ static void ckpt_maybe_write(void)
 #if defined(I3_CKPT_TEST_CRASH)
         else if (!(hid = cold_store(hdr)) || ckpt_test_crash(n)
                  || !noun_is_cell(loaded = cold_load_scratch(hid, &limits))
-                 || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2))
+                 || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2, I3_DIGEST_BYTES))
             why = "verify-header";
 #else
         else if (!(hid = cold_store(hdr)) || !noun_is_cell(loaded = cold_load_scratch(hid, &limits))
-                 || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2))
+                 || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2, I3_DIGEST_BYTES))
             why = "verify-header";
 #endif
     }
@@ -1683,8 +1686,9 @@ static void ckpt_maybe_write(void)
     put_u64(n);
     uart_puts(" bytes=");
     put_u64(bytes);
+    /* the field keeps its name; D is now the Tip5 /state-hash (row 328) */
     uart_puts(" sha256=");
-    put_hex(dig, 32);
+    put_hex(dig, I3_DIGEST_BYTES);
     uart_puts("\r\n");
 #if defined(COLD_LITE_LOG)
     ckpt_verified(n, state);
@@ -1869,12 +1873,14 @@ int i3_host_peek(noun path, i3_host_result_t *out)
     return 1;
 }
 
-/* Row 199 on the lite node: the kernel's /state-hash, (shax (jam state)),
- * paired with the host's event number N, the count of accepted log entries
- * after a clean replay. A stopped node (rows 141, 200) refuses the request.
- * Not on the step path: it runs only when asked, as a peek. The 32 hash bytes
- * are the atom's little-endian bytes, as the full node prints them. */
-int i3_host_state_hash(uint64_t *event, uint8_t hash[32], i3_host_result_t *out)
+/* Row 199 on the lite node: the kernel's /state-hash, paired with the host's
+ * event number N, the count of accepted log entries after a clean replay. A
+ * stopped node (rows 141, 200) refuses the request. Not on the step path: it
+ * runs only when asked, as a peek. Row 328: /state-hash is (digest state), a
+ * Tip5 digest below 2^320; the I3_DIGEST_BYTES hash bytes are the atom's
+ * little-endian bytes, as the full node prints them. A wider atom is
+ * refused, never cut. */
+int i3_host_state_hash(uint64_t *event, uint8_t hash[I3_DIGEST_BYTES], i3_host_result_t *out)
 {
     noun path;
     if (!out)
@@ -1892,7 +1898,7 @@ int i3_host_state_hash(uint64_t *event, uint8_t hash[32], i3_host_result_t *out)
         return 0;
     if (!i3_host_peek(path, out) || !noun_is_atom(out->product))
         return 0;
-    if (!noun_atom_read_fixed(out->product, hash, 32))
+    if (!noun_atom_read_fixed(out->product, hash, I3_DIGEST_BYTES))
         return 0;
     *event = g_event_num - 1;
     return 1;
@@ -2112,7 +2118,7 @@ typedef struct {
 #endif
     int found, shape_ok;
     uint64_t n, sid;
-    uint8_t d[32], kb[32];
+    uint8_t d[I3_DIGEST_BYTES], kb[32];
 } ckpt_find_t;
 
 static int ckpt_find_cb(void *ctx, noun blob)
@@ -2121,7 +2127,7 @@ static int ckpt_find_cb(void *ctx, noun blob)
     noun x[5], cur = blob;
     uint32_t i;
     uint64_t n;
-    uint8_t d[32], kb[32];
+    uint8_t d[I3_DIGEST_BYTES], kb[32];
     int shape_ok = 1;
     for (i = 0; i < 4; i++) {
         cell_t *c;
@@ -2148,16 +2154,16 @@ static int ckpt_find_cb(void *ctx, noun blob)
         goto done;
 #endif
     if (shape_ok)
-        shape_ok = noun_is_direct(x[2]) && noun_atom_read_fixed(x[3], d, 32)
+        shape_ok = noun_is_direct(x[2]) && noun_atom_read_fixed(x[3], d, I3_DIGEST_BYTES)
                    && noun_atom_read_fixed(x[4], kb, 32);
     f->found = 1;
     f->shape_ok = shape_ok;
     f->n = n;
     f->sid = shape_ok ? direct_val(x[2]) : 0;
-    for (i = 0; i < 32; i++) {
+    for (i = 0; i < I3_DIGEST_BYTES; i++)
         f->d[i] = shape_ok ? d[i] : 0;
+    for (i = 0; i < 32; i++)
         f->kb[i] = shape_ok ? kb[i] : 0;
-    }
 done:
     heap_scratch_reset();
     return 0;
@@ -2186,7 +2192,7 @@ static int load_formula(noun *out)
 static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
 {
     noun state, booted, desk, old, fol, subject, product, xs[3];
-    uint8_t dig[32];
+    uint8_t dig[I3_DIGEST_BYTES];
     cue_bounded_limits_t limits;
     uint64_t saved_event = g_event_num;
     i3_host_result_t r;
@@ -2195,7 +2201,7 @@ static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
         return "shape";
     if (f->n == 0 || f->n > log_len)
         return "n";
-    if (!digest_eq(f->kb, g_jam_blake3))
+    if (!digest_eq(f->kb, g_jam_blake3, 32))
         return "kernel";
     int in_persist = 0;
     limits = ckpt_cue_limits();
@@ -2207,7 +2213,7 @@ again:
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (!noun_is_cell(state))
         return "sid";
-    if (!ckpt_digest(state, dig, 0) || !digest_eq(dig, f->d))
+    if (!ckpt_digest(state, dig, 0) || !digest_eq(dig, f->d, I3_DIGEST_BYTES))
         return "hash";
     /* The booted core must have the wrapper shape the writer saved from;
      * its desk-hash (axis 26) is the booted build's, as on any +load. */
@@ -2245,7 +2251,7 @@ again:
     if (jumped != 0 || !noun_is_cell(product))
         return "load";
     if (!ckpt_wrapper_ok(product, &state) || !ckpt_digest(state, dig, 0)
-        || !digest_eq(dig, f->d))
+        || !digest_eq(dig, f->d, I3_DIGEST_BYTES))
         return "load-hash";
     booted = g_kernel;
     g_kernel = product;
@@ -2290,7 +2296,7 @@ static uint64_t ckpt_boot(void)
             uart_puts("I3H ckpt boot event=");
             put_u64(f.n);
             uart_puts(" sha256=");
-            put_hex(f.d, 32);
+            put_hex(f.d, I3_DIGEST_BYTES);
             uart_puts(" log=");
             put_u64(log_len);
             uart_puts("\r\n");
