@@ -1,0 +1,12 @@
+{
+  "about": "Row 328 (2): ++digest (hoon/lib/iec-types.hoon) of each noun in tests/fixtures/tip5/vectors.jam (tools/oracle/tip5_vectors.py), as digest-to-atom:tip5 in hex. Checked by crates/full-node/tests/tip5_digest.rs and tools/web-node/tip5.spec.mjs.",
+  "digests": {
+    "atom-0": "313b0eb7a77f8beb232911554b2945ce32b2e3ef1d2af9e7966019bab571dfc8e7c84fb46c5376ee",
+    "atom-p-1": "3653f7c7fdede9216f2a393c2b63d41051a6853712c865f8c5bdcae2323d1aa8b3181f4dd101434e",
+    "atom-p": "ccf6eeddc8a0109815311b06a9d4430bf01cda4179c4a7f8f3773d7f28df6efb3f63d9a68a4e9076",
+    "atom-6143": "995f3e0f0123f297597e5bf737e4dcebf8e0dacaba7d812d5e0215e82af428b20014cfd0d4a5a5d3",
+    "job-10": "4082779ac4d92d1915c207aeb5a88c9cac514a6782d78a160d31dcdaf943c4646411bb834c2d028d",
+    "deep-cell": "4eee57506d3462f5d5ad5f4e18a217ba2b89863fe8c81779478d1393271fdd8f288f3571dc6d2b8a",
+    "blink-state": "feac6476bb502d883b906a5b7c1266d5e0a8fe03d679b60b91617d38884d83e1a72e90435e73a15d"
+  }
+}

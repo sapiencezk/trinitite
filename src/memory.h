@@ -264,6 +264,36 @@
 #endif
 
 /*
+ * 1499kernel row 328 (d): the Tip5 walk's tables (nock.c, the
+ * hash-hashable-noun jet): a memo of 2^19 slots (key, generation and pool
+ * index) over a pool of 2^18 digests, and the walk's task and result
+ * stacks. I3_HOST only; other builds keep small tables in .bss. Not zeroed
+ * at boot: the slot table is cleared before its first use.
+ *   +0x0000000  memo keys, 2^19 x 8                          4 MiB
+ *   +0x0400000  memo tags, 2^19 x 8                          4 MiB
+ *   +0x0800000  digest pool, 2^18 x 40                      10 MiB
+ *   +0x1200000  task stack, 2^16 x 8 (+ 2^16 kinds)        576 KiB
+ *   +0x1300000  result stack, 2^16 x 4                     256 KiB
+ */
+#if defined(I3_HOST)
+#define I3_TIP5_BASE (PLATFORM_DRAM_BASE + 0x28000000ULL)
+#define I3_TIP5_SIZE 0x01400000ULL /* 20 MiB */
+#define I3_TIP5_TOP  (I3_TIP5_BASE + I3_TIP5_SIZE)
+#if I3_TIP5_BASE < HEAP_TOP
+#error "tip5 region overlaps the noun heap"
+#endif
+#if I3_TIP5_BASE < (PLATFORM_PILL_BASE + 0x10000000ULL)
+#error "tip5 region overlaps the pill, plan and app slots"
+#endif
+#if defined(I3_RING_WINDOW_BASE) && I3_TIP5_TOP > I3_RING_WINDOW_BASE && I3_TIP5_BASE < I3_RING_WINDOW_TOP
+#error "tip5 region overlaps the ring window"
+#endif
+#if I3_TIP5_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
+#error "tip5 region overlaps MMIO"
+#endif
+#endif
+
+/*
  * PILL_BASE carries either:
  *   - isolated legacy I1 PILL v2: u64 len, shape, version/pad, jam at +16; or
  *   - I2 PILL2: 256-byte integrity/RuntimeIdentity header, then bounded jam.

@@ -4,6 +4,7 @@
 #include "bignum.h"
 #include "jam.h"
 #include "sha256.h"
+#include "tip5.h"
 #include "uart.h"
 #include "setjmp.h"
 #include "forth.h"
@@ -702,6 +703,492 @@ static noun jet_shax(noun core, const wilt_t *jets, sky_fn_t sky) {
     return bn_normalize(limbs, 4);
 }
 
+/* ── Tip5 jets (1499kernel row 328 (d)) ──────────────────────────────────── */
+
+/*
+ * The arms 1499kernel's ++digest (iec-types) calls: of ++tip5 (zeke,
+ * hoon/common/ztd/three.hoon), hash-hashable, hash-noun-varlen,
+ * hash-ten-cell, hash-belts-list, hash-varlen, permutation and
+ * digest-to-atom; and ++digest's own walk, hash-hashable-noun:digest-lib.
+ * Each binds by its full parent path (HOT_TIP5, HOT_DIGEST below), as the
+ * full node's c1499_core::tip5::hot_state does. A jet computes what its
+ * Hoon arm computes on the inputs it takes (tip5.c) and runs the arm as
+ * Nock on any other (a door whose num-rounds is not 7, a value at or above
+ * p, a %list or %mary hashable, a shape the arm would crash on, or a walk
+ * past its tables), so a refusal or crash is the arm's own.
+ */
+
+static int fast_slot(uint64_t a, noun subject, noun *out);
+
+/* An atom of at most 64 bits. */
+static int t5_u64(noun a, uint64_t *v)
+{
+    atom_t *at;
+    if (noun_is_direct(a)) {
+        *v = direct_val(a);
+        return 1;
+    }
+    if (!noun_is_indirect(a) || !(at = atom_store_get(indirect_hash(a))) || at->size != 1)
+        return 0;
+    *v = at->limbs[0];
+    return 1;
+}
+
+/* A belt: an atom below p. */
+static int t5_belt(noun a, uint64_t *v)
+{
+    return t5_u64(a, v) && *v < TIP5_P;
+}
+
+static noun t5_atom(uint64_t v)
+{
+    return bn_normalize(&v, 1);
+}
+
+/* [a b c d e] */
+static noun t5_tuple(const uint64_t d[TIP5_DIGEST])
+{
+    noun n = t5_atom(d[TIP5_DIGEST - 1]);
+    int i;
+    for (i = TIP5_DIGEST - 2; i >= 0; i--)
+        n = nock_alloc_cell(t5_atom(d[i]), n);
+    return n;
+}
+
+/* ~[v0 v1 ...] */
+static noun t5_list(const uint64_t *v, int len)
+{
+    noun n = NOUN_ZERO;
+    int i;
+    for (i = len - 1; i >= 0; i--)
+        n = nock_alloc_cell(t5_atom(v[i]), n);
+    return n;
+}
+
+/* Is a 5-tuple of belts. */
+static int t5_digest(noun n, uint64_t d[TIP5_DIGEST])
+{
+    int i;
+    for (i = 0; i < TIP5_DIGEST - 1; i++) {
+        cell_t *c;
+        if (!noun_is_cell(n))
+            return 0;
+        c = (cell_t *)(uintptr_t)cell_ptr(n);
+        if (!t5_belt(c->head, &d[i]))
+            return 0;
+        n = c->tail;
+    }
+    return t5_belt(n, &d[TIP5_DIGEST - 1]);
+}
+
+/* A gate of the ++tip5 door: its num-rounds (door sample, gate axis 30)
+ * is 7, the only count ++round-constants is given for here. */
+static int t5_rounds_ok(noun core)
+{
+    noun r;
+    return fast_slot(30, core, &r) && noun_is_direct(r) && direct_val(r) == TIP5_ROUNDS;
+}
+
+/* ── the walk's tables: memo by noun word, digest pool, stacks ── */
+
+#define T5_VISIT 0
+#define T5_PAIR 1
+#define T5_ONE 2   /* hash-noun-varlen's dyck pass: emit a 1 */
+#if defined(I3_TIP5_BASE)
+#define T5_SLOT_BITS 19u
+#define T5_POOL_MAX (1u << 18)
+#define T5_STACK_MAX (1u << 16)
+#define t5_key  ((uint64_t *)(uintptr_t)I3_TIP5_BASE)
+#define t5_tag  ((uint64_t *)(uintptr_t)(I3_TIP5_BASE + 0x0400000ULL))
+#define t5_pool ((uint64_t (*)[TIP5_DIGEST])(uintptr_t)(I3_TIP5_BASE + 0x0800000ULL))
+#define t5_task ((noun *)(uintptr_t)(I3_TIP5_BASE + 0x1200000ULL))
+#define t5_kind ((uint8_t *)(uintptr_t)(I3_TIP5_BASE + 0x1280000ULL))
+#define t5_done ((uint32_t *)(uintptr_t)(I3_TIP5_BASE + 0x1300000ULL))
+_Static_assert((1ULL << T5_SLOT_BITS) * 8 <= 0x0400000ULL, "tip5 keys fit");
+_Static_assert(T5_POOL_MAX * 40ULL <= 0x1200000ULL - 0x0800000ULL, "tip5 pool fits");
+_Static_assert(T5_STACK_MAX * 8ULL <= 0x0080000ULL, "tip5 task stack fits");
+_Static_assert(0x1300000ULL + T5_STACK_MAX * 4ULL <= I3_TIP5_SIZE, "tip5 region holds the stacks");
+#else
+/* Builds without I3_HOST run no 1499kernel ++digest: small tables (about
+ * 10 KiB of .bss); a larger walk runs the arm as Nock. */
+#define T5_SLOT_BITS 8u
+#define T5_POOL_MAX (1u << 7)
+#define T5_STACK_MAX (1u << 8)
+static uint64_t t5_key[1u << T5_SLOT_BITS];
+static uint64_t t5_tag[1u << T5_SLOT_BITS];
+static uint64_t t5_pool[T5_POOL_MAX][TIP5_DIGEST];
+static noun t5_task[T5_STACK_MAX];
+static uint8_t t5_kind[T5_STACK_MAX];
+static uint32_t t5_done[T5_STACK_MAX];
+#endif
+#define T5_SLOTS (1u << T5_SLOT_BITS)
+#define T5_VARLEN_MAX (1u << 20)   /* nodes per hash-noun-varlen pass */
+
+static uint32_t t5_gen;      /* a slot is live iff its tag's high half is t5_gen */
+static uint32_t t5_pool_n;
+
+/* A new walk: a new generation (the slot table is cleared on the first
+ * walk of a boot and when the generation wraps). */
+static void t5_begin(void)
+{
+    uint32_t i;
+    if (t5_gen == 0 || t5_gen == 0xFFFFFFFFu) {
+        for (i = 0; i < T5_SLOTS; i++)
+            t5_tag[i] = 0;
+        t5_gen = 0;
+    }
+    t5_gen++;
+    t5_pool_n = 0;
+}
+
+static uint32_t t5_slot_of(noun key)
+{
+    return (uint32_t)((key * 0x9E3779B97F4A7C15ULL) >> (64u - T5_SLOT_BITS));
+}
+
+/* Pool index of key's digest, or -1. */
+static int64_t t5_memo_get(noun key)
+{
+    uint32_t s = t5_slot_of(key);
+    while ((uint32_t)(t5_tag[s] >> 32) == t5_gen) {
+        if (t5_key[s] == key)
+            return (int64_t)(uint32_t)t5_tag[s];
+        s = (s + 1u) & (T5_SLOTS - 1u);
+    }
+    return -1;
+}
+
+/* Record key's digest; its pool index, or -1 when the pool is full (the
+ * pool is at most half the slots, so a probe always ends). */
+static int64_t t5_memo_put(noun key, const uint64_t d[TIP5_DIGEST])
+{
+    uint32_t s = t5_slot_of(key), i;
+    if (t5_pool_n >= T5_POOL_MAX)
+        return -1;
+    while ((uint32_t)(t5_tag[s] >> 32) == t5_gen)
+        s = (s + 1u) & (T5_SLOTS - 1u);
+    for (i = 0; i < TIP5_DIGEST; i++)
+        t5_pool[t5_pool_n][i] = d[i];
+    t5_key[s] = key;
+    t5_tag[s] = ((uint64_t)t5_gen << 32) | t5_pool_n;
+    return (int64_t)t5_pool_n++;
+}
+
+/* A node of a hashed tree: 1 a leaf whose digest is in out, 2 a pair of
+ * l and r (hash-ten-cell of their digests), 0 not taken (run the arm). */
+typedef int (*t5_node_fn)(noun n, uint64_t out[TIP5_DIGEST], noun *l, noun *r);
+
+/* Digest of the tree under root: iterative (any depth up to the stacks),
+ * memoised by noun word, so a shared subtree is hashed once, as the Hoon
+ * walk's ~+ does by value. 0 when a node is not taken or a table fills. */
+static int t5_tree(noun root, t5_node_fn fn, uint64_t out[TIP5_DIGEST])
+{
+    uint32_t sp = 0, dn = 0, i;
+    t5_begin();
+    t5_task[sp] = root;
+    t5_kind[sp++] = T5_VISIT;
+    while (sp > 0) {
+        noun n = t5_task[--sp];
+        uint64_t d[TIP5_DIGEST];
+        int64_t idx;
+        if (t5_kind[sp] == T5_VISIT) {
+            noun l, r;
+            int k;
+            idx = t5_memo_get(n);
+            if (idx < 0) {
+                k = fn(n, d, &l, &r);
+                if (k == 0)
+                    return 0;
+                if (k == 2) {
+                    if (sp + 3 > T5_STACK_MAX)
+                        return 0;
+                    t5_task[sp] = n;
+                    t5_kind[sp++] = T5_PAIR;
+                    t5_task[sp] = r;
+                    t5_kind[sp++] = T5_VISIT;
+                    t5_task[sp] = l;
+                    t5_kind[sp++] = T5_VISIT;
+                    continue;
+                }
+                if ((idx = t5_memo_put(n, d)) < 0)
+                    return 0;
+            }
+        } else {
+            uint64_t ten[TIP5_RATE];
+            uint32_t tl = t5_done[--dn], hd = t5_done[--dn];
+            for (i = 0; i < TIP5_DIGEST; i++) {
+                ten[i] = t5_pool[hd][i];
+                ten[TIP5_DIGEST + i] = t5_pool[tl][i];
+            }
+            tip5_hash10(ten, d);
+            if ((idx = t5_memo_put(n, d)) < 0)
+                return 0;
+        }
+        if (dn >= T5_STACK_MAX)
+            return 0;
+        t5_done[dn++] = (uint32_t)idx;
+    }
+    for (i = 0; i < TIP5_DIGEST; i++)
+        out[i] = t5_pool[t5_done[0]][i];
+    return 1;
+}
+
+/* hash-hashable-noun:digest-lib: a cell is the pair of its children; an
+ * atom is its leaf digest (tip5_atom_digest). */
+static int t5_noun_node(noun n, uint64_t out[TIP5_DIGEST], noun *l, noun *r)
+{
+    if (noun_is_cell(n)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
+        *l = c->head;
+        *r = c->tail;
+        return 2;
+    }
+    if (noun_is_direct(n)) {
+        uint64_t v = direct_val(n);
+        tip5_atom_digest(&v, 1, out);
+        return 1;
+    }
+    {
+        atom_t *a = atom_store_get(indirect_hash(n));
+        uint64_t len;
+        if (!a || a->size == 0)
+            return 0;
+        len = a->size;
+        while (len > 1 && a->limbs[len - 1] == 0)
+            len--;
+        tip5_atom_digest(a->limbs, len, out);
+        return 1;
+    }
+}
+
+/* hash-noun-varlen: hash-belts-list of [leaf-count leaves... dyck...].
+ * Three passes over the noun (count, leaves, Dyck word), each bounded by
+ * T5_VARLEN_MAX nodes; 0 if a leaf is not a belt or a bound is hit. */
+static int t5_noun_varlen(noun root, uint64_t out[TIP5_DIGEST])
+{
+    tip5_sponge_t sp;
+    uint64_t count = 0, seen = 0, v;
+    uint32_t top, pass;
+    tip5_varlen_init(&sp);
+    for (pass = 0; pass < 3; pass++) {
+        top = 0;
+        t5_task[top] = root;
+        t5_kind[top++] = T5_VISIT;
+        while (top > 0) {
+            noun n = t5_task[--top];
+            uint8_t kind = t5_kind[top];
+            if (++seen > 3ULL * T5_VARLEN_MAX)
+                return 0;
+            if (kind == T5_ONE) {
+                tip5_varlen_absorb(&sp, 1);
+                continue;
+            }
+            if (noun_is_cell(n)) {
+                cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
+                if (top + 3 > T5_STACK_MAX)
+                    return 0;
+                if (pass == 2)
+                    tip5_varlen_absorb(&sp, 0);
+                t5_task[top] = c->tail;
+                t5_kind[top++] = T5_VISIT;
+                if (pass == 2) {
+                    t5_task[top] = NOUN_ZERO;
+                    t5_kind[top++] = T5_ONE;
+                }
+                t5_task[top] = c->head;
+                t5_kind[top++] = T5_VISIT;
+            } else if (pass == 0) {
+                count++;
+            } else if (pass == 1) {
+                if (!t5_belt(n, &v))
+                    return 0;
+                tip5_varlen_absorb(&sp, v);
+            }
+        }
+        if (pass == 0) {
+            if (count >= TIP5_P)
+                return 0;
+            tip5_varlen_absorb(&sp, count);
+        }
+    }
+    tip5_varlen_finish(&sp, out);
+    return 1;
+}
+
+/* hash-hashable, for [%leaf p], [%hash p] (p a digest) and pairs. */
+static int t5_hashable_node(noun n, uint64_t out[TIP5_DIGEST], noun *l, noun *r)
+{
+    cell_t *c;
+    if (!noun_is_cell(n))
+        return 0;
+    c = (cell_t *)(uintptr_t)cell_ptr(n);
+    if (noun_is_cell(c->head)) {
+        *l = c->head;
+        *r = c->tail;
+        return 2;
+    }
+    if (noun_is_direct(c->head) && direct_val(c->head) == 1717658988ULL)  /* %leaf */
+        return t5_noun_varlen(c->tail, out);
+    if (noun_is_direct(c->head) && direct_val(c->head) == 1752392040ULL)  /* %hash */
+        return t5_digest(c->tail, out);
+    return 0;                                   /* %list, %mary: the arm */
+}
+
+int nock_tip5_digest(noun n, uint8_t out[TIP5_DIGEST_BYTES])
+{
+    uint64_t d[TIP5_DIGEST], limbs[6];
+    uint32_t i;
+    if (!t5_tree(n, t5_noun_node, d))
+        return 0;
+    tip5_digest_to_limbs(d, limbs);
+    for (i = 0; i < TIP5_DIGEST_BYTES; i++)
+        out[i] = (uint8_t)(limbs[i / 8] >> (8u * (i % 8)));
+    return 1;
+}
+
+/* hash-hashable-noun:digest-lib  sample = n */
+static noun jet_tip5_walk(noun core, const wilt_t *jets, sky_fn_t sky)
+{
+    uint64_t d[TIP5_DIGEST];
+    if (!t5_tree(slot(direct(6), core), t5_noun_node, d))
+        return jet_as_nock(core, jets, sky);
+    return t5_tuple(d);
+}
+
+/* hash-hashable:tip5  sample = h */
+static noun jet_tip5_hash_hashable(noun core, const wilt_t *jets, sky_fn_t sky)
+{
+    uint64_t d[TIP5_DIGEST];
+    noun h = slot(direct(6), core);
+    if (!t5_rounds_ok(core))
+        return jet_as_nock(core, jets, sky);
+    if (noun_is_cell(h)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(h);
+        if (noun_is_direct(c->head) && direct_val(c->head) == 1752392040ULL)
+            return c->tail;                     /* [%hash p]: p, as the arm */
+    }
+    if (!t5_tree(h, t5_hashable_node, d))
+        return jet_as_nock(core, jets, sky);
+    return t5_tuple(d);
+}
+
+/* hash-noun-varlen:tip5  sample = n */
+static noun jet_tip5_hash_noun_varlen(noun core, const wilt_t *jets, sky_fn_t sky)
+{
+    uint64_t d[TIP5_DIGEST];
+    if (!t5_rounds_ok(core) || !t5_noun_varlen(slot(direct(6), core), d))
+        return jet_as_nock(core, jets, sky);
+    return t5_tuple(d);
+}
+
+/* hash-ten-cell:tip5  sample = ten-cell: hash-10 of its ten leaves */
+static noun jet_tip5_hash_ten_cell(noun core, const wilt_t *jets, sky_fn_t sky)
+{
+    uint64_t ten[TIP5_RATE], d[TIP5_DIGEST];
+    noun stack[TIP5_RATE + 2];
+    uint32_t top = 0, k = 0;
+    if (!t5_rounds_ok(core))
+        return jet_as_nock(core, jets, sky);
+    stack[top++] = slot(direct(6), core);
+    while (top > 0) {
+        noun n = stack[--top];
+        if (noun_is_cell(n)) {
+            cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
+            if (top + 2 > TIP5_RATE + 2)
+                return jet_as_nock(core, jets, sky);
+            stack[top++] = c->tail;
+            stack[top++] = c->head;
+        } else if (k >= TIP5_RATE || !t5_belt(n, &ten[k++])) {
+            return jet_as_nock(core, jets, sky);
+        }
+    }
+    if (k != TIP5_RATE)
+        return jet_as_nock(core, jets, sky);
+    tip5_hash10(ten, d);
+    return t5_tuple(d);
+}
+
+/* hash-varlen of a list of belts; 0 if not one */
+static int t5_list_varlen(noun list, uint64_t d[TIP5_DIGEST])
+{
+    tip5_sponge_t sp;
+    uint64_t v;
+    tip5_varlen_init(&sp);
+    while (noun_is_cell(list)) {
+        cell_t *c = (cell_t *)(uintptr_t)cell_ptr(list);
+        if (!t5_belt(c->head, &v))
+            return 0;
+        tip5_varlen_absorb(&sp, v);
+        list = c->tail;
+    }
+    if (list != NOUN_ZERO)
+        return 0;
+    tip5_varlen_finish(&sp, d);
+    return 1;
+}
+
+/* hash-belts-list:tip5  sample = belts; product a digest */
+static noun jet_tip5_hash_belts_list(noun core, const wilt_t *jets, sky_fn_t sky)
+{
+    uint64_t d[TIP5_DIGEST];
+    if (!t5_rounds_ok(core) || !t5_list_varlen(slot(direct(6), core), d))
+        return jet_as_nock(core, jets, sky);
+    return t5_tuple(d);
+}
+
+/* hash-varlen:tip5  sample = input; product a list of five belts */
+static noun jet_tip5_hash_varlen(noun core, const wilt_t *jets, sky_fn_t sky)
+{
+    uint64_t d[TIP5_DIGEST];
+    if (!t5_rounds_ok(core) || !t5_list_varlen(slot(direct(6), core), d))
+        return jet_as_nock(core, jets, sky);
+    return t5_list(d, TIP5_DIGEST);
+}
+
+/* permutation:tip5  sample = sponge, sixteen melts */
+static noun jet_tip5_permutation(noun core, const wilt_t *jets, sky_fn_t sky)
+{
+    uint64_t s[TIP5_STATE];
+    noun list = slot(direct(6), core);
+    int i;
+    if (!t5_rounds_ok(core))
+        return jet_as_nock(core, jets, sky);
+    for (i = 0; i < TIP5_STATE; i++) {
+        cell_t *c;
+        if (!noun_is_cell(list))
+            return jet_as_nock(core, jets, sky);
+        c = (cell_t *)(uintptr_t)cell_ptr(list);
+        if (!t5_belt(c->head, &s[i]))
+            return jet_as_nock(core, jets, sky);
+        list = c->tail;
+    }
+    if (list != NOUN_ZERO)
+        return jet_as_nock(core, jets, sky);
+    tip5_permute(s);
+    return t5_list(s, TIP5_STATE);
+}
+
+/* digest-to-atom:tip5  sample = [a b c d e] */
+static noun jet_tip5_digest_to_atom(noun core, const wilt_t *jets, sky_fn_t sky)
+{
+    uint64_t d[TIP5_DIGEST], limbs[6];
+    noun n = slot(direct(6), core);
+    int i;
+    for (i = 0; i < TIP5_DIGEST - 1; i++) {
+        cell_t *c;
+        if (!noun_is_cell(n))
+            return jet_as_nock(core, jets, sky);
+        c = (cell_t *)(uintptr_t)cell_ptr(n);
+        if (!t5_u64(c->head, &d[i]))
+            return jet_as_nock(core, jets, sky);
+        n = c->tail;
+    }
+    if (!t5_u64(n, &d[TIP5_DIGEST - 1]))
+        return jet_as_nock(core, jets, sky);
+    tip5_digest_to_limbs(d, limbs);
+    return bn_normalize(limbs, 6);
+}
+
 /* ── Hot state ────────────────────────────────────────────────────────────── */
 
 /*
@@ -740,6 +1227,17 @@ static const char *const HOT_ONE[] = { "one", NULL };
 static const char *const HOT_TWO[] = { "two", "one", NULL };
 static const char *const HOT_TRI[] = { "tri", "two", "one", NULL };
 static const char *const HOT_QUA[] = { "qua", "tri", "two", "one", NULL };
+/* zeke's ++tip5 door, ~% %tip5-lib under misc-lib (zkvm-jetpack's TIP5_LIB) */
+static const char *const HOT_TIP5[] = {
+    "tip5-lib", "misc-lib", "ext-field", "zeke", "pen", "qua", "tri", "two",
+    "one", NULL
+};
+/* 1499kernel iec-types ++digest-lib, hung on ..stark-engine-jet-hook:z */
+static const char *const HOT_DIGEST[] = {
+    "digest-lib", "stark-engine", "pow", "fock-core", "stark-core",
+    "table-lib", "fri", "utils", "proof-lib", "misc-lib", "ext-field",
+    "zeke", "pen", "qua", "tri", "two", "one", NULL
+};
 
 static hot_entry_t hot_state[] = {
     /* arithmetic (Phase 5b) */
@@ -772,6 +1270,15 @@ static hot_entry_t hot_state[] = {
     /* Lite /state-hash (row 199): ++jam and ++shax */
     { 7168362, jet_jam, 0, "jam", HOT_TWO },
     { 2019649651, jet_shax, 0, "shax", HOT_TRI },
+    /* 1499kernel row 328 (d): the Tip5 arms ++digest calls, and its walk */
+    { 0, jet_tip5_hash_hashable, 0, "hash-hashable", HOT_TIP5 },
+    { 0, jet_tip5_hash_noun_varlen, 0, "hash-noun-varlen", HOT_TIP5 },
+    { 0, jet_tip5_hash_ten_cell, 0, "hash-ten-cell", HOT_TIP5 },
+    { 0, jet_tip5_hash_belts_list, 0, "hash-belts-list", HOT_TIP5 },
+    { 0, jet_tip5_hash_varlen, 0, "hash-varlen", HOT_TIP5 },
+    { 0, jet_tip5_permutation, 0, "permutation", HOT_TIP5 },
+    { 0, jet_tip5_digest_to_atom, 0, "digest-to-atom", HOT_TIP5 },
+    { 0, jet_tip5_walk, 0, "hash-hashable-noun", HOT_DIGEST },
     { 0, NULL, 0, NULL, NULL }     /* sentinel */
 };
 
@@ -1257,6 +1764,17 @@ static void fast_register(noun core, noun clue)
 /* jetcheck: while set, this one registered entry dispatches as plain Nock */
 static int g_fast_suppress = -1;
 void fast_suppress(int i) { g_fast_suppress = i; }
+/* tests/tip5: while bit h is set, hot entry h dispatches as plain Nock */
+static uint64_t g_fast_suppress_hot;
+void fast_suppress_hot(uint64_t mask) { g_fast_suppress_hot = mask; }
+int hot_index_of(noun label)
+{
+    int h;
+    for (h = 0; hot_state[h].fn != NULL && h < 64; h++)
+        if (hot_name_is(label, hot_state[h].name))
+            return h;
+    return -1;
+}
 void fast_epoch_bump(void) { g_fast_epoch++; }
 /* Only entries registered in the current probe poke still own a live core
  * (an earlier poke's scratch heap has been reset). */
@@ -1279,7 +1797,8 @@ static jet_fn_t fast_match(noun core)
     int i;
     for (i = 0; i < g_fast_len; i++) {
 #if defined(I3_L1_PROBE)
-        if (i == g_fast_suppress)
+        if (i == g_fast_suppress
+            || ((g_fast_suppress_hot >> g_fast_reg[i].hot) & 1u))
             continue;
 #endif
         if ((g_fast_reg[i].battery == battery

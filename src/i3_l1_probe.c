@@ -604,13 +604,14 @@ static int do_peek(noun path, const char *name)
     return ok;
 }
 
-/* Row 199: the state hash, its event number and its cost. The jam runs in
- * scratch; persist_free_delta shows whether it touched the persist heap. */
+/* Row 199: the state hash, its event number and its cost. The digest (a Tip5
+ * digest since row 328, 80 hex digits) runs in scratch; persist_free_delta
+ * shows whether it touched the persist heap. */
 static int do_state_hash(const char *name)
 {
     static const char hexd[] = "0123456789abcdef";
     i3_host_result_t r;
-    uint8_t hash[32];
+    uint8_t hash[I3_DIGEST_BYTES];
     uint64_t event = 0, scratch0, free0;
     uint32_t i;
     int ok;
@@ -624,7 +625,7 @@ static int do_state_hash(const char *name)
         uart_puts(" event=");
         put_u64(event);
         uart_puts(" hash=");
-        for (i = 0; i < 32; i++) {
+        for (i = 0; i < I3_DIGEST_BYTES; i++) {
             uart_putc(hexd[hash[i] >> 4]);
             uart_putc(hexd[hash[i] & 15u]);
         }
@@ -734,6 +735,32 @@ static int run_plan(noun plan)
             if (noun_is_cell(payload)) {
                 cell_t *p = (cell_t *)(uintptr_t)cell_ptr(payload);
                 (void)do_call(p->head, p->tail, name, 1);
+            }
+        } else if (tag_is(tag, "poke-without")) {
+            /* [labels cause]: the poke with those hot entries as Nock */
+            if (noun_is_cell(payload)) {
+                cell_t *p = (cell_t *)(uintptr_t)cell_ptr(payload);
+                uint64_t mask = 0;
+                noun l = p->head;
+                int ok = 1;
+                while (noun_is_cell(l)) {
+                    cell_t *c = (cell_t *)(uintptr_t)cell_ptr(l);
+                    int h = hot_index_of(c->head);
+                    if (h < 0)
+                        ok = 0;
+                    else
+                        mask |= 1ULL << h;
+                    l = c->tail;
+                }
+                if (!ok) {
+                    uart_puts("I3L1 without name=");
+                    uart_puts(name);
+                    uart_puts(" unknown-label=yes\r\n");
+                } else {
+                    fast_suppress_hot(mask);
+                    (void)do_poke(p->tail, name);
+                    fast_suppress_hot(0);
+                }
             }
         } else if (tag_is(tag, "poke-jetcheck")) {
             if (noun_is_cell(payload)) {

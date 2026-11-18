@@ -681,7 +681,7 @@ else
 $(error unsupported DIGITAL_OUT_BACKEND='$(DIGITAL_OUT_BACKEND)' (bcm2838, fake))
 endif
 
-NATIVE_OBJS = sha256.o
+NATIVE_OBJS = sha256.o tip5.o
 ifeq ($(M24_NATIVE),1)
 NATIVE_OBJS += virtio_net.o aethernet_native.o
 endif
