@@ -126,6 +126,9 @@ uint64_t hot_reverse_label(jet_fn_t fn);
 
 int      hot_entry_count(void);
 uint64_t hot_entry_label(int i);
+const char *hot_entry_name(int i);
+/* hot_name_is: is atom `label` the cord `name` (any width)? */
+int      hot_name_is(noun label, const char *name);
 uint64_t hot_entry_hits(int i);
 void     hot_hits_reset(void);
 
@@ -145,11 +148,11 @@ noun     fast_chum_at(int i);
 #if defined(I3_L1_PROBE)
 noun     fast_core_lookup(noun label);
 int      fast_core_count(void);
-uint64_t fast_core_label(int i);
+const char *fast_core_name(int i);
 int      fast_pull_hot(void);
 void     fast_suppress(int i);
 void     fast_epoch_bump(void);
-int      fast_reg_entry(int i, uint64_t *label, noun *core);
+int      fast_reg_entry(int i, const char **label, noun *core);
 #endif
 
 /*

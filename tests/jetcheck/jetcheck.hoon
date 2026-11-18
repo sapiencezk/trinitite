@@ -2,8 +2,9 @@
 ::
 ::  One poke, %go, builds the @rs door's add/sub/mul/div/lth cores *before*
 ::  any integer core with the same label, then the integer arithmetic, bit
-::  and list cores. Under label-only %fast binding the rs cores take the
-::  integer jets; under label + parent-path binding they do not. The probe's
+::  and list cores, and ++jam and ++shax. Under label-only %fast binding
+::  the rs cores take the integer jets; under label + parent-path binding
+::  they do not. The probe's
 ::  poke-jetcheck step then checks every registered jet against its Hoon.
 ::  The rs operands are +0 so the rs arms stay cheap when they run as Nock.
 ::
@@ -45,5 +46,6 @@
         (con 5 3)  (dis 5 3)  (mix 5 3)
         (lent ~[1 2 3])  (flop ~[1 2 3])  (weld ~[1 2] ~[3])
     ==
-  [~[[%r [f i]]] state(n +(n.state))]
+  =/  s  [(jam [1 2]) (shax 'abc')]
+  [~[[%r [f i s]]] state(n +(n.state))]
 --

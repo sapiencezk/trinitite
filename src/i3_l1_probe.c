@@ -163,14 +163,17 @@ static void print_pulled(void)
     uart_puts("\r\n");
     for (i = 0; i < n; i++) {
         uart_puts("I3L1 pulled_label noun=");
-        print_name(direct(fast_core_label(i)));
+        uart_puts(fast_core_name(i));
         uart_puts("\r\n");
     }
     for (i = 0; i < hot; i++) {
-        if (fast_core_lookup(direct(hot_entry_label(i))) != NOUN_ZERO)
+        int j, have = 0;
+        for (j = 0; j < n && !have; j++)
+            have = fast_core_name(j) == hot_entry_name(i);
+        if (have)
             continue;
         uart_puts("I3L1 missing_label noun=");
-        print_name(direct(hot_entry_label(i)));
+        uart_puts(hot_entry_name(i));
         uart_puts("\r\n");
     }
 }
@@ -185,7 +188,7 @@ static void print_jet_hits(void)
         if (hits == 0)
             continue;
         uart_puts(" ");
-        print_name(direct(hot_entry_label(i)));
+        uart_puts(hot_entry_name(i));
         uart_puts("=");
         put_u64(hits);
         any = 1;
@@ -433,7 +436,15 @@ static int do_call(noun label, noun sample, const char *name, int raw)
 #define JC_CRASH 1
 #define JC_BUDGET 2
 
-static int jc_slam(noun core, noun sample, noun *out)
+/* The jet side runs under the slam caps. The Hoon side is the reference,
+ * not a production path: it gets call-nock's diagnostic cell bound and 64x
+ * the ops (++jam and ++shax as plain Hoon take millions of ops). */
+#define JC_HOON_OPS (I3_SLAM_MAX_OPS * 64ULL)
+#define JC_HOON_CELLS 1300000ULL
+
+static uint64_t g_jc_reason;   /* the last budget abort's reason */
+
+static int jc_slam(noun core, noun sample, noun *out, int hoon)
 {
     noun edited, fol, product;
     jmp_buf saved;
@@ -443,12 +454,16 @@ static int jc_slam(noun core, noun sample, noun *out)
         || !nest(direct(2), fol, &fol)
         || !nest(direct(9), fol, &fol))
         return JC_CRASH;
-    nock_budget_set_limits(I3_SLAM_MAX_OPS, I3_SLAM_MAX_CELLS);
+    if (hoon)
+        nock_budget_set_limits(JC_HOON_OPS, JC_HOON_CELLS);
+    else
+        nock_budget_set_limits(I3_SLAM_MAX_OPS, I3_SLAM_MAX_CELLS);
     nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
     __builtin_memcpy(saved, nock_abort, sizeof saved);
     jumped = setjmp(nock_abort);
     if (jumped != 0) {
         int budget = nock_budget_abort_reason() != 0;
+        g_jc_reason = nock_budget_abort_reason();
         __builtin_memcpy(nock_abort, saved, sizeof saved);
         nock_budget_finish();
         return budget ? JC_BUDGET : JC_CRASH;
@@ -460,15 +475,20 @@ static int jc_slam(noun core, noun sample, noun *out)
     return JC_OK;
 }
 
-static void jc_print(int st, noun n)
+static void jc_print(int st, noun n, uint64_t reason)
 {
-    if (st == JC_OK)
+    if (st == JC_OK) {
         print_noun(n, 0);
-    else
-        uart_puts(st == JC_CRASH ? "crash" : "budget");
+    } else if (st == JC_CRASH) {
+        uart_puts("crash");
+    } else {
+        /* nock.c's reasons: 1 ops, 2 wall, 3 cells, 4 stack */
+        uart_puts("budget:");
+        put_u64(reason);
+    }
 }
 
-static noun jc_vectors(noun payload, uint64_t cord)
+static noun jc_vectors(noun payload, const char *label)
 {
     while (noun_is_cell(payload)) {
         cell_t *c = (cell_t *)(uintptr_t)cell_ptr(payload);
@@ -476,7 +496,7 @@ static noun jc_vectors(noun payload, uint64_t cord)
         if (!noun_is_cell(c->head))
             continue;
         cell_t *e = (cell_t *)(uintptr_t)cell_ptr(c->head);
-        if (noun_is_direct(e->head) && direct_val(e->head) == cord)
+        if (hot_name_is(e->head, label))
             return e->tail;
     }
     return NOUN_ZERO;
@@ -487,25 +507,26 @@ static void do_jetcheck(noun payload, const char *name)
     int i, n = fast_reg_count();
     uint64_t checked = 0, match = 0, mismatch = 0, inconclusive = 0, bare = 0;
     for (i = 0; i < n; i++) {
-        uint64_t cord;
+        const char *label;
         noun core, vec;
-        if (!fast_reg_entry(i, &cord, &core)) {
+        if (!fast_reg_entry(i, &label, &core)) {
             uart_puts("I3L1 jetcheck_stale entry=");
             put_u64((uint64_t)i);
             uart_puts("\r\n");
             continue;
         }
-        vec = jc_vectors(payload, cord);
+        vec = jc_vectors(payload, label);
         if (!noun_is_cell(vec)) {
             bare++;
             uart_puts("I3L1 jetcheck_unvectored label=");
-            print_name(direct(cord));
+            uart_puts(label);
             uart_puts("\r\n");
             continue;
         }
         while (noun_is_cell(vec)) {
             cell_t *v = (cell_t *)(uintptr_t)cell_ptr(vec);
             noun jet_p = NOUN_ZERO, hoon_p = NOUN_ZERO;
+            uint64_t rj, rh;
             int sj, sh;
             const char *verdict;
             vec = v->tail;
@@ -513,9 +534,11 @@ static void do_jetcheck(noun payload, const char *name)
             heap_set_mode(HEAP_MODE_SCRATCH);
             mark = heap_scratch_mark();
             fast_suppress(-1);
-            sj = jc_slam(core, v->head, &jet_p);
+            sj = jc_slam(core, v->head, &jet_p, 0);
+            rj = g_jc_reason;
             fast_suppress(i);
-            sh = jc_slam(core, v->head, &hoon_p);
+            sh = jc_slam(core, v->head, &hoon_p, 1);
+            rh = g_jc_reason;
             fast_suppress(-1);
             checked++;
             if (sj == JC_BUDGET || sh == JC_BUDGET) {
@@ -531,7 +554,7 @@ static void do_jetcheck(noun payload, const char *name)
             uart_puts("I3L1 jetcheck name=");
             uart_puts(name);
             uart_puts(" label=");
-            print_name(direct(cord));
+            uart_puts(label);
             uart_puts(" entry=");
             put_u64((uint64_t)i);
             uart_puts(" verdict=");
@@ -539,9 +562,9 @@ static void do_jetcheck(noun payload, const char *name)
             uart_puts(" sample=");
             print_noun(v->head, 0);
             uart_puts(" jet=");
-            jc_print(sj, jet_p);
+            jc_print(sj, jet_p, rj);
             uart_puts(" hoon=");
-            jc_print(sh, hoon_p);
+            jc_print(sh, hoon_p, rh);
             uart_puts("\r\n");
             (void)heap_scratch_rewind(mark);
         }

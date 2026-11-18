@@ -6,7 +6,7 @@ under QEMU and runs one `poke-jetcheck` step: the %go poke constructs the @rs
 door's add/sub/mul/div/lth cores before the integer ones, then every %fast
 entry registered in that poke is slammed on the vectors below twice -- with
 its jet and with its own Nock battery (that entry suppressed) -- and the
-products must be equal.
+products must be equal. tests/jetcheck/build.sh rebuilds jetcheck.jam.gz.
 
   python3 tests/jetcheck/run.py            # expect: PASS
   python3 tests/jetcheck/run.py --plant-rsh  # rebuild with L3's raw-count rsh; expect: FAIL
@@ -16,7 +16,7 @@ products must be equal.
 Fails if any vector mismatches or is inconclusive (budget), or if a hot label
 the kernel uses was not registered and checked.
 """
-import argparse, gzip, re, subprocess, sys, tempfile, time
+import argparse, gzip, hashlib, re, subprocess, sys, tempfile, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -58,12 +58,53 @@ VECTORS = {
     "lent": [L123, 0],
     "flop": [L123, 0],
     "weld": [(lst(1, 2), lst(3)), (0, L123)],
+    # jam: backrefs (a repeated cell, a repeated atom), a wide atom
+    "jam": [0, 1, (1, 2), ((1, 2), (1, 2)), (2**70, 2**70), ((1, 2), 3)],
+    "shax": [0, cord("abc"), 2**200 + 5, 0xFF00],
 }
+
+
+def shax(a):
+    """++shax: SHA-256 of the atom's (met 3) little-endian bytes, read back
+    as a little-endian atom."""
+    b = a.to_bytes((a.bit_length() + 7) // 8, "little")
+    return int.from_bytes(hashlib.sha256(b).digest(), "little")
+
+
+# ++shax as plain Hoon recurses deeper than the lite node's 1,024-frame
+# evaluator stack (I3_SLAM_MAX_STACK), so its Hoon side ends in budget
+# reason 4 on every vector. For such a label alone, a Hoon side stopped by
+# the stack is replaced by a host reference (hashlib for ++shax). Any other
+# inconclusive vector still fails the run.
+REFERENCE = {"shax": shax}
 # Registered labels that need a gate or trap as sample are reported as
 # unvectored and do not fail the run.
 UNVECTORED_OK = {"turn", "mole"}
 # Labels the %go poke must exercise (and so register and check).
 REQUIRED = set(VECTORS)
+
+
+def atom(text):
+    return int(text, 16) if text.startswith("0x") else int(text)
+
+
+def reference_checks(rows):
+    """For each REFERENCE label, the vectors whose Hoon side hit the stack
+    bound: (number settled against the host reference, number wrong)."""
+    settled = wrong = 0
+    for label, ref in REFERENCE.items():
+        lines = [l for l in rows if l.startswith("I3L1 jetcheck name=")
+                 and f" label={label} " in l]
+        for line, sample in zip(lines, VECTORS[label]):
+            if "verdict=inconclusive" not in line or " hoon=budget:4" not in line:
+                continue
+            jet = re.search(r" jet=(\S+) hoon=", line).group(1)
+            ok = not jet.startswith(("crash", "budget")) and atom(jet) == ref(sample)
+            print(f"I3L1 jetcheck_reference label={label} sample={sample!r} "
+                  f"verdict={'match' if ok else 'mismatch'}")
+            settled += ok
+            wrong += not ok
+    return settled, wrong
 
 
 def build(plant, label_only=False):
@@ -131,16 +172,19 @@ def main():
     problems = []
     if not summ:
         problems.append("no jetcheck_summary (terminal=%s)" % re.findall(r"terminal=(\S+)", text))
-    dups = sorted(set(re.findall(r"I3H fast_dup label=(\d+)", text)))
+    dups = sorted(set(re.findall(r"I3H fast_dup label=(\S+)", text)))
     if dups:
-        problems.append("duplicate hot label bound: " + " ".join(
-            int(d).to_bytes(8, "little").rstrip(b"\0").decode("ascii", "replace") for d in dups))
+        problems.append("duplicate hot label bound: " + " ".join(dups))
     else:
         f = dict(re.findall(r"(\w+)=(\d+)", summ[0]))
         if int(f["mismatch"]):
             problems.append(f"{f['mismatch']} mismatch(es)")
-        if int(f["inconclusive"]):
-            problems.append(f"{f['inconclusive']} inconclusive")
+        settled, wrong = reference_checks(rows)
+        left = int(f["inconclusive"]) - settled
+        if wrong:
+            problems.append(f"{wrong} host-reference mismatch(es)")
+        if left:
+            problems.append(f"{left} inconclusive")
     missing = REQUIRED - checked
     if missing:
         problems.append("hot labels not registered/checked: " + " ".join(sorted(missing)))
