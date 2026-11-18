@@ -1232,11 +1232,12 @@ static const char *const HOT_TIP5[] = {
     "tip5-lib", "misc-lib", "ext-field", "zeke", "pen", "qua", "tri", "two",
     "one", NULL
 };
-/* 1499kernel iec-types ++digest-lib, hung on ..stark-engine-jet-hook:z */
+/* 1499kernel iec-types ++digest-lib, hung beside ++tip5 on ..tip5:z
+ * (misc-lib): since 1499kernel row 332 (2) the kernel imports only
+ * common/ztd/three of zeke, so the prover cores above it are gone. */
 static const char *const HOT_DIGEST[] = {
-    "digest-lib", "stark-engine", "pow", "fock-core", "stark-core",
-    "table-lib", "fri", "utils", "proof-lib", "misc-lib", "ext-field",
-    "zeke", "pen", "qua", "tri", "two", "one", NULL
+    "digest-lib", "misc-lib", "ext-field", "zeke", "pen", "qua", "tri",
+    "two", "one", NULL
 };
 
 static hot_entry_t hot_state[] = {
