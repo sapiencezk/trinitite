@@ -472,7 +472,13 @@ static noun jet_rsh(noun core, const wilt_t *jets, sky_fn_t sky) {
     noun bite = slot(direct(12), core);
     noun a = slot(direct(13), core);
     if (!noun_is_atom(a)) nock_crash("jet rsh: non-atom");
+#if defined(I3_PLANT_RSH_RAW)
+    /* test plant (L3's defect): the bite's bloq taken as a raw bit count */
+    return bn_rsh(a, jet_atom_u64(noun_is_cell(bite) ? slot(direct(2), bite) : bite,
+                                  "jet rsh: bad bite"));
+#else
     return bn_rsh(a, bite_bits(bite, "jet rsh: bad bite"));
+#endif
 }
 
 /* %con — bitwise OR (Hoon con) */
@@ -710,47 +716,88 @@ static noun jet_shax(noun core, const wilt_t *jets, sky_fn_t sky) {
  * SKA nock_op9_continue: Forth dictionary (find_by_cord) first, then C.
  * Prefer C jets for production KERNEL path; Forth may shadow in REPL/SKA.
  */
-typedef struct { uint64_t label_cord; jet_fn_t fn; uint64_t hits; } hot_entry_t;
+/*
+ * %fast binding is by label *and* parent path, as NockVM's hot state
+ * (nockvm jets/hot.rs URBIT_HOT_STATE, cold.rs Batteries): `parents` lists
+ * the chums from the arm's parent core up to, not including, the root core
+ * [%k 138], which every path ends in; a label or parent may be any cord, of
+ * any length. An entry with no parents (%eq) never binds by %fast. %wild
+ * dispatch (hot_lookup) stays label-keyed: it is already gated by
+ * sock_match, and only labels of at most 8 bytes have a label_cord.
+ */
+#define HOT_NAME_MAX 32    /* longest label or parent name, in bytes */
+#define HOT_K 107ULL       /* root chum [%k 138] */
+#define HOT_K_VER 138ULL
+typedef struct {
+    uint64_t label_cord;           /* %wild key; 0: no %wild binding */
+    jet_fn_t fn;
+    uint64_t hits;
+    const char *name;              /* the arm's label */
+    const char *const *parents;    /* parent first, NULL-terminated; NULL: no %fast */
+} hot_entry_t;
+
+static const char *const HOT_ONE[] = { "one", NULL };
+static const char *const HOT_TWO[] = { "two", "one", NULL };
+static const char *const HOT_TRI[] = { "tri", "two", "one", NULL };
+static const char *const HOT_QUA[] = { "qua", "tri", "two", "one", NULL };
 
 static hot_entry_t hot_state[] = {
     /* arithmetic (Phase 5b) */
-    { 6514020, jet_dec, 0 },   /* %dec */
-    { 6579297, jet_add, 0 },   /* %add */
-    { 6452595, jet_sub, 0 },   /* %sub */
-    { 7107949, jet_mul, 0 },   /* %mul */
-    { 6845548, jet_lth, 0 },   /* %lth */
-    { 6845543, jet_gth, 0 },   /* %gth */
-    { 6648940, jet_lte, 0 },   /* %lte */
-    { 6648935, jet_gte, 0 },   /* %gte */
-    { 7760228, jet_div, 0 },   /* %div */
-    { 6582125, jet_mod, 0 },   /* %mod */
+    { 6514020, jet_dec, 0, "dec", HOT_ONE },
+    { 6579297, jet_add, 0, "add", HOT_ONE },
+    { 6452595, jet_sub, 0, "sub", HOT_ONE },
+    { 7107949, jet_mul, 0, "mul", HOT_ONE },
+    { 6845548, jet_lth, 0, "lth", HOT_ONE },
+    { 6845543, jet_gth, 0, "gth", HOT_ONE },
+    { 6648940, jet_lte, 0, "lte", HOT_ONE },
+    { 6648935, jet_gte, 0, "gte", HOT_ONE },
+    { 7760228, jet_div, 0, "div", HOT_ONE },
+    { 6582125, jet_mod, 0, "mod", HOT_ONE },
     /* WP3 structural / list / bit */
-    { 29029,       jet_eq,   0 },  /* %eq   */
-    { 6845292,     jet_lsh,  0 },  /* %lsh  */
-    { 6845298,     jet_rsh,  0 },  /* %rsh  */
-    { 7237475,     jet_con,  0 },  /* %con  */
-    { 7563620,     jet_dis,  0 },  /* %dis  */
-    { 7891309,     jet_mix,  0 },  /* %mix  */
-    { 7364963,     jet_cap,  0 },  /* %cap  */
-    { 7561581,     jet_mas,  0 },  /* %mas  */
-    { 6776176,     jet_peg,  0 },  /* %peg  */
-    { 1953391980,  jet_lent, 0 },  /* %lent */
-    { 1886350438,  jet_flop, 0 },  /* %flop */
-    { 1684825463,  jet_weld, 0 },  /* %weld */
+    { 29029, jet_eq, 0, "eq", NULL },
+    { 6845292, jet_lsh, 0, "lsh", HOT_TWO },
+    { 6845298, jet_rsh, 0, "rsh", HOT_TWO },
+    { 7237475, jet_con, 0, "con", HOT_TWO },
+    { 7563620, jet_dis, 0, "dis", HOT_TWO },
+    { 7891309, jet_mix, 0, "mix", HOT_TWO },
+    { 7364963, jet_cap, 0, "cap", HOT_ONE },
+    { 7561581, jet_mas, 0, "mas", HOT_ONE },
+    { 6776176, jet_peg, 0, "peg", HOT_ONE },
+    { 1953391980, jet_lent, 0, "lent", HOT_TWO },
+    { 1886350438, jet_flop, 0, "flop", HOT_TWO },
+    { 1684825463, jet_weld, 0, "weld", HOT_TWO },
     /* L1: honk %fast labels the R1 jam actually takes (deliverable 2) */
-    { 1852994932,  jet_turn, 0 },  /* %turn */
-    { 1701605229,  jet_mole, 0 },  /* %mole */
+    { 1852994932, jet_turn, 0, "turn", HOT_TWO },
+    { 1701605229, jet_mole, 0, "mole", HOT_QUA },
     /* Lite /state-hash (row 199): ++jam and ++shax */
-    { 7168362,     jet_jam,  0 },  /* %jam  */
-    { 2019649651,  jet_shax, 0 },  /* %shax */
-    { 0, NULL, 0 }                 /* sentinel */
+    { 7168362, jet_jam, 0, "jam", HOT_TWO },
+    { 2019649651, jet_shax, 0, "shax", HOT_TRI },
+    { 0, NULL, 0, NULL, NULL }     /* sentinel */
 };
+
+/* Is atom `label` the cord `name`? Any width: a label wider than
+ * HOT_NAME_MAX bytes is never a hot name. */
+int hot_name_is(noun label, const char *name)
+{
+    uint8_t b[HOT_NAME_MAX + 1];
+    uint32_t i;
+    if (!name || !noun_is_atom(label)
+        || !noun_atom_read_fixed(label, b, sizeof b))
+        return 0;
+    for (i = 0; name[i] != 0; i++)
+        if (i >= HOT_NAME_MAX || b[i] != (uint8_t)name[i])
+            return 0;
+    for (; i < sizeof b; i++)
+        if (b[i] != 0)
+            return 0;
+    return 1;
+}
 
 jet_fn_t hot_lookup(noun label) {
     if (!noun_is_direct(label)) return NULL;
     uint64_t cord = direct_val(label);
     for (int i = 0; hot_state[i].fn != NULL; i++) {
-        if (hot_state[i].label_cord == cord)
+        if (hot_state[i].label_cord != 0 && hot_state[i].label_cord == cord)
             return hot_state[i].fn;
     }
     return NULL;
@@ -787,6 +834,11 @@ uint64_t hot_entry_label(int i)
     return hot_state[i].label_cord;
 }
 
+const char *hot_entry_name(int i)
+{
+    return hot_state[i].name;
+}
+
 uint64_t hot_entry_hits(int i)
 {
     return hot_state[i].hits;
@@ -804,11 +856,33 @@ void hot_hits_reset(void)
 
 typedef struct {
     noun battery;
-    uint64_t label_cord;
+    int hot;       /* hot_state index: a hot path binds once */
     jet_fn_t fn;
+    int cold;      /* g_fast_cold entry: parent path for the dispatch check */
+#if defined(I3_L1_PROBE)
+    noun core;     /* the core that registered: jetcheck calls it */
+    uint64_t epoch; /* probe poke in which it registered (core lifetime) */
+#endif
 } fast_reg_t;
 
+#define FAST_COLD_MAX 1024
+typedef struct {
+    noun battery;
+    noun chum;
+    int parent;            /* index into g_fast_cold, -1 for a root */
+    uint64_t parent_axis;  /* 0 for a root */
+    int hot;               /* hot_state index of this path, or -1 */
+} fast_cold_t;
+static fast_cold_t g_fast_cold[FAST_COLD_MAX];
+static int g_fast_cold_n;
+static uint64_t g_fast_cold_dropped;   /* full table, parent unknown, scratch */
+static uint64_t g_fast_heap_gen;       /* heap_persist_generation() at fill */
+static uint64_t g_fast_invalidations;  /* tables dropped on a heap change */
+static uint64_t g_fast_dups;           /* refused second bindings of a hot label */
 static fast_reg_t g_fast_reg[FAST_REG_MAX];
+#if defined(I3_L1_PROBE)
+static uint64_t g_fast_epoch;
+#endif
 static int g_fast_len;
 static uint64_t g_fast_clues;
 static noun g_fast_first_clue;
@@ -818,7 +892,7 @@ static noun g_fast_chums[FAST_CHUM_LOG];
 static int g_fast_chum_n;
 #if defined(I3_L1_PROBE)
 static noun g_fast_first_core;
-typedef struct { uint64_t label_cord; noun core; } fast_core_t;
+typedef struct { int hot; noun core; } fast_core_t;
 static fast_core_t g_fast_cores[FAST_REG_MAX];
 static int g_fast_core_n;
 static noun g_fast_walk[FAST_CHUM_LOG];
@@ -830,6 +904,11 @@ static int g_pull_n;
 void fast_reset(void)
 {
     g_fast_len = 0;
+    g_fast_cold_n = 0;
+    g_fast_cold_dropped = 0;
+    g_fast_invalidations = 0;
+    g_fast_dups = 0;
+    g_fast_heap_gen = heap_persist_generation();
     g_fast_clues = 0;
     g_fast_first_clue = NOUN_ZERO;
     g_fast_first_ok = 0;
@@ -849,13 +928,172 @@ int fast_first_clue_ok(void) { return g_fast_first_ok; }
 noun fast_first_clue(void) { return g_fast_first_clue; }
 
 /*
- * honk %fast clue after evaluation is [chum parent-formula hooks].
- * Register the constructed core's battery against chum if chum is hot.
- * First battery per label wins, so later same-name cores (rs/rd add, …)
- * are not stolen by the integer jet.
+ * honk %fast clue after evaluation is [chum parent-formula hooks], with
+ * parent-formula [0 axis] (the parent core at that axis of this core) or
+ * [1 0] for a root. Like NockVM's cold state, every %fast core is recorded
+ * with its parent; a core whose parent was never registered gets no entry.
+ * A core binds a hot jet only when its chum *and* its whole parent path
+ * equal a hot_state path, so a same-label arm in another door (rs/rd add,
+ * ld add, ave weld, …) can never take the integer jet, whichever core is
+ * built first. Dispatch re-checks the parent batteries (NockVM warm state).
  */
 int fast_chum_count(void) { return g_fast_chum_n; }
 noun fast_chum_at(int i) { return g_fast_chums[i]; }
+
+
+int fast_cold_count(void) { return g_fast_cold_n; }
+uint64_t fast_invalidations(void) { return g_fast_invalidations; }
+uint64_t fast_dups(void) { return g_fast_dups; }
+
+#if defined(I3_HOST)
+static void fast_put_u64(uint64_t n)
+{
+    char b[20];
+    int k = 0;
+    do { b[k++] = (char)('0' + n % 10); n /= 10; } while (n);
+    while (k) uart_putc(b[--k]);
+}
+#define uart_put_u64 fast_put_u64
+#endif
+
+/* T1: a dropped core loses its jet silently, so say so in every build.
+ * Printed on the 1st, 2nd, 4th, 8th, ... drop. */
+static void fast_drop(const char *why)
+{
+    g_fast_cold_dropped++;
+#if defined(I3_HOST)
+    if ((g_fast_cold_dropped & (g_fast_cold_dropped - 1)) == 0) {
+        uart_puts("I3H fast_cold_dropped n=");
+        uart_put_u64(g_fast_cold_dropped);
+        uart_puts(" reason=");
+        uart_puts(why);
+        uart_puts("\r\n");
+    }
+#else
+    (void)why;
+#endif
+}
+
+/* T3: the cold/hot tables hold battery and chum pointers. Scratch cells are
+ * never stored, nor cells made inside a noun_tx (fast_register refuses
+ * both); persist cells are trusted only while the persist heap's generation
+ * (noun.c: reset, flip, persist-tx abort, init) is the one the tables were
+ * filled in. */
+static void fast_tables_check(void)
+{
+    uint64_t gen = heap_persist_generation();
+    if (gen == g_fast_heap_gen)
+        return;
+    if (g_fast_cold_n != 0 || g_fast_len != 0)
+        g_fast_invalidations++;
+    g_fast_cold_n = 0;
+    g_fast_len = 0;
+    g_fast_heap_gen = gen;
+}
+int fast_cold_entry(int i, noun *chum, int *parent, uint64_t *axis)
+{
+    if (i < 0 || i >= g_fast_cold_n)
+        return 0;
+    *chum = g_fast_cold[i].chum;
+    *parent = g_fast_cold[i].parent;
+    *axis = g_fast_cold[i].parent_axis;
+    return 1;
+}
+uint64_t fast_cold_dropped(void) { return g_fast_cold_dropped; }
+
+/* slot without crashing: 0 if the axis leaves the tree */
+static int fast_slot(uint64_t a, noun subject, noun *out)
+{
+    int depth = 0, i;
+    uint64_t t = a;
+    if (a == 0)
+        return 0;
+    while (t > 1) { t >>= 1; depth++; }
+    for (i = depth - 1; i >= 0; i--) {
+        cell_t *c;
+        if (!noun_is_cell(subject))
+            return 0;
+        c = (cell_t *)(uintptr_t)cell_ptr(subject);
+        subject = ((a >> i) & 1) ? c->tail : c->head;
+    }
+    *out = subject;
+    return 1;
+}
+
+static int fast_battery_is(noun a, noun b)
+{
+    return a == b || noun_eq(a, b);
+}
+
+/* index of the cold entry whose battery is `battery`, or -1 */
+static int fast_cold_find(noun battery)
+{
+    int i;
+    for (i = g_fast_cold_n - 1; i >= 0; i--)   /* pointer pass first */
+        if (g_fast_cold[i].battery == battery)
+            return i;
+    for (i = g_fast_cold_n - 1; i >= 0; i--)
+        if (noun_eq(g_fast_cold[i].battery, battery))
+            return i;
+    return -1;
+}
+
+static int fast_is_root_chum(noun chum)
+{
+    cell_t *c;
+    if (!noun_is_cell(chum))
+        return 0;
+    c = (cell_t *)(uintptr_t)cell_ptr(chum);
+    return noun_is_direct(c->head) && direct_val(c->head) == HOT_K
+        && noun_is_direct(c->tail) && direct_val(c->tail) == HOT_K_VER;
+}
+
+/* hot_state index whose label and parent path are exactly cold entry e's
+ * chum and parent chain (ending in the root [%k 138]), or -1. Computed once,
+ * when e is recorded: a cold entry's chain never changes. */
+static int fast_hot_for(int e)
+{
+    int h;
+    for (h = 0; hot_state[h].fn != NULL; h++) {
+        const char *const *p = hot_state[h].parents;
+        int k = 0, cur;
+        if (p == NULL || !hot_name_is(g_fast_cold[e].chum, hot_state[h].name))
+            continue;
+#if defined(I3_PLANT_LABEL_ONLY)
+        /* test plant: the pre-fix rule, label only (T2's check must fire) */
+        return h;
+#endif
+        cur = g_fast_cold[e].parent;
+        while (p[k] != NULL && cur >= 0
+               && hot_name_is(g_fast_cold[cur].chum, p[k])) {
+            cur = g_fast_cold[cur].parent;
+            k++;
+        }
+        if (p[k] != NULL || cur < 0)
+            continue;
+        if (g_fast_cold[cur].parent == -1
+            && fast_is_root_chum(g_fast_cold[cur].chum))
+            return h;
+    }
+    return -1;
+}
+
+/* NockVM warm-state check: the core's parents, by axis, have the batteries
+ * the cold entry recorded, all the way to the root. */
+static int fast_parents_match(noun core, int e)
+{
+    while (g_fast_cold[e].parent >= 0) {
+        noun up;
+        if (!fast_slot(g_fast_cold[e].parent_axis, core, &up) || !noun_is_cell(up))
+            return 0;
+        e = g_fast_cold[e].parent;
+        if (!fast_battery_is(((cell_t *)(uintptr_t)cell_ptr(up))->head,
+                             g_fast_cold[e].battery))
+            return 0;
+        core = up;
+    }
+    return 1;
+}
 
 static void fast_register(noun core, noun clue)
 {
@@ -886,57 +1124,167 @@ static void fast_register(noun core, noun clue)
             g_fast_chums[g_fast_chum_n++] = chum;
         }
     }
-    jet_fn_t fn = hot_lookup(chum);
-    if (fn == NULL)
-        return;
-    uint64_t cord = direct_val(chum);
+
+    /* cold: this core and its parent */
+    fast_tables_check();
     noun battery = slot(direct(2), core);
+    if (heap_ptr_in_scratch(battery) || heap_ptr_in_scratch(chum)) {
+        fast_drop("scratch");   /* would dangle after heap_scratch_reset */
+        return;
+    }
+    if (noun_tx_active()) {
+        fast_drop("tx");        /* noun_tx_abort could roll these cells back */
+        return;
+    }
+    noun pfol, ptail;
+    int parent = -1, e = -1, i;
+    uint64_t paxis = 0;
+    if (!fast_slot(6, clue, &pfol) || !noun_is_cell(pfol))
+        return;
+    {
+        cell_t *pf = (cell_t *)(uintptr_t)cell_ptr(pfol);
+        ptail = pf->tail;
+        if (noun_is_direct(pf->head) && direct_val(pf->head) == 1) {
+            parent = -1;                        /* root: [1 …] */
+        } else if (noun_is_direct(pf->head) && direct_val(pf->head) == 0
+                   && noun_is_direct(ptail) && direct_val(ptail) != 0) {
+            noun up;
+            paxis = direct_val(ptail);
+            if (!fast_slot(paxis, core, &up) || !noun_is_cell(up)) {
+                fast_drop("axis");
+                return;
+            }
+            parent = fast_cold_find(((cell_t *)(uintptr_t)cell_ptr(up))->head);
+            if (parent < 0) {                   /* parent never registered */
+                fast_drop("parent");
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+    for (i = g_fast_cold_n - 1; i >= 0; i--) {
+        if (g_fast_cold[i].battery == battery && g_fast_cold[i].parent == parent
+            && g_fast_cold[i].parent_axis == paxis) {
+            e = i;
+            break;
+        }
+    }
+    if (e < 0) {
+        for (i = g_fast_cold_n - 1; i >= 0; i--) {
+            if (g_fast_cold[i].parent == parent && g_fast_cold[i].parent_axis == paxis
+                && noun_eq(g_fast_cold[i].battery, battery)) {
+                e = i;
+                break;
+            }
+        }
+    }
+    if (e < 0) {
+        if (g_fast_cold_n >= FAST_COLD_MAX) {
+            fast_drop("full");
+            return;
+        }
+        e = g_fast_cold_n++;
+        g_fast_cold[e].battery = battery;
+        g_fast_cold[e].chum = chum;
+        g_fast_cold[e].parent = parent;
+        g_fast_cold[e].parent_axis = paxis;
+        g_fast_cold[e].hot = fast_hot_for(e);
+    }
+
+    /* hot: label and full parent path */
+    int h = g_fast_cold[e].hot;
+    if (h < 0)
+        return;
+    jet_fn_t fn = hot_state[h].fn;
 #if defined(I3_L1_PROBE)
     {
-        int have = 0, i;
+        int have = 0;
         for (i = 0; i < g_fast_core_n; i++) {
-            if (g_fast_cores[i].label_cord == cord) {
+            if (g_fast_cores[i].hot == h) {
                 have = 1;
                 break;
             }
         }
         if (!have && g_fast_core_n < FAST_REG_MAX) {
-            g_fast_cores[g_fast_core_n].label_cord = cord;
+            g_fast_cores[g_fast_core_n].hot = h;
             g_fast_cores[g_fast_core_n].core = core;
             g_fast_core_n++;
         }
     }
 #endif
 #if defined(I3_UNJETTED)
-    (void)battery;
+    (void)fn;
     return;
 #else
-    int i;
     for (i = 0; i < g_fast_len; i++) {
-        if (g_fast_reg[i].label_cord == cord)
+        if (g_fast_reg[i].cold == e)
             return;
-        if (g_fast_reg[i].battery == battery
-            || noun_eq(g_fast_reg[i].battery, battery))
+        /* T2/B1: a hot label binds exactly once. A second core on the same
+         * hot path (e.g. two hoon.hoon copies after a kernel upgrade) is
+         * refused, not crashed on: the first stays bound, the second runs
+         * unjetted, and the refusal is counted (reason=dup). */
+        if (g_fast_reg[i].hot == h) {
+            g_fast_dups++;
+#if defined(I3_HOST)
+            if ((g_fast_dups & (g_fast_dups - 1)) == 0) {
+                uart_puts("I3H fast_dup label=");
+                uart_puts(hot_state[h].name);
+                uart_puts(" n=");
+                uart_put_u64(g_fast_dups);
+                uart_puts("\r\n");
+            }
+#endif
+            fast_drop("dup");
             return;
+        }
     }
     if (g_fast_len >= FAST_REG_MAX)
         return;
     g_fast_reg[g_fast_len].battery = battery;
-    g_fast_reg[g_fast_len].label_cord = cord;
+    g_fast_reg[g_fast_len].hot = h;
     g_fast_reg[g_fast_len].fn = fn;
+    g_fast_reg[g_fast_len].cold = e;
+#if defined(I3_L1_PROBE)
+    g_fast_reg[g_fast_len].core = core;
+    g_fast_reg[g_fast_len].epoch = g_fast_epoch;
+#endif
     g_fast_len++;
 #endif
 }
 
+#if defined(I3_L1_PROBE)
+/* jetcheck: while set, this one registered entry dispatches as plain Nock */
+static int g_fast_suppress = -1;
+void fast_suppress(int i) { g_fast_suppress = i; }
+void fast_epoch_bump(void) { g_fast_epoch++; }
+/* Only entries registered in the current probe poke still own a live core
+ * (an earlier poke's scratch heap has been reset). */
+int fast_reg_entry(int i, const char **label, noun *core)
+{
+    if (i < 0 || i >= g_fast_len || g_fast_reg[i].epoch != g_fast_epoch)
+        return 0;
+    *label = hot_state[g_fast_reg[i].hot].name;
+    *core = g_fast_reg[i].core;
+    return 1;
+}
+#endif
+
 static jet_fn_t fast_match(noun core)
 {
+    fast_tables_check();
     if (!noun_is_cell(core) || g_fast_len == 0)
         return NULL;
     noun battery = slot(direct(2), core);
     int i;
     for (i = 0; i < g_fast_len; i++) {
-        if (g_fast_reg[i].battery == battery
-            || noun_eq(g_fast_reg[i].battery, battery))
+#if defined(I3_L1_PROBE)
+        if (i == g_fast_suppress)
+            continue;
+#endif
+        if ((g_fast_reg[i].battery == battery
+             || noun_eq(g_fast_reg[i].battery, battery))
+            && fast_parents_match(core, g_fast_reg[i].cold))
             return g_fast_reg[i].fn;
     }
     return NULL;
@@ -946,12 +1294,8 @@ static jet_fn_t fast_match(noun core)
 noun fast_core_lookup(noun label)
 {
     int i;
-    uint64_t cord;
-    if (!noun_is_direct(label))
-        return NOUN_ZERO;
-    cord = direct_val(label);
     for (i = 0; i < g_fast_core_n; i++) {
-        if (g_fast_cores[i].label_cord == cord)
+        if (hot_name_is(label, hot_state[g_fast_cores[i].hot].name))
             return g_fast_cores[i].core;
     }
     return NOUN_ZERO;
@@ -962,9 +1306,9 @@ int fast_core_count(void)
     return g_fast_core_n;
 }
 
-uint64_t fast_core_label(int i)
+const char *fast_core_name(int i)
 {
-    return g_fast_cores[i].label_cord;
+    return hot_state[g_fast_cores[i].hot].name;
 }
 
 static int formula_is_fast(noun fol)

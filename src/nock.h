@@ -126,6 +126,9 @@ uint64_t hot_reverse_label(jet_fn_t fn);
 
 int      hot_entry_count(void);
 uint64_t hot_entry_label(int i);
+const char *hot_entry_name(int i);
+/* hot_name_is: is atom `label` the cord `name` (any width)? */
+int      hot_name_is(noun label, const char *name);
 uint64_t hot_entry_hits(int i);
 void     hot_hits_reset(void);
 
@@ -133,6 +136,11 @@ void     fast_reset(void);
 void     nock_host_roots(void (*f)(noun, int)); /* row 221, I3_COMPACT only */
 uint64_t fast_clue_count(void);
 int      fast_reg_count(void);
+int      fast_cold_count(void);
+int      fast_cold_entry(int i, noun *chum, int *parent, uint64_t *axis);
+uint64_t fast_cold_dropped(void);
+uint64_t fast_invalidations(void);
+uint64_t fast_dups(void);
 int      fast_first_clue_ok(void);
 noun     fast_first_clue(void);
 int      fast_chum_count(void);
@@ -140,8 +148,11 @@ noun     fast_chum_at(int i);
 #if defined(I3_L1_PROBE)
 noun     fast_core_lookup(noun label);
 int      fast_core_count(void);
-uint64_t fast_core_label(int i);
+const char *fast_core_name(int i);
 int      fast_pull_hot(void);
+void     fast_suppress(int i);
+void     fast_epoch_bump(void);
+int      fast_reg_entry(int i, const char **label, noun *core);
 #endif
 
 /*
