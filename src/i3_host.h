@@ -37,8 +37,11 @@ int i3_host_ready(void);
 int i3_host_poke(noun cause, i3_host_result_t *out);
 int i3_host_peek(noun path, i3_host_result_t *out);
 int i3_host_persist(i3_host_result_t *out);
-/* Row 199: `/state-hash` and its event number N; 0 when stopped or not ready. */
-int i3_host_state_hash(uint64_t *event, uint8_t hash[32], i3_host_result_t *out);
+/* Row 199: `/state-hash` and its event number N; 0 when stopped or not ready.
+ * Row 328: the kernel's /state-hash is a Tip5 noun digest, one atom below
+ * p^5 < 2^320, read as I3_DIGEST_BYTES little-endian bytes. */
+#define I3_DIGEST_BYTES 40
+int i3_host_state_hash(uint64_t *event, uint8_t hash[I3_DIGEST_BYTES], i3_host_result_t *out);
 int i3_host_cue_bytes(const uint8_t *bytes, uint64_t len, noun *out);
 /* Admission-gated application load. `expected_sha256` is a 64-char ASCII hex
  * digest; all-zero means "no gate". SHA-256 runs natively (outside Nock) and a

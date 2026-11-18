@@ -132,6 +132,11 @@ int      hot_name_is(noun label, const char *name);
 uint64_t hot_entry_hits(int i);
 void     hot_hits_reset(void);
 
+/* 1499kernel row 328: ++digest of a noun (hash-hashable-noun:digest-lib, then
+ * digest-to-atom), as 40 little-endian bytes: what the kernel's /state-hash
+ * gives for its state. 0 if the walk's tables or stacks are too small. */
+int      nock_tip5_digest(noun n, uint8_t out[40]);
+
 void     fast_reset(void);
 void     nock_host_roots(void (*f)(noun, int)); /* row 221, I3_COMPACT only */
 uint64_t fast_clue_count(void);
@@ -151,6 +156,8 @@ int      fast_core_count(void);
 const char *fast_core_name(int i);
 int      fast_pull_hot(void);
 void     fast_suppress(int i);
+void     fast_suppress_hot(uint64_t mask);
+int      hot_index_of(noun label);
 void     fast_epoch_bump(void);
 int      fast_reg_entry(int i, const char **label, noun *core);
 #endif

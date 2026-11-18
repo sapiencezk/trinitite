@@ -21,7 +21,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tests" / "tip5"))
 from jam import jam  # noqa: E402
+import tip5_ref  # noqa: E402
 
 def cord(s):
     return int.from_bytes(s.encode(), "little")
@@ -37,6 +39,11 @@ NZ, ONE = 0x80000000, 0x3F800000   # @rs -0 and 1.0
 L123 = lst(1, 2, 3)
 # Small first operands keep the unjetted integer Hoon (unary recursion) cheap;
 # the float bit patterns make an @rs core that holds an integer jet disagree.
+# The bignum jets read at most BN_MAX_LIMBS (64) limbs of an atom, so an
+# atom wider than 4,096 bits is cut on both sides of a check that uses them
+# (tests/tip5 checks ++digest of a 6,143-bit atom against the golden).
+BIG = 2**4000 - 12345          # a 4,000-bit atom
+GP = 2**64 - 2**32 + 1         # the Goldilocks prime
 VECTORS = {
     # the signed-zero vectors stay cheap as @rs Hoon even with no integer jet
     # bound, so a float core holding an integer jet shows as a plain mismatch
@@ -50,7 +57,8 @@ VECTORS = {
     "gth": [(1, NEG_TINY), (3, 2), (2, 3)],
     "lte": [(1, NEG_TINY), (3, 2), (2, 2)],
     "gte": [(1, NEG_TINY), (3, 2), (2, 2)],
-    "rsh": [(3, 0x1234), ((3, 1), 0x123456), ((0, 4), 0xFF), ((1, 2), 0xABCD)],
+    "rsh": [((5, 1), BIG), ((5, 1), 2**200 + 7), (5, BIG), (6, 2**130 + 3),
+            (3, 0x1234), ((3, 1), 0x123456), ((0, 4), 0xFF), ((1, 2), 0xABCD)],
     "lsh": [(3, 0x12), ((3, 1), 0x12), ((0, 4), 0xF), ((1, 2), 0xAB)],
     "con": [(5, 3), (0xFF00, 0x0FF0)],
     "dis": [(5, 3), (0xFF00, 0x0FF0)],
@@ -62,6 +70,38 @@ VECTORS = {
     "jam": [0, 1, (1, 2), ((1, 2), (1, 2)), (2**70, 2**70), ((1, 2), 3)],
     "shax": [0, cord("abc"), 2**200 + 5, 0xFF00],
 }
+# Tip5 (1499kernel row 328 (d)): the arms ++digest calls, and its walk.
+# Values at or above p, short lists and %list hashables make the jet run
+# the arm (both sides then run the same Hoon, or crash alike).
+P = GP
+
+
+def tup(*xs):
+    out = xs[-1]
+    for x in reversed(xs[:-1]):
+        out = (x, out)
+    return out
+
+
+D1, D2 = tup(1, 2, 3, 4, 5), tup(P - 1, 0, 7, P - 2, 9)
+DEEP = 0
+for k in range(40):
+    DEEP = (k, DEEP)
+VECTORS.update({
+    "permutation": [lst(*[0] * 16), lst(*range(16)), lst(*[P - 1] * 16),
+                    lst(*[0] * 15)],
+    "hash-varlen": [0, lst(1, 2, 3), lst(*range(10)), lst(*range(23)), lst(P)],
+    "hash-belts-list": [0, lst(1, 2, 3), lst(*range(10)), lst(P - 1, 0), lst(1, P)],
+    "hash-ten-cell": [(D1, D2), (D2, D1), ((1, 2), 3), (D1, (D2, 0))],
+    "hash-noun-varlen": [0, 5, (1, 2), ((1, 2), (3, (4, 0))), P - 1, P],
+    "hash-hashable": [(cord("leaf"), 5), (cord("leaf"), (1, 2)),
+                      ((cord("leaf"), 1), (cord("leaf"), 2)), (cord("hash"), D2),
+                      ((cord("hash"), D1), (cord("leaf"), 3)),
+                      (cord("list"), lst((cord("leaf"), 1)))],
+    "digest-to-atom": [D1, D2, tup(*[2**64 - 1] * 5), tup(0, 0, 0, 0, 0)],
+    "hash-hashable-noun": [0, P - 1, P, BIG, (1, 2), ((1, 2), (1, 2)),
+                           DEEP, (P, (2**100, cord("tip5")))],
+})
 
 
 def shax(a):
@@ -71,12 +111,26 @@ def shax(a):
     return int.from_bytes(hashlib.sha256(b).digest(), "little")
 
 
-# ++shax as plain Hoon recurses deeper than the lite node's 1,024-frame
-# evaluator stack (I3_SLAM_MAX_STACK), so its Hoon side ends in budget
-# reason 4 on every vector. For such a label alone, a Hoon side stopped by
-# the stack is replaced by a host reference (hashlib for ++shax). Any other
+def unlist(n):
+    out = []
+    while isinstance(n, tuple):
+        out.append(n[0])
+        n = n[1]
+    return out
+
+
+# Two arms cannot run as plain Hoon on the lite node at all: ++shax
+# recurses deeper than the 1,024-frame evaluator stack (I3_SLAM_MAX_STACK,
+# budget reason 4), and Tip5's ++permutation as Hoon rebuilds its round
+# constants per element and needs more cells than the 32 MiB scratch holds
+# (reason 3). For them alone, a Hoon side stopped for that reason is checked
+# against a host reference instead: hashlib for ++shax, and for permutation
+# tests/tip5/tip5_ref.py, ++permutation transcribed from the Hoon. Any other
 # inconclusive vector still fails the run.
-REFERENCE = {"shax": shax}
+REFERENCE = {
+    "shax": (lambda a: shax(a), 4),
+    "permutation": (lambda l: lst(*tip5_ref.permutation(unlist(l))), 3),
+}
 # Registered labels that need a gate or trap as sample are reported as
 # unvectored and do not fail the run.
 UNVECTORED_OK = {"turn", "mole"}
@@ -84,23 +138,47 @@ UNVECTORED_OK = {"turn", "mole"}
 REQUIRED = set(VECTORS)
 
 
-def atom(text):
-    return int(text, 16) if text.startswith("0x") else int(text)
+def parse_noun(text):
+    """A noun as the probe prints it: atoms in decimal or 0x hex, cells in
+    brackets, right-associated."""
+    toks = re.findall(r"\[|\]|0x[0-9a-f]+|\d+", text)
+    pos = 0
+
+    def one():
+        nonlocal pos
+        t = toks[pos]
+        pos += 1
+        if t != "[":
+            return int(t, 16) if t.startswith("0x") else int(t)
+        items = []
+        while toks[pos] != "]":
+            items.append(one())
+        pos += 1
+        out = items[-1]
+        for x in reversed(items[:-1]):
+            out = (x, out)
+        return out
+    return one()
 
 
 def reference_checks(rows):
-    """For each REFERENCE label, the vectors whose Hoon side hit the stack
-    bound: (number settled against the host reference, number wrong)."""
+    """For each REFERENCE label, the vectors whose Hoon side stopped for that
+    label's reason: (number settled against the host reference, number
+    wrong)."""
     settled = wrong = 0
-    for label, ref in REFERENCE.items():
+    for label, (ref, reason) in REFERENCE.items():
         lines = [l for l in rows if l.startswith("I3L1 jetcheck name=")
                  and f" label={label} " in l]
         for line, sample in zip(lines, VECTORS[label]):
-            if "verdict=inconclusive" not in line or " hoon=budget:4" not in line:
+            if "verdict=inconclusive" not in line or f" hoon=budget:{reason}" not in line:
                 continue
-            jet = re.search(r" jet=(\S+) hoon=", line).group(1)
-            ok = not jet.startswith(("crash", "budget")) and atom(jet) == ref(sample)
-            print(f"I3L1 jetcheck_reference label={label} sample={sample!r} "
+            jet = re.search(r" jet=(.*) hoon=", line).group(1)
+            try:
+                want = ref(sample)
+            except AssertionError:
+                want = None                     # the arm would crash
+            ok = not jet.startswith(("crash", "budget")) and parse_noun(jet) == want
+            print(f"I3L1 jetcheck_reference label={label} sample={str(sample)[:60]} "
                   f"verdict={'match' if ok else 'mismatch'}")
             settled += ok
             wrong += not ok
