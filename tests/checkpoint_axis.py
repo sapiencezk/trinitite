@@ -3,7 +3,8 @@
 """Row 212 PR 1a: lite checkpoint digest vs the full node's /state-hash.
 
 Builds this tree with I3_CHECKPOINT_EVERY=K (qemu-virt, I3_HOST, semihost cold),
-boots a %load-bundle, %manage 2 and one chain event per X, collects every
+boots the full node's %manifest (1499kernel row 276: it logs its own as event 1), a
+%load-bundle, %manage 2 and one chain event per X, collects every
 `I3H ckpt ok event=N ... sha256=D`, and requires D to equal the 1499kernel full
 node's /state-hash after the same N causes. Needs a 1499kernel checkout (its
 tools/ and build/kernel/kernel.jam) and its full-node binary. Run from the
@@ -26,9 +27,10 @@ from tools.oracle.basicfb_trace import event_cause
 from tools.oracle.ir_to_noun import app_to_noun, cord, id_tables, nock_cell, nock_list
 from tools.oracle.resident_turn_trace import turn_cause
 from tools.lite_state_hash import full_hash
+from tools.oracle.limits import FRESH, FULL, manifest_cause, record_hash
 import tools.scale_scan as sc
 
-CKPT_OK = re.compile(r"I3H ckpt ok event=(\d+) bytes=\d+ sha256=([0-9a-f]{64})$")
+CKPT_OK = re.compile(r"I3H ckpt ok event=(\d+) bytes=\d+ sha256=([0-9a-f]{80})$")
 
 
 def flag_build(out: Path, extra: list[str], headroom: int = 1_000_000_000) -> Path:
@@ -55,6 +57,9 @@ def main() -> int:
     pill = out / "k.pill"; pill.write_bytes(lp.pack_pill(Path("build/kernel/kernel.jam").read_bytes()))
     img = flag_build(out, [f"I3_CHECKPOINT_EVERY={k}"])
     s = lp.Steps("w")
+    # The full node logs its own %manifest as event 1 (1499kernel row 276), so
+    # the lite plan starts with that poke, as tests/checkpoint_boot.py does.
+    s.poke("mf", manifest_cause(record_hash(FRESH), FULL))
     s.poke("ld", lp.load_bundle_cause(app))
     s.poke("go", turn_cause(LocalRequest.manage(2), None, None, tabs, None))
     for i, x in enumerate(xs):
@@ -68,7 +73,7 @@ def main() -> int:
     causes += [event_cause(tabs, "B0", "REQ", [x, 1]) for x in xs]
     ok = bool(ck)
     for n, d in sorted(ck.items()):
-        fr = full_hash(full, "lite-node", causes[:n])
+        fr = full_hash(full, "full-node", causes[:n - 1])
         eq = bool(fr) and fr.get("hash") == d and fr.get("event") == n
         ok &= eq
         print(f"N={n} lite={d[:16]} full={fr and fr.get('event')}/{(fr or {}).get('hash', '')[:16]} equal={eq}")

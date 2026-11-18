@@ -11,8 +11,8 @@ with no change to the full node or the kernel:
   1. Boot the full node from the kernel jam with no snapshot file, and ask it for one
      ({"snapshot": true}). Its core gives the booted build's desk-hash (axis 2 of the outer
      state), as the lite node's own checkpoint boot takes it from the booted kernel (axis 26).
-  2. Core = jam([0 desk-hash S]), S = the ring checkpoint's state (++jam of axis 27; sha256 of
-     those bytes is D). Snapshot = I3SNAP v1 with this kernel jam's bytes and blake3, event N.
+  2. Core = jam([0 desk-hash S]), S = the ring checkpoint's state (++jam of axis 27; the ring
+     record's digest is sha256 of those bytes). Snapshot = I3SNAP v1 with this kernel jam's bytes and blake3, event N.
   3. Boot the full node from that snapshot (--ephemeral), poke-jam the cause of every ring
      input after N in order (each input is the lite log entry [num wire 0 0 0 cause]), and
      read the kernel's /state-hash with a peek (an ephemeral boot has no event log, so the
@@ -94,7 +94,8 @@ class Node:
 
 
 def state_hash(reply: dict) -> str | None:
-    """The peek reply's /state-hash atom as 64 hex digits (little-endian bytes, as row 199)."""
+    """The peek reply's /state-hash atom as 80 hex digits (40 little-endian bytes: a Tip5
+    digest since 1499kernel row 328, below 2^320)."""
     def find(x):
         if isinstance(x, int):
             return x
@@ -113,7 +114,7 @@ def state_hash(reply: dict) -> str | None:
                     return v
         return None
     v = find(reply)
-    return None if v is None else v.to_bytes(32, "little").hex()
+    return None if v is None else v.to_bytes(40, "little").hex()
 
 
 def main() -> int:

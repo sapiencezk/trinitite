@@ -10,7 +10,7 @@ then its %trace re-poke), the chain-5 app of 1499kernel tools/lite_state_hash.py
 current kernel (1499kernel row 276) the full node logs its own %manifest as event 1, so every
 lite sequence starts with that %manifest poke (1499kernel row 317 step 2, Round 3 Q14 A):
   N=7: %manifest, %load-bundle, %trace, %manage 2, REQ [0 1], REQ [1 1], REQ [0 1]
-       (lite_state_hash.py cross-host sequence; full node 6b0b2657 at 7)
+       (lite_state_hash.py cross-host sequence; full node a7defa20 at 7)
   N=6: the N=7 sequence without its last REQ
 
   boot legs (N, K) = (6, 4), (6, 5), (7, 4): a write boot with I3_CHECKPOINT_EVERY=K (one
@@ -20,8 +20,8 @@ lite sequence starts with that %manifest poke (1499kernel row 317 step 2, Round 
       flag-off reboot of the same cold image (replay from zero), as the write boot's own read
       at N, and as the full node after the same causes. (6, 5) checkpoints a state one step
       later (on the landing kernel N=4 already hashed like N=6; on main's kernel D at 4 is
-      cea1f2a3, at 5 6b0b2657, the final state at 6 c857e9ff).
-      It also records open question 1: each checkpoint digest D (sha256(jam(axis 27))) against
+      ac49ec2d, at 5 a7defa20, the final state at 6 89b28066).
+      It also records open question 1: each checkpoint digest D (the Tip5 ++digest of axis 27, 1499kernel row 328) against
       the lite /state-hash peek at the same N in the same boot.
   fallback legs (N=6 sequence, I3_CHECKPOINT_EVERY=2, headers at N=2,4,6), each rebooted with
       the plain K=2 image; row 212 (3): try the next older checkpoint, and with none valid and
@@ -57,15 +57,16 @@ from tools.lite_state_hash import full_hash, reads
 from tools.oracle.limits import FRESH, FULL, manifest_cause, record_hash
 import tools.scale_scan as sc
 
-CKPT_OK = re.compile(r"I3H ckpt ok event=(\d+) bytes=\d+ sha256=([0-9a-f]{64})$")
-BOOT_OK = re.compile(r"I3H ckpt boot event=(\d+) sha256=([0-9a-f]{64}) log=(\d+)$")
+CKPT_OK = re.compile(r"I3H ckpt ok event=(\d+) bytes=\d+ sha256=([0-9a-f]{80})$")
+BOOT_OK = re.compile(r"I3H ckpt boot event=(\d+) sha256=([0-9a-f]{80}) log=(\d+)$")
 REJECT = re.compile(r"I3H ckpt boot reject event=(\d+) reason=(\S+)$")
 NONE = re.compile(r"I3H ckpt boot none rejected=(\d+) fallback=zero$")
 XS = [0, 1, 0]
-# From-zero /state-hash at N with main's kernel jam (1499kernel bc311dcc, pin 8d287abd; Round 3
+# From-zero /state-hash at N with the row 328 kernel jam (1499kernel row-328-tip5, Tip5
+# /state-hash, 80 hex digits; before it, bc311dcc: 6 c857e9ff, 7 6b0b2657). Round 3
 # Q14 A): the full node's own /state-hash after the N=6 and N=7 causes (it logs %manifest first).
 # Landing kernel 3d100787: f5764f6f, bf0a761a, with --target instead of %manifest.
-STEWARD = {6: "c857e9ff", 7: "6b0b2657"}
+STEWARD = {6: "89b28066", 7: "a7defa20"}
 
 
 def mem_wait(what: str) -> None:

@@ -56,7 +56,7 @@ import tools.scale_scan as sc
 
 EXTRA = 10
 ON = ["I3_CHECKPOINT_EVERY=2", "I3_LITE_LOG=1"]
-CKPT_OK = re.compile(r"I3H ckpt ok event=(\d+) bytes=\d+ sha256=([0-9a-f]{64})$")
+CKPT_OK = re.compile(r"I3H ckpt ok event=(\d+) bytes=\d+ sha256=([0-9a-f]{80})$")
 BOOT_OK = re.compile(r"I3H ckpt boot event=(\d+) ")
 CMP_OK = re.compile(r"I3H compact ok event=(\d+) (.*)$")
 CMP_WALK = re.compile(r"I3H compact walk event=(\d+) (.*)$")

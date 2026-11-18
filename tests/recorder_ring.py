@@ -21,10 +21,10 @@ REQ [0 1], [1 1]) and N=7 (N=6 then REQ [0 1]). Every hash compared is computed 
             after 6 (the previous checkpoint stays until the next one verifies; entries before it
             are dropped); the cold superblock's base is 4. A reboot of the cold image reads base 4,
             boots from 6, replays nothing, and reads the same /state-hash as the write boot at 6
-            and the full node (c857e9ff).
+            and the full node (89b28066).
   crash     I3_CKPT_TEST=crash I3_CKPT_TEST_FROM=6: the checkpoint at 6 is stored damaged and the
             node stops dead before verifying it. The reboot rejects 6 (reason=hash), boots from 4
-            (kept: the base is still 2), replays 5 and 6 and reads c857e9ff.
+            (kept: the base is still 2), replays 5 and 6 and reads 89b28066.
   rotated   the running cold image (base 4) rebooted with the pill's jam plus one zero byte (so
             no checkpoint's kernel-blake3 matches): rejects 6 and 4 (reason=kernel), logs
             `fallback=stop base=4`, `I3H stop reason=rotated`, replays nothing, refuses the poke
@@ -36,7 +36,7 @@ REQ [0 1], [1 1]) and N=7 (N=6 then REQ [0 1]). Every hash compared is computed 
   offdevice for N=6 and N=7: tools/ring_image.py turns the write boot's ring image into a cold
             image from its oldest kept checkpoint; the same flag-on image boots it (no ring
             loaded), replays every later ring input and reads /state-hash, which must equal the
-            full node's after the same causes (N=6 c857e9ff, N=7 6b0b2657).
+            full node's after the same causes (N=6 89b28066, N=7 a7defa20).
   wrap4     the wrap leg's ring (4+ wraps): a cold image from its oldest kept checkpoint boots on the
             same lite image and reads the full node's /state-hash after all N=6+EXTRA causes; the
             image's base job_sum comes from the ring checkpoint record (row 221 (7): the jobs
@@ -101,10 +101,11 @@ RING = int(os.environ.get("RING_BYTES", "32768"))
 RING_BIG = 2 * RING
 EXTRA = 10
 RING_ADDR = 0x70000000  # PLATFORM_DRAM_BASE + 0x30000000 on qemu-virt (src/i3_ring.c)
-# Full-node /state-hash at N with main's kernel jam (1499kernel bc311dcc, pin 8d287abd; Round 3
+# Full-node /state-hash at N with the row 328 kernel jam (1499kernel row-328-tip5, Tip5
+# /state-hash; before it, bc311dcc: 6 c857e9ff, 7 6b0b2657). Round 3
 # Q14 A), as tests/checkpoint_boot.py. Landing kernel 3d100787 (--target, no %manifest):
 # f5764f6f, bf0a761a.
-STEWARD = {6: "c857e9ff", 7: "6b0b2657"}
+STEWARD = {6: "89b28066", 7: "a7defa20"}
 CKPT_OK = re.compile(r"I3H ckpt ok event=(\d+) ")
 BASE = re.compile(r"I3H log base event=(\d+) ckpt=(\d+) kept_entries=(\d+) kept_bytes=(\d+) chain_bytes=(\d+)$")
 BOOT_OK = re.compile(r"I3H ckpt boot event=(\d+) ")
