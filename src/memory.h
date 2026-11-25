@@ -93,7 +93,8 @@
  * persist stays put; scratch moves to high RAM past pill (0x50000000)
  * and the I3 plan blob (0x51000000). In-place 32MB scratch holds only
  * 1.398M 24-byte cells and crashed (`scratch exhausted`) before the
- * 2.048M diagnostic budget. 64MB holds 2.796M cells.
+ * 2.048M diagnostic budget of the time (16x the 128,000-cell production
+ * cap before 1499kernel row 385). 64MB holds 2.796M cells.
  */
 #undef HEAP_SCRATCH_BASE
 #undef HEAP_SCRATCH_SIZE

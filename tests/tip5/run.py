@@ -16,7 +16,7 @@ QEMU and pokes [%digest n] for each vector, which runs ++digest of
         jets (hash-ten-cell, hash-hashable, hash-belts-list, ...).
 It also computes each digest with tests/tip5/tip5_ref.py (the Hoon arms
 transcribed). Every digest printed must equal the golden; a `hoon` poke that
-runs past the slam caps (2,000,000 ops, 128,000 cells) is reported, not
+runs past the slam caps (4,000,000 ops, 1,200,000 cells) is reported, not
 compared. It prints each poke's ops and cells.
 
   python3 tests/tip5/run.py [--no-build] [--log PATH]
