@@ -23,19 +23,32 @@
 #define I3_CUE_MAX_NODES 1200000u
 #define I3_CUE_MAX_CELLS 600000u
 
-#define I3_SLAM_MAX_OPS 2000000ULL
-#define I3_SLAM_MAX_CELLS 128000ULL
+/* 1499kernel row 385 (Guillaume, 2026-11-25: "Not hard: raise it"). A
+ * management START runs the rows it releases in its own poke, up to the 16
+ * rows a resource queue holds. The heaviest measured (QEMU, row 385's
+ * kernel.jam with row 386, traced): a device START over 16 kept rows of
+ * lite_probe's monolithic two-leaf-transfer, 2,396,612 ops / 806,652
+ * cells / stack 92; 16 kept boundary rows of pipeline-local-processing,
+ * 2,316,212 / 770,821 / 164. The caps are about 1.5x that: 4,000,000 ops
+ * (1.67x) and 1,200,000 cells (1.49x). Memory: 1,200,000 x 24 bytes =
+ * 27.5 MiB, plus an admitted input (65,536 cells, 1.5 MiB) decoded into
+ * the same scratch = 29.0 MiB of its 32 MiB (memory.h, 1,398,101 cells),
+ * 3.0 MiB to spare. The stack peak is 164 of 1,024; it stays. */
+#define I3_SLAM_MAX_OPS 4000000ULL
+#define I3_SLAM_MAX_CELLS 1200000ULL
 #define I3_SLAM_MAX_STACK 1024ULL
 #if defined(I3_UNJETTED)
 /*
  * Diagnostic image only (I3_UNJETTED requires I3_L1_PROBE=1). Production
- * numbers above stay 2e6 / 128000 / 1024. 16× cells (2.048M) and ops
- * (32M) is the diagnostic budget; scratch is sized to match in memory.h.
- * Stack 1024 already covers the unjetted peak. Kernel pokes still abort
- * at this cap — recorded, not raised further.
+ * numbers above stay as they are. 16x ops and cells is the diagnostic
+ * budget; the cells part is past what the 64 MiB unjetted scratch in
+ * memory.h holds (2.796M cells), so an unjetted slam that large stops
+ * with `scratch exhausted` before the cell cap. Stack 1024 already covers
+ * the unjetted peak. Kernel pokes still abort at this cap — recorded,
+ * not raised further.
  */
 #undef I3_SLAM_MAX_OPS
 #undef I3_SLAM_MAX_CELLS
-#define I3_SLAM_MAX_OPS (2000000ULL * 16)
-#define I3_SLAM_MAX_CELLS (128000ULL * 16)
+#define I3_SLAM_MAX_OPS (4000000ULL * 16)
+#define I3_SLAM_MAX_CELLS (1200000ULL * 16)
 #endif
