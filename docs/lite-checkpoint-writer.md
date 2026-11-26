@@ -1,5 +1,9 @@
 # Row 212 lite checkpoint writer: plan (PR 1a, 1b and after)
 
+`tests/checkpoint_flag_off.sh`, the byte-identity gate named in the sections below, was retired by
+1499kernel row 389: deleting the code no lite image runs changed every image, which ends byte identity
+with those historical bases. `make test-build` builds every flag and test-knob configuration instead.
+
 Base: trinitite `i3/cue-input-16m` @ 9927b88c (trinitite#9 merged: row 200 amendment / PLAN row 213; trinitite#8's `jam_hoon_checked`).
 Branch: trinitite `feat/lite-checkpoint-writer`. Sources: PLAN row 212 (in #254), Dwarf's read §7-10
 (`/workspace/research/lite-replay-dwarf-read.md`).
@@ -164,7 +168,7 @@ All with the checkpoint flag only; `I3_CHECKPOINT_EVERY=` images keep `cue_i2_li
   16,105,320 -> 15,319,976).
 - Region `I3_CKPT_JAM_BASE` = DRAM base + 0x0E000000, 29 MiB, top +0x0FD00000: cache +0, memo +0x0C00000,
   buffer +0x1000000 (5 MiB slot), object scratch +0x1500000, append scratch +0x1900000 (`src/memory.h`).
-  Build-time checks against .bss, the cue cache and rub scratch, the code region, the pill, 4 GiB, the ring
+  Build-time checks against .bss, the cue cache, the code region, the pill, 4 GiB, the ring
   window (LITE) and MMIO (DRAM + 0x3F000000). The region is not zeroed at boot: `i3_host_boot` calls
   `ckpt_jam_reset` (cache and memo cleared, memo generation 0) before any checkpoint jam; the buffer and the
   scratches are written before they are read. Knob `I3_CKPT_TEST=dirty` fills the whole region with 0xA5
@@ -329,7 +333,7 @@ and off by default. Flag-off images are byte-identical (`tests/checkpoint_flag_o
 
 - **Code region.** 12 MiB at DRAM base + 0x0D000000. At boot the host builds the pill's kernel (cue),
   the poke and peek formulas and the kick into it, once. Build-time checks in `memory.h` keep it clear
-  of the cue rub scratch, the cue cache, .bss, the pill, the ring window, MMIO and the 4 GiB pointer
+  of the cue cache, .bss, the pill, the ring window, MMIO and the 4 GiB pointer
   limit. If the build overflows, boot halts with `I3H terminal=code-region`. Boot logs
   `I3H code region bytes= cells= size=` and `I3H atom prefix bytes= atoms= persist_cells=`. Nothing
   writes to the region after the build, and the persist copier keeps its cells as they are.

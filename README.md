@@ -1,288 +1,104 @@
 # Trinitite
-### Native Nock/Forth OS for Raspberry Pi
+### The 1499kernel lite node's bare-metal host
 
 ![](./img/hero.jpg)
 
-Trinitite is a tiny operating system for Raspberry Pi 4/5, written in Forth with a C memory arena.  It boots directly into a Forth/Nock REPL, with no userspace/kernel distinction.  The kernel provides a minimal set of primitives for working with nouns, evaluating Nock formulas, and loading jammed atoms from QEMU's file-loader device.  The REPL supports building and evaluating arbitrary Nock subject/formula pairs, either by hand or by loading pre-jammed pairs via PILL.
+This tree builds one image: the lite node of
+[1499kernel](https://github.com/sapiencezk/1499kernel), a bare-metal AArch64
+host that cues a NockApp kernel jam, kicks it, and runs it under fixed
+admission caps. It runs on a Raspberry Pi 4 / CM4 and, for tests, on QEMU's
+`virt` machine. It has no IEC 61499 code of its own: the kernel jam is the
+application; this tree is the Nock evaluator, the noun heap, the cold store
+and the checkpoint, log and ring that keep the kernel's state.
 
-Trinitite is an experimental platform into which I jammed a lot of half-baked ideas, like live jet loading (as Forth words), a hash-based indirect atom arena, variable kernel shapes, and a Forth-based implementation of a Nock standard library.  It is very much a dynamic work in progress.
+1499kernel holds this tree as its `trinitite` submodule and drives it with its
+`tools/lite_*` scripts.
 
 ## Building
 
-```sh
-make
-```
-
-Cross-compile for CI (Ubuntu):
+Toolchain: `aarch64-elf-gcc` and binutils (`brew install aarch64-elf-gcc
+aarch64-elf-binutils`), QEMU for the tests (`brew install qemu`).
 
 ```sh
-make CC=aarch64-linux-gnu-gcc LD=aarch64-linux-gnu-ld \
-     OBJCOPY=aarch64-linux-gnu-objcopy
+make PLATFORM=qemu-virt I3_HOST=1                 # the host image on QEMU virt
+make PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1   # plus the diagnostic plan driver
+make PLATFORM=rpi4b I3_HOST=1                     # the Pi 4 image
 ```
 
-## Running
+`I3_HOST=1` is the default and the only value: the lite host is the only image.
+The result is `kernel8.img` (and `kernel8.elf`); each configuration also keeps
+its own copy under `.build/`.
+
+| Variable | Values | Effect |
+|---|---|---|
+| `PLATFORM` | `rpi4b` (default), `qemu-virt` | memory map, UART, linker script |
+| `COLD_MEDIA` | `ram` (default), `semihost`, `fake`, `rpi4-sd` | where the cold store lives: RAM only, a QEMU semihosting file (`build/cold.img`), a fault-injecting fake, the Pi's SD card |
+| `I3_L1_PROBE=1` | | the diagnostic driver: pokes and peeks a plan blob, prints `I3L1` lines |
+| `I3_UNJETTED=1` | qemu-virt, with `I3_L1_PROBE` | the diagnostic budget, 16x the slam caps |
+| `I3_CHECKPOINT_EVERY=K` | default 2000; empty turns it off | the checkpoint writer and the boot from the newest checkpoint |
+| `I3_LITE_LOG=1` | with a checkpoint cadence | the running log, the SD recorder ring and compaction |
+| `I3_RING_BYTES`, `I3_RING_EVERY` | with `I3_LITE_LOG` | ring size and ring checkpoint cadence |
+| `I3_PERSIST_HEADROOM_CELLS=N` | | test knob: cap persist growth at N cells past boot |
+| `I3_CKPT_TEST`, `I3_CKPT_TEST_FROM`, `I3_RING_TEST`, `I3_RING_TEST_AT`, `I3_PLANT_RSH_RAW`, `I3_PLANT_LABEL_ONLY` | | test-only fault and plant knobs (see the Makefile) |
+
+## Running under QEMU
+
+The host reads three blobs that QEMU's loader places in RAM (qemu-virt
+addresses):
+
+| Blob | Address | Layout |
+|---|---|---|
+| pill | `0x50000000` | `[u64 jam length][u8 shape = 2 (NockApp)][7 bytes 0][kernel jam]` |
+| plan (`I3_L1_PROBE`) | `0x51000000` | `[u64 length][jam of the plan steps]` |
+| application | `0x53000000` | `[u64 jam length][64 hex SHA-256, all 0 = no gate][bundle jam]` |
 
 ```sh
-make run          # boots into the Forth REPL
-make debug        # boots under GDB
-make test         # run regression suite (376 tests)
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 2G -nographic \
+  -kernel kernel8.img \
+  -device loader,file=kernel.pill,addr=0x50000000,force-raw=on \
+  -device loader,file=kernel.plan,addr=0x51000000,force-raw=on
 ```
 
-Tests and benchmarks are [available](./BENCHMARK.md).
+Add `-semihosting` for `COLD_MEDIA=semihost`. Every host line starts with
+`I3H`, every diagnostic line with `I3L1`; 1499kernel's `tools/lite_probe.py`
+builds the blobs and parses the lines. The host contract is
+[docs/HOST-CONTRACT.md](docs/HOST-CONTRACT.md).
 
-## REPL basics
-
-The kernel boots into a bare-metal Forth REPL. Nouns are 64-bit tagged words.
-After Phase 5d, small integers are already valid direct atoms — `direct(42) == 42` —
-so no conversion is needed:
-
-| Word | Stack effect | Description |
-|------|-------------|-------------|
-| `CONS` | `( head tail -- cell )` | allocate a cell |
-| `CAR` | `( cell -- head )` | head of a cell |
-| `CDR` | `( cell -- tail )` | tail of a cell |
-| `ATOM?` | `( noun -- flag )` | `-1` if atom, `0` if cell |
-| `NOCK` | `( subject formula -- result )` | evaluate Nock |
-| `JAM` | `( noun -- atom )` | serialize noun to atom |
-| `CUE` | `( atom -- noun )` | deserialize atom to noun |
-| `PILL` | `( -- atom )` | load jammed atom from QEMU file loader |
-| `.` | `( n -- )` | print top of stack as 16-digit hex |
-| `N.` | `( noun -- )` | print atom as decimal |
-| `>NOUN` | `( n -- noun )` | clears bit 63; no-op for values < 2⁶³ |
-| `NOUN>` | `( noun -- n )` | clears bit 63; no-op for values < 2⁶³ |
-
-See the [Forth documentation](./FORTH.md) for more details on the Forth environment and available words.
-
-## Running arbitrary Nock subject/formula pairs
-
-### 1. Build inline at the REPL
-
-`NOCK` consumes `( subject formula -- result )`. Build nouns with plain integers
-and `CONS`. Nock cells are right-associative: `[a b c]` = `[a [b c]]`, so push
-`a`, push `b`, push `c`, then `CONS CONS`.
-
-```forth
-\ *[42 [0 1]] = 42  (slot 1 of atom)
-42   0 1 CONS   NOCK .
-
-\ *[42 [4 [0 1]]] = 43  (increment)
-42   4 0 1 CONS CONS   NOCK N.
-
-\ *[0 [1 [1 2]]] = [1 2]  (quote a cell), print head
-0   1   1 2 CONS CONS   NOCK CAR N.
-```
-
-General rule: work **right-to-left** — innermost subterms first, then `CONS`
-outward.
-
-### 2. Load a pre-jammed pair via PILL
-
-For formulas too large to type, jam `[subject formula]` externally and load it
-via QEMU's file-loader device.
-
-**Pill file format** (little-endian):
-- bytes 0–7: `uint64_t` = byte count of jam data that follows
-- bytes 8+: raw jam bytes (little-endian bignum)
-
-**Create a pill** from a raw jam file:
-
-```python
-import sys, struct
-d = open('formula.jam', 'rb').read()
-open('pill.bin', 'wb').write(struct.pack('<Q', len(d)) + d)
-```
-
-**Run with the pill loaded** (loads at physical address `0x10000000`):
-
-```
-make run-pill PILL=pill.bin
-```
-
-**Decode and evaluate in the REPL:**
-
-```forth
-PILL CUE           \ decode the [subject formula] pair noun
-DUP CAR SWAP CDR   \ split: subject below, formula on top
-NOCK               \ evaluate
-```
-
-Or define a helper word once per session:
-
-```forth
-: NOCK-PAIR  DUP CAR SWAP CDR NOCK ;
-PILL CUE NOCK-PAIR NOUN> .
-```
-
-`PILL` returns atom `0` if no pill was loaded (QEMU zeroes RAM at startup).
-
-## Using on real hardware
-
-### What you need
-
-| Item | Notes |
-|------|-------|
-| Raspberry Pi 4 Model B | 2 GB or 4 GB both work |
-| microSD card (≥ 1 GB) | FAT32 formatted |
-| USB-to-3.3V serial adapter | CP2102, FT232, CH340, etc. — **3.3 V logic, not 5 V** |
-| 3× female-to-female jumper wires | |
-| USB power supply for the Pi | |
-
-### SD card setup
-
-Format the card FAT32. Copy three RPi firmware files to the root:
-
-```
-bootcode.bin
-start.elf
-fixup.dat
-```
-
-Get them from the [raspberrypi/firmware](https://github.com/raspberrypi/firmware/tree/master/boot)
-repo (just those three files — you do not need the kernel from that repo).
-
-Create `config.txt` in the root:
-
-```ini
-arm_64bit=1
-dtoverlay=disable-bt
-enable_uart=1
-```
-
-Copy the kernel:
+## Tests
 
 ```sh
-make
-cp kernel8.img /Volumes/<your-sd>/
+make test         # every configuration builds, then the QEMU tests and tools/jam.py's self-tests
+make test-build   # the builds only
+make test-qemu    # tests/app_sha256_probe.py, tests/jetcheck/run.py (and its two plants), tests/tip5/run.py
 ```
 
-Eject the card and insert it into the Pi.
+`tests/checkpoint_*.py`, `tests/compaction.py`, `tests/recorder_ring.py` and
+`tests/ring_full_replay.py` need a 1499kernel checkout (its tools and full
+node) and run from there; each docstring says how.
 
-### UART wiring
+## On a Raspberry Pi 4
 
-The serial console is on UART0 (PL011), exposed on the 40-pin header.
-Use **3.3 V logic only** — 5 V will damage the Pi.
-
-```
-Pi GPIO 14  (TXD, pin 8)   →  RX  on serial adapter
-Pi GPIO 15  (RXD, pin 10)  →  TX  on serial adapter
-Pi GND      (pin 9)        →  GND on serial adapter
-```
-
-Do **not** connect the adapter's VCC/3.3V/5V pin to the Pi.
-Power the Pi from its own USB-C port.
-
-Pin 9 is one of eight GND pins on the header — if it is occupied,
-pins 6, 14, 20, 25, 30, 34, or 39 all work.
+1499kernel's `tools/board/make-boot.sh` assembles the FAT boot directory
+(`start4.elf`, `fixup4.dat`, `config.txt`, `kernel8.img` and the pill) from its
+pinned firmware manifest. The console is UART0 (PL011) on GPIO 14/15, 115200
+8N1, 3.3 V logic:
 
 ```
-40-pin header (USB ports facing you, header at top-right):
-
-         left col          right col
-  pin 1  (3V3)     [ ][ ]  (5V)     pin 2
-  pin 3  (SDA)     [ ][ ]  (5V)     pin 4
-  pin 5  (SCL)     [ ][ ]  (GND)    pin 6
-  pin 7  (GPIO4)   [ ][ ]  (TXD) ←  pin 8   → adapter RX
-  pin 9  (GND)  ←  [ ][ ]  (RXD) ←  pin 10  → adapter TX
-                 ↑
-           adapter GND
+Pi GPIO 14  (TXD, pin 8)   →  RX  on the serial adapter
+Pi GPIO 15  (RXD, pin 10)  →  TX  on the serial adapter
+Pi GND      (pin 9)        →  GND on the serial adapter
 ```
 
-### Serial terminal
+Do not connect the adapter's power pin; power the Pi from its own USB-C port.
+At boot the image drives the fixed output bank (GPIO 17, 27 and 22) low.
 
-Find the device:
+## History
 
-```sh
-ls /dev/cu.usbserial-* /dev/cu.usbmodem* 2>/dev/null
-```
-
-Connect at **115200 8N1**:
-
-```sh
-screen /dev/cu.usbserial-XXXX 115200
-```
-
-Power on the Pi. Within a second or two you should see:
-
-```
-Trinitite v0.1  AArch64 Forth
->
-```
-
-That is the Forth REPL. Type Forth words and press Enter.
-To quit `screen`: `Ctrl-A \`.
-
-### Iterating
-
-After editing source, rebuild and copy:
-
-```sh
-make
-cp kernel8.img /Volumes/<your-sd>/
-# power-cycle the Pi
-```
-
-Or with TFTP netboot:
-
-```sh
-make deploy TFTP_ROOT=/private/tftpboot
-# reset the Pi
-```
-
-### Troubleshooting
-
-**No output at all** — check wiring polarity (TX→RX, RX→TX), confirm 3.3 V adapter,
-confirm `dtoverlay=disable-bt` and `enable_uart=1` in `config.txt`.
-
-**Garbage characters** — baud rate mismatch; set terminal to exactly 115200.
-
-**Hangs after a few lines** — flow control issue; disable RTS/CTS in your terminal.
-
-**`ok` appears but input is ignored** — check the TX wire (Pi RXD ← adapter TX).
-
-## Release history and roadmap
-
-* [Roadmap](ROADMAP.md)
-
-First public release ("v0.1-alpha", not properly versioned yet) on ~2026.03.13.
-
-<!--
-Named releases will be based on US nuclear weapons tests, in roughly chronological order. The first few are:
-Trinity
-Crossroads
-Sandstone
-Ranger
-Greenhouse
-Buster-Jangle
-Tumbler-Snapper
-Ivy
-Upshot-Knothole
-Castle
-Teapot
-Wigwam
-Project 56
-Redwing
-Project 57
-Plumbbob
-Project 58
-Hardtack I
-Argus
-Hardtack II
-Nougat
-Sunbeam
-Dominic
-Fishbowl
-Storac
-Roller Coaster
-Niblick
-Whetstone
-Flintlock
-Latchkey
-Crosstie
-Bowline
-Mandrel
-Emery
-https://en.wikipedia.org/wiki/List_of_United_States_nuclear_weapons_tests
--->
+Trinitite began as Sigilante's bare-metal Forth/Nock OS for the Raspberry Pi.
+1499kernel grew its own host on it, and row 389 removed everything the lite
+node does not run: the Forth system and REPL, the Arvo/Shrine kernel loop,
+subject knowledge analysis, and the earlier native research line. What
+remains of the original is described in [ROADMAP.md](ROADMAP.md).
 
 ![](./img/icon-64.jpg)
 
