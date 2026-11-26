@@ -376,7 +376,7 @@ static noun jet_rsh(noun core, const wilt_t *jets, sky_fn_t sky) {
     noun bite = slot(direct(12), core);
     noun a = slot(direct(13), core);
     if (!noun_is_atom(a)) nock_crash("jet rsh: non-atom");
-#if defined(I3_PLANT_RSH_RAW)
+#if defined(LITE_PLANT_RSH_RAW)
     /* test plant (L3's defect): the bite's bloq taken as a raw bit count */
     return bn_rsh(a, jet_atom_u64(noun_is_cell(bite) ? slot(direct(2), bite) : bite,
                                   "jet rsh: bad bite"));
@@ -700,16 +700,16 @@ static int t5_rounds_ok(noun core)
 #define T5_SLOT_BITS 19u
 #define T5_POOL_MAX (1u << 18)
 #define T5_STACK_MAX (1u << 16)
-#define t5_key  ((uint64_t *)(uintptr_t)I3_TIP5_BASE)
-#define t5_tag  ((uint64_t *)(uintptr_t)(I3_TIP5_BASE + 0x0400000ULL))
-#define t5_pool ((uint64_t (*)[TIP5_DIGEST])(uintptr_t)(I3_TIP5_BASE + 0x0800000ULL))
-#define t5_task ((noun *)(uintptr_t)(I3_TIP5_BASE + 0x1200000ULL))
-#define t5_kind ((uint8_t *)(uintptr_t)(I3_TIP5_BASE + 0x1280000ULL))
-#define t5_done ((uint32_t *)(uintptr_t)(I3_TIP5_BASE + 0x1300000ULL))
+#define t5_key  ((uint64_t *)(uintptr_t)LITE_TIP5_BASE)
+#define t5_tag  ((uint64_t *)(uintptr_t)(LITE_TIP5_BASE + 0x0400000ULL))
+#define t5_pool ((uint64_t (*)[TIP5_DIGEST])(uintptr_t)(LITE_TIP5_BASE + 0x0800000ULL))
+#define t5_task ((noun *)(uintptr_t)(LITE_TIP5_BASE + 0x1200000ULL))
+#define t5_kind ((uint8_t *)(uintptr_t)(LITE_TIP5_BASE + 0x1280000ULL))
+#define t5_done ((uint32_t *)(uintptr_t)(LITE_TIP5_BASE + 0x1300000ULL))
 _Static_assert((1ULL << T5_SLOT_BITS) * 8 <= 0x0400000ULL, "tip5 keys fit");
 _Static_assert(T5_POOL_MAX * 40ULL <= 0x1200000ULL - 0x0800000ULL, "tip5 pool fits");
 _Static_assert(T5_STACK_MAX * 8ULL <= 0x0080000ULL, "tip5 task stack fits");
-_Static_assert(0x1300000ULL + T5_STACK_MAX * 4ULL <= I3_TIP5_SIZE, "tip5 region holds the stacks");
+_Static_assert(0x1300000ULL + T5_STACK_MAX * 4ULL <= LITE_TIP5_SIZE, "tip5 region holds the stacks");
 #define T5_SLOTS (1u << T5_SLOT_BITS)
 #define T5_VARLEN_MAX (1u << 20)   /* nodes per hash-noun-varlen pass */
 
@@ -1241,7 +1241,7 @@ typedef struct {
     int hot;       /* hot_state index: a hot path binds once */
     jet_fn_t fn;
     int cold;      /* g_fast_cold entry: parent path for the dispatch check */
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
     noun core;     /* the core that registered: jetcheck calls it */
     uint64_t epoch; /* probe poke in which it registered (core lifetime) */
 #endif
@@ -1262,7 +1262,7 @@ static uint64_t g_fast_heap_gen;       /* heap_persist_generation() at fill */
 static uint64_t g_fast_invalidations;  /* tables dropped on a heap change */
 static uint64_t g_fast_dups;           /* refused second bindings of a hot label */
 static fast_reg_t g_fast_reg[FAST_REG_MAX];
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
 static uint64_t g_fast_epoch;
 #endif
 static int g_fast_len;
@@ -1272,7 +1272,7 @@ static int g_fast_first_ok;
 #define FAST_CHUM_LOG 64   /* diagnostic ring; stops recording past 64 */
 static noun g_fast_chums[FAST_CHUM_LOG];
 static int g_fast_chum_n;
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
 static noun g_fast_first_core;
 typedef struct { int hot; noun core; } fast_core_t;
 static fast_core_t g_fast_cores[FAST_REG_MAX];
@@ -1295,7 +1295,7 @@ void fast_reset(void)
     g_fast_first_clue = NOUN_ZERO;
     g_fast_first_ok = 0;
     g_fast_chum_n = 0;
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
     g_fast_first_core = NOUN_ZERO;
     g_fast_core_n = 0;
     g_fast_walk_n = 0;
@@ -1342,7 +1342,7 @@ static void fast_drop(const char *why)
 {
     g_fast_cold_dropped++;
     if ((g_fast_cold_dropped & (g_fast_cold_dropped - 1)) == 0) {
-        uart_puts("I3H fast_cold_dropped n=");
+        uart_puts("LITEH fast_cold_dropped n=");
         uart_put_u64(g_fast_cold_dropped);
         uart_puts(" reason=");
         uart_puts(why);
@@ -1435,7 +1435,7 @@ static int fast_hot_for(int e)
         int k = 0, cur;
         if (p == NULL || !hot_name_is(g_fast_cold[e].chum, hot_state[h].name))
             continue;
-#if defined(I3_PLANT_LABEL_ONLY)
+#if defined(LITE_PLANT_LABEL_ONLY)
         /* test plant: the pre-fix rule, label only (T2's check must fire) */
         return h;
 #endif
@@ -1477,7 +1477,7 @@ static void fast_register(noun core, noun clue)
     if (!g_fast_first_ok) {
         g_fast_first_clue = clue;
         g_fast_first_ok = 1;
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
         g_fast_first_core = core;
 #endif
     }
@@ -1493,7 +1493,7 @@ static void fast_register(noun core, noun clue)
             }
         }
         if (!seen) {
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
             g_fast_walk[g_fast_chum_n] = core;
             g_fast_walk_n = g_fast_chum_n + 1;
 #endif
@@ -1573,7 +1573,7 @@ static void fast_register(noun core, noun clue)
     if (h < 0)
         return;
     jet_fn_t fn = hot_state[h].fn;
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
     {
         int have = 0;
         for (i = 0; i < g_fast_core_n; i++) {
@@ -1589,21 +1589,21 @@ static void fast_register(noun core, noun clue)
         }
     }
 #endif
-#if defined(I3_UNJETTED)
+#if defined(LITE_UNJETTED)
     (void)fn;
     return;
 #else
     for (i = 0; i < g_fast_len; i++) {
         if (g_fast_reg[i].cold == e)
             return;
-        /* T2/B1: a hot label binds exactly once. A second core on the same
+        /* A hot label binds exactly once. A second core on the same
          * hot path (e.g. two hoon.hoon copies after a kernel upgrade) is
          * refused, not crashed on: the first stays bound, the second runs
          * unjetted, and the refusal is counted (reason=dup). */
         if (g_fast_reg[i].hot == h) {
             g_fast_dups++;
             if ((g_fast_dups & (g_fast_dups - 1)) == 0) {
-                uart_puts("I3H fast_dup label=");
+                uart_puts("LITEH fast_dup label=");
                 uart_puts(hot_state[h].name);
                 uart_puts(" n=");
                 uart_put_u64(g_fast_dups);
@@ -1619,7 +1619,7 @@ static void fast_register(noun core, noun clue)
     g_fast_reg[g_fast_len].hot = h;
     g_fast_reg[g_fast_len].fn = fn;
     g_fast_reg[g_fast_len].cold = e;
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
     g_fast_reg[g_fast_len].core = core;
     g_fast_reg[g_fast_len].epoch = g_fast_epoch;
 #endif
@@ -1627,7 +1627,7 @@ static void fast_register(noun core, noun clue)
 #endif
 }
 
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
 /* jetcheck: while set, this one registered entry dispatches as plain Nock */
 static int g_fast_suppress = -1;
 void fast_suppress(int i) { g_fast_suppress = i; }
@@ -1663,7 +1663,7 @@ static jet_fn_t fast_match(noun core)
     noun battery = slot(direct(2), core);
     int i;
     for (i = 0; i < g_fast_len; i++) {
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
         if (i == g_fast_suppress
             || ((g_fast_suppress_hot >> g_fast_reg[i].hot) & 1u))
             continue;
@@ -1676,7 +1676,7 @@ static jet_fn_t fast_match(noun core)
     return NULL;
 }
 
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
 noun fast_core_lookup(noun label)
 {
     int i;
@@ -2392,10 +2392,10 @@ noun nock_mook(noun trace)
 }
 
 #include "memory.h"
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
 /* Row 221 (6) (c): the fast-hint registry's nouns and the crash trace are
  * host roots of the atom store rebuild. kind 0 = the registry and g_mean;
- * kind 1 = I3_L1_PROBE-only diagnostic tables (test harness roots). */
+ * kind 1 = LITE_PROBE-only diagnostic tables (test harness roots). */
 void nock_host_roots(void (*f)(noun, int))
 {
     int i;
@@ -2405,7 +2405,7 @@ void nock_host_roots(void (*f)(noun, int))
     for (i = 0; i < g_fast_chum_n; i++)
         f(g_fast_chums[i], 0);
     f(g_mean, 0);
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
     f(g_fast_first_core, 1);
     for (i = 0; i < g_fast_core_n; i++)
         f(g_fast_cores[i].core, 1);

@@ -7,7 +7,7 @@ The lite node's bare-metal host for
 cues a NockApp kernel jam from RAM, kicks it, and pokes and peeks it under
 fixed admission caps, keeping its state in a cold store with a checkpoint,
 a running log and an SD recorder ring. 1499kernel holds this tree as its
-`trinitite` submodule, builds it with `I3_*` make variables and parses its
+`trinitite` submodule, builds it with `LITE_*` make variables and parses its
 UART lines. Changes here are 1499kernel PLAN rows; read its `docs/PLAN.md`
 and `docs/HANDOVER.md` first.
 
@@ -17,12 +17,14 @@ and `docs/HANDOVER.md` first.
 Makefile                 the only build; make test is the tree's check
 src/
   boot.s                 core 0 entry: stack, BSS, main
-  main.c                 Pi output-bank clear, UART, heap, cold store, i3_host_boot
-  i3_host.c / .h         the host: pill cue, kick, poke/peek, %crud, input log,
+  main.c                 Pi output-bank clear, UART, heap, cold store, lite_host_boot
+  lite_host.c / .h       the host: pill cue, kick, poke/peek, %crud, input log,
                          replay, stop, checkpoint writer and boot, compaction
-  i3_admission.h         the cue and per-slam caps
-  i3_l1_probe.c / .h     I3_L1_PROBE: the diagnostic plan driver (I3L1 lines)
-  i3_ring.c / .h         I3_LITE_LOG: the SD recorder ring
+  lite_admission.h       the lite host's cue and per-slam caps
+  admission_envelope.h   the base cue limits and jam/copy table sizes
+  admission_metrics.c/.h the cue high-water marks the `LITEH cue` line prints
+  lite_probe.c / .h      LITE_PROBE: the diagnostic plan driver (LITE1 lines)
+  lite_ring.c / .h       LITE_LOG: the SD recorder ring
   nock.c / .h            Nock 4K evaluator, hints, budgets, hot jets, %fast
   noun.c / .h            noun tags, split cell heap, content-addressed atom store
   jam.c, ckpt_jam.c      ++jam-exact jam (ckpt_jam.c builds jam.c again for the checkpoint)
@@ -45,7 +47,7 @@ docs/lite-checkpoint-writer.md  the checkpoint, log, ring and compaction design
 ## Build and check
 
 ```sh
-make PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1   # see README.md for every variable
+make PLATFORM=qemu-virt LITE_HOST=1 LITE_PROBE=1   # see README.md for every variable
 make test                                         # all configurations, QEMU tests, jam.py
 ```
 
@@ -57,8 +59,8 @@ lite /state-hash and the checkpoint boot legs) on a tree that pins this one.
 
 - Everything here is reached by an image 1499kernel builds; code no image
   reaches is deleted, not kept behind a flag.
-- The lines 1499kernel parses (`I3H …`, `I3L1 …`), the admission caps in
-  `i3_admission.h`, the checkpoint and cold formats and the digest domains
+- The lines 1499kernel parses (`LITEH …`, `LITE1 …`), the admission caps in
+  `lite_admission.h`, the checkpoint and cold formats and the digest domains
   are interfaces: changing one is a 1499kernel row, with its tools and
   goldens in the same change.
 - Bare metal, freestanding, no libc, no heap outside `memory.h`'s regions.

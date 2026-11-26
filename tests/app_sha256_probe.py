@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """SHA-256 admission gate probe (decision 151/152, lite-node mirror).
 
-Boots the I3 host under QEMU (qemu-virt) with a minimal nockapp kernel and a
+Boots the lite host under QEMU (qemu-virt) with a minimal nockapp kernel and a
 diagnostic plan holding a single ``%load-app`` step.  The bundle is delivered
-as a blob at ``I3_APP_BASE`` (0x53000000)::
+as a blob at ``LITE_APP_BASE`` (0x53000000)::
 
     [0..8)   uint64_t LE jam byte length
     [8..72)  64 ASCII hex expected SHA-256 (lowercase; all '0' = no gate)
@@ -21,7 +21,7 @@ Three cases are exercised:
                      (identical to pre-gate behaviour).
 
 Each assertion is gate-sensitive: deleting the SHA-256 comparison in
-``i3_host_load_app`` flips the wrong-digest case to ``abort=crash``, so the
+``lite_host_load_app`` flips the wrong-digest case to ``abort=crash``, so the
 wrong-digest assertion fails.
 
 Usage:
@@ -46,10 +46,10 @@ sys.path.insert(0, str(ROOT / "tools"))
 from jam import jam  # noqa: E402
 
 PILL_BASE = 0x50000000
-I3_PLAN_BASE = 0x51000000
-I3_APP_BASE = 0x53000000
+LITE_PLAN_BASE = 0x51000000
+LITE_APP_BASE = 0x53000000
 APP_SHA256_HEX_LEN = 64
-TERMINAL = b"I3L1 terminal="
+TERMINAL = b"LITE1 terminal="
 QEMU_TIMEOUT = 60.0
 
 
@@ -130,8 +130,8 @@ def run_guest(image: Path, pill: Path, plan: Path, app: Path) -> tuple[str, str,
         "-m", "2G",
         "-kernel", str(image.resolve()),
         "-device", f"loader,file={pill.resolve()},addr={PILL_BASE:#x},force-raw=on",
-        "-device", f"loader,file={plan.resolve()},addr={I3_PLAN_BASE:#x},force-raw=on",
-        "-device", f"loader,file={app.resolve()},addr={I3_APP_BASE:#x},force-raw=on",
+        "-device", f"loader,file={plan.resolve()},addr={LITE_PLAN_BASE:#x},force-raw=on",
+        "-device", f"loader,file={app.resolve()},addr={LITE_APP_BASE:#x},force-raw=on",
         "-display", "none",
         "-nographic",
         "-no-reboot",
@@ -205,7 +205,7 @@ def main() -> None:
     image = args.image
     if not image.is_file():
         raise SystemExit(f"{image} not found; build with "
-                         "`make PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1 all`")
+                         "`make PLATFORM=qemu-virt LITE_HOST=1 LITE_PROBE=1 all`")
 
     bundle_jam = jam_bytes(nock_cell(cord("bundle"), 0))
     right_digest = hashlib.sha256(bundle_jam).hexdigest()
@@ -225,16 +225,16 @@ def main() -> None:
 
     # ── right digest ────────────────────────────────────────────────────────
     right = outputs["right-digest"]
-    expect("I3H app-sha256 sha256 " in right, "right-digest: missing gate line")
+    expect("LITEH app-sha256 sha256 " in right, "right-digest: missing gate line")
     expect(" match=yes" in right, "right-digest: gate did not match")
     expect(" != expected " not in right, "right-digest: unexpected refusal")
     # gate passed, so the %load-bundle poke was attempted -> minimal-kernel crash
-    expect("I3L1 load-app name=" in right, "right-digest: missing load-app line")
+    expect("LITE1 load-app name=" in right, "right-digest: missing load-app line")
     expect("abort=crash" in right, "right-digest: poke was not attempted (no crash)")
 
     # ── wrong digest ────────────────────────────────────────────────────────
     wrong = outputs["wrong-digest"]
-    expect("I3H app-sha256 sha256 " in wrong, "wrong-digest: missing gate line")
+    expect("LITEH app-sha256 sha256 " in wrong, "wrong-digest: missing gate line")
     expect(" != expected " in wrong, "wrong-digest: mismatch not reported")
     expect(" match=yes" not in wrong, "wrong-digest: gate wrongly matched")
     expect("abort=none" in wrong, "wrong-digest: poke was attempted on mismatch")
@@ -243,7 +243,7 @@ def main() -> None:
 
     # ── no digest ───────────────────────────────────────────────────────────
     none = outputs["no-digest"]
-    expect("I3H app-sha256 sha256 " in none, "no-digest: missing gate line")
+    expect("LITEH app-sha256 sha256 " in none, "no-digest: missing gate line")
     expect(" gate=no" in none, "no-digest: gate not skipped")
     expect(" != expected " not in none, "no-digest: unexpected refusal")
     expect("abort=crash" in none, "no-digest: poke was not attempted (as today)")

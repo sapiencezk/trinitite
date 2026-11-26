@@ -82,7 +82,7 @@ int   heap_get_mode(void);
 void  heap_scratch_reset(void);    /* bump scratch ptr to HEAP_SCRATCH_BASE */
 uint64_t heap_scratch_mark(void);  /* byte offset for a nested scratch owner */
 int   heap_scratch_rewind(uint64_t mark);
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
 void  heap_persist_cap_arm(void);  /* test knob: cap persist growth from here */
 void  heap_persist_cap_extend(uint64_t cells); /* test knob: exempt test input */
 #endif
@@ -102,7 +102,7 @@ int   noun_tx_active(void);
 uint64_t heap_cells_used(int mode);
 uint64_t heap_persist_free_cells(void); /* cells left in the live persist half */
 uint64_t atom_store_bytes_used(void);
-/* Row 221 (row 212 (c)), only with I3_COMPACT (memory.h). */
+/* Row 221 (row 212 (c)), only with LITE_COMPACT (memory.h). */
 typedef struct {
     uint64_t bytes_before, idx_before, bytes_after, idx_after, kept, dropped, mismatch;
     uint64_t slide_ticks, index_ticks, kept_digest, after_digest;

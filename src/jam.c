@@ -2,12 +2,12 @@
 #include "jam.h"
 #include "bignum.h"
 #include "nock.h"    /* nock_crash */
-#include "i2_admission_envelope.h"
+#include "admission_envelope.h"
 #include "platform.h"
 
 /* ── Bitstream writer ─────────────────────────────────────────────────────── */
 
-/* I2 hybrid gates jam ~10KB; headroom for live state + tarms (~1 Mbit). */
+/* The jam writer's buffer: 1 Mbit (ckpt_jam.c builds this file again, larger). */
 #ifndef JAM_MAX_LIMBS          /* ckpt_jam.c builds this file again, larger */
 #define JAM_MAX_LIMBS 16384   /* 1 Mbit max jam output */
 #endif
@@ -94,20 +94,17 @@ static void do_mat(jambuf_t *jb, noun k) {
 /* ── jam cache: noun → bit position ──────────────────────────────────────── */
 
 /* Large hybrid gates need many backrefs (7k+ cells). */
-#define JAM_CACHE_SZ I2_JAM_CACHE_ENTRIES
+#define JAM_CACHE_SZ ENVELOPE_JAM_CACHE_ENTRIES
 
 typedef struct { noun key; uint64_t pos; int used; } jcent_t;
 
-#ifndef JAM_TABLE    /* ckpt_jam.c places its tables in the I3_CKPT_JAM region */
+#ifndef JAM_TABLE    /* ckpt_jam.c places its tables in the LITE_CKPT_JAM region */
 #define JAM_TABLE(type, name, n) static type name[n]
 #endif
 #ifndef JAM_MUG_GEN_INIT
 #define JAM_MUG_GEN_INIT
 #endif
 JAM_TABLE(jcent_t, g_jcache, JAM_CACHE_SZ);
-/* 0: structural noun_eq (M8 trampoline battery digest).
- * 1: pointer identity (host Python jam of ResourceProgram). */
-static int g_jam_identity_keys;
 /* ++jam's own rule (hoon.hoon, and the full node's nockvm jam): a repeated
  * atom is written again when (met 0 a) <= (met 0 cursor), else backref. */
 static int g_jam_hoon_rule;
@@ -235,8 +232,7 @@ static int jcache_get(noun n, uint64_t *pos) {
             return 0;
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) return 0;
-        if (g_jam_identity_keys ? g_jcache[idx].key == n
-                                : noun_eq(g_jcache[idx].key, n)) {
+        if (noun_eq(g_jcache[idx].key, n)) {
             *pos = g_jcache[idx].pos;
             return 1;
         }
@@ -251,7 +247,7 @@ static int jcache_put(noun n, uint64_t pos) {
             return 0;
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) {
-            if (g_jcache_used >= I2_JAM_CACHE_ADMITTED) {
+            if (g_jcache_used >= ENVELOPE_JAM_CACHE_ADMITTED) {
                 /* A skipped entry loses a backref; under ++jam's rule that
                  * is wrong bits, so the caller falls back to Nock. */
                 g_jam_cache_full = 1;
@@ -261,8 +257,7 @@ static int jcache_put(noun n, uint64_t pos) {
             g_jcache_used++;
             return 1;
         }
-        if (g_jam_identity_keys ? g_jcache[idx].key == n
-                                : noun_eq(g_jcache[idx].key, n)) {
+        if (noun_eq(g_jcache[idx].key, n)) {
             g_jcache[idx].pos = pos;
             return 1;
         }
@@ -274,7 +269,7 @@ static int jcache_put(noun n, uint64_t pos) {
 
 /* ── jam recursive core ───────────────────────────────────────────────────── */
 
-#ifndef JAM_BUF_DECL         /* ckpt_jam.c places its buffer in the I3_CKPT_JAM region */
+#ifndef JAM_BUF_DECL         /* ckpt_jam.c places its buffer in the LITE_CKPT_JAM region */
 #define JAM_BUF_DECL static jambuf_t g_jambuf
 #endif
 JAM_BUF_DECL;
@@ -318,18 +313,6 @@ static void do_jam(noun n) {
             do_mat(&g_jambuf, n);
         } else if (g_jam_hoon_rule) {
             if (bn_met(n) <= u64_bits(cached_pos)) {
-                jb_write(&g_jambuf, 0);
-                do_mat(&g_jambuf, n);
-            } else {
-                jb_write(&g_jambuf, 1); jb_write(&g_jambuf, 1);
-                do_mat(&g_jambuf, direct(cached_pos));
-            }
-        } else if (g_jam_identity_keys) {
-            /* Host jam.py: re-emit the atom when value.bit_length()
-             * is strictly less than the cached bit-position. */
-            if (bn_met(n) < u64_bits(cached_pos)) {
-                if (!jcache_put(n, g_jambuf.cur))
-                    goto done;
                 jb_write(&g_jambuf, 0);
                 do_mat(&g_jambuf, n);
             } else {
@@ -440,22 +423,6 @@ static void do_jam_len(noun n)
     if (g_jam_hoon_rule) {
         jam_len_add(bn_met(n) <= u64_bits(cached_pos) ? 1 + mat_len(n)
                                                       : 2 + mat_len(direct(cached_pos)));
-        if (bounded)
-            g_jam_len_depth--;
-        return;
-    }
-    if (g_jam_identity_keys) {
-        if (bn_met(n) < u64_bits(cached_pos)) {
-            if (!jcache_put(n, g_jam_len)) {
-                g_jam_len_ok = 0;
-                if (bounded)
-                    g_jam_len_depth--;
-                return;
-            }
-            jam_len_add(1 + mat_len(n));
-        } else {
-            jam_len_add(2 + mat_len(direct(cached_pos)));
-        }
         if (bounded)
             g_jam_len_depth--;
         return;

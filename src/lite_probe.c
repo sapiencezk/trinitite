@@ -1,20 +1,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "i3_admission.h"
-#include "i3_host.h"
-#include "i3_l1_probe.h"
+#include "lite_admission.h"
+#include "lite_host.h"
+#include "lite_probe.h"
 #include "nock.h"
 #include "noun.h"
 #include "setjmp.h"
 #include "uart.h"
 
 /*
- * I3 L1 diagnostic on the I3_HOST image. The host cues, kicks and installs
- * the kernel; this runner drives a plan through i3_host_poke / i3_host_peek.
+ * The diagnostic plan driver (LITE_PROBE). The host cues, kicks and installs
+ * the kernel; this runner drives a plan through lite_host_poke / lite_host_peek.
  * No private cue or slam of the kernel.
  *
- * Plan at I3_PLAN_BASE: [u64 len][jam]. len == 0 → mini R0.
+ * Plan at LITE_PLAN_BASE: [u64 len][jam]. len == 0 → the mini kernel's smoke.
  */
 #define SLAM_FORMULA_TEXT "[8 [9 23 0 2] 9 2 10 [6 0 7] 0 2]"
 
@@ -145,10 +145,10 @@ static int edit_sample(noun core, noun sample, noun *out)
 
 static void print_unjetted(void)
 {
-#if defined(I3_UNJETTED)
-    uart_puts("I3L1 unjetted=yes\r\n");
+#if defined(LITE_UNJETTED)
+    uart_puts("LITE1 unjetted=yes\r\n");
 #else
-    uart_puts("I3L1 unjetted=no\r\n");
+    uart_puts("LITE1 unjetted=no\r\n");
 #endif
 }
 
@@ -156,13 +156,13 @@ static void print_pulled(void)
 {
     int i, n = fast_core_count();
     int hot = hot_entry_count();
-    uart_puts("I3L1 pulled count=");
+    uart_puts("LITE1 pulled count=");
     put_u64((uint64_t)n);
     uart_puts(" hot=");
     put_u64((uint64_t)hot);
     uart_puts("\r\n");
     for (i = 0; i < n; i++) {
-        uart_puts("I3L1 pulled_label noun=");
+        uart_puts("LITE1 pulled_label noun=");
         uart_puts(fast_core_name(i));
         uart_puts("\r\n");
     }
@@ -172,7 +172,7 @@ static void print_pulled(void)
             have = fast_core_name(j) == hot_entry_name(i);
         if (have)
             continue;
-        uart_puts("I3L1 missing_label noun=");
+        uart_puts("LITE1 missing_label noun=");
         uart_puts(hot_entry_name(i));
         uart_puts("\r\n");
     }
@@ -182,7 +182,7 @@ static void print_jet_hits(void)
 {
     int i, n = hot_entry_count();
     int any = 0;
-    uart_puts("I3L1 jet_hits");
+    uart_puts("LITE1 jet_hits");
     for (i = 0; i < n; i++) {
         uint64_t hits = hot_entry_hits(i);
         if (hits == 0)
@@ -201,7 +201,7 @@ static void print_jet_hits(void)
 static void print_fast(void)
 {
     int i, n;
-    uart_puts("I3L1 fast clues=");
+    uart_puts("LITE1 fast clues=");
     put_u64(fast_clue_count());
     uart_puts(" registered=");
     put_u64((uint64_t)fast_reg_count());
@@ -215,7 +215,7 @@ static void print_fast(void)
     put_u64(fast_dups());
     uart_puts("\r\n");
     if (fast_first_clue_ok()) {
-        uart_puts("I3L1 fast_clue noun=");
+        uart_puts("LITE1 fast_clue noun=");
         print_noun(fast_first_clue(), 0);
         uart_puts("\r\n");
     }
@@ -224,7 +224,7 @@ static void print_fast(void)
         noun ch; int par; uint64_t ax;
         if (!fast_cold_entry(i, &ch, &par, &ax))
             continue;
-        uart_puts("I3L1 fast_cold i=");
+        uart_puts("LITE1 fast_cold i=");
         put_u64((uint64_t)i);
         uart_puts(" parent=");
         if (par < 0) uart_puts("root"); else put_u64((uint64_t)par);
@@ -236,16 +236,16 @@ static void print_fast(void)
     }
     n = fast_chum_count();
     for (i = 0; i < n; i++) {
-        uart_puts("I3L1 fast_chum noun=");
+        uart_puts("LITE1 fast_chum noun=");
         print_noun(fast_chum_at(i), 0);
         uart_puts("\r\n");
     }
 }
 
 static void print_nock_line(const char *kind, const char *name,
-                            const i3_host_result_t *r)
+                            const lite_host_result_t *r)
 {
-    uart_puts("I3L1 ");
+    uart_puts("LITE1 ");
     uart_puts(kind);
     uart_puts(" name=");
     uart_puts(name);
@@ -262,33 +262,33 @@ static void print_nock_line(const char *kind, const char *name,
     uart_puts(" effect_len=");
     put_u64(r->effect_len);
     uart_puts(" abort=");
-    uart_puts(i3_host_abort_name(r->jumped, r->abort_reason));
-    uart_puts(" i3_ops=");
-    put_u64(I3_SLAM_MAX_OPS);
-    uart_puts(" i3_cells=");
-    put_u64(I3_SLAM_MAX_CELLS);
-    uart_puts(" i3_stack=");
-    put_u64(I3_SLAM_MAX_STACK);
+    uart_puts(lite_host_abort_name(r->jumped, r->abort_reason));
+    uart_puts(" lite_ops=");
+    put_u64(LITE_SLAM_MAX_OPS);
+    uart_puts(" lite_cells=");
+    put_u64(LITE_SLAM_MAX_CELLS);
+    uart_puts(" lite_stack=");
+    put_u64(LITE_SLAM_MAX_STACK);
     uart_puts(" budget=");
     put_u64(r->ops);
     uart_puts("/");
-    put_u64(I3_SLAM_MAX_OPS);
+    put_u64(LITE_SLAM_MAX_OPS);
     uart_puts(",");
     put_u64(r->cells);
     uart_puts("/");
-    put_u64(I3_SLAM_MAX_CELLS);
+    put_u64(LITE_SLAM_MAX_CELLS);
     uart_puts(",");
     put_u64(r->stack);
     uart_puts("/");
-    put_u64(I3_SLAM_MAX_STACK);
+    put_u64(LITE_SLAM_MAX_STACK);
     uart_puts(" formula=");
     uart_puts(SLAM_FORMULA_TEXT);
     uart_puts("\r\n");
 }
 
-static void print_persist(const char *name, const i3_host_result_t *r)
+static void print_persist(const char *name, const lite_host_result_t *r)
 {
-    uart_puts("I3L1 persist_copy name=");
+    uart_puts("LITE1 persist_copy name=");
     uart_puts(name);
     uart_puts(" ticks=");
     put_u64(r->persist_ticks);
@@ -305,13 +305,13 @@ static void do_jetcheck(noun payload, const char *name);
 
 static int do_poke_with(noun cause, const char *name, noun jetcheck, int check)
 {
-    i3_host_result_t r;
+    lite_host_result_t r;
     int ok;
     heap_set_mode(HEAP_MODE_SCRATCH);
     fast_epoch_bump();
-    ok = i3_host_poke(cause, &r);
+    ok = lite_host_poke(cause, &r);
     if (ok) {
-        uart_puts("I3L1 effects name=");
+        uart_puts("LITE1 effects name=");
         uart_puts(name);
         uart_puts(" noun=");
         print_noun(r.effects, 0);
@@ -324,8 +324,8 @@ static int do_poke_with(noun cause, const char *name, noun jetcheck, int check)
     if (check)
         do_jetcheck(jetcheck, name);   /* before the scratch reset: cores live */
     heap_scratch_reset();
-#if defined(I3_COMPACT)
-    i3_host_handoff(); /* row 221: effects handed off, scratch reset */
+#if defined(LITE_COMPACT)
+    lite_host_handoff(); /* row 221: effects handed off, scratch reset */
 #endif
     return ok;
 }
@@ -335,7 +335,7 @@ static int do_poke(noun cause, const char *name)
     return do_poke_with(cause, name, NOUN_ZERO, 0);
 }
 
-static void fill_call_result(i3_host_result_t *r, int jumped, uint64_t ticks)
+static void fill_call_result(lite_host_result_t *r, int jumped, uint64_t ticks)
 {
     r->parse = jumped == 0;
     r->jumped = jumped;
@@ -368,14 +368,14 @@ static int call_formula(int raw, noun *fol)
 
 static int do_call(noun label, noun sample, const char *name, int raw)
 {
-    i3_host_result_t r;
+    lite_host_result_t r;
     noun gate, edited, product, fol;
     jmp_buf saved;
     uint64_t t0, t1;
     int jumped;
     gate = fast_core_lookup(label);
     if (gate == NOUN_ZERO || !noun_is_cell(gate)) {
-        uart_puts("I3L1 call name=");
+        uart_puts("LITE1 call name=");
         uart_puts(name);
         uart_puts(" missing=yes abort=none\r\n");
         return 0;
@@ -383,7 +383,7 @@ static int do_call(noun label, noun sample, const char *name, int raw)
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (!edit_sample(gate, sample, &edited)
         || !call_formula(raw, &fol)) {
-        uart_puts("I3L1 call name=");
+        uart_puts("LITE1 call name=");
         uart_puts(name);
         uart_puts(" missing=yes abort=none\r\n");
         heap_scratch_reset();
@@ -391,9 +391,9 @@ static int do_call(noun label, noun sample, const char *name, int raw)
     }
     /* call-nock is a parity diagnostic: 16x ops, and cells up to what the
      * 32 MiB scratch holds. The stack limit stays (it guards the C stack). */
-    nock_budget_set_limits(raw ? I3_SLAM_MAX_OPS * 16 : I3_SLAM_MAX_OPS,
-                           raw ? 1300000ULL : I3_SLAM_MAX_CELLS);
-    nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
+    nock_budget_set_limits(raw ? LITE_SLAM_MAX_OPS * 16 : LITE_SLAM_MAX_OPS,
+                           raw ? 1300000ULL : LITE_SLAM_MAX_CELLS);
+    nock_eval_stack_set_limit(LITE_SLAM_MAX_STACK);
     __builtin_memcpy(saved, nock_abort, sizeof saved);
     t0 = cntvct();
     jumped = setjmp(nock_abort);
@@ -412,7 +412,7 @@ static int do_call(noun label, noun sample, const char *name, int raw)
     __builtin_memcpy(nock_abort, saved, sizeof saved);
     fill_call_result(&r, 0, t1 - t0);
     r.product = product;
-    uart_puts("I3L1 call name=");
+    uart_puts("LITE1 call name=");
     uart_puts(name);
     uart_puts(" noun=");
     print_noun(product, 0);
@@ -439,7 +439,7 @@ static int do_call(noun label, noun sample, const char *name, int raw)
 /* The jet side runs under the slam caps. The Hoon side is the reference,
  * not a production path: it gets call-nock's diagnostic cell bound and 64x
  * the ops (++jam and ++shax as plain Hoon take millions of ops). */
-#define JC_HOON_OPS (I3_SLAM_MAX_OPS * 64ULL)
+#define JC_HOON_OPS (LITE_SLAM_MAX_OPS * 64ULL)
 #define JC_HOON_CELLS 1300000ULL
 
 static uint64_t g_jc_reason;   /* the last budget abort's reason */
@@ -457,8 +457,8 @@ static int jc_slam(noun core, noun sample, noun *out, int hoon)
     if (hoon)
         nock_budget_set_limits(JC_HOON_OPS, JC_HOON_CELLS);
     else
-        nock_budget_set_limits(I3_SLAM_MAX_OPS, I3_SLAM_MAX_CELLS);
-    nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
+        nock_budget_set_limits(LITE_SLAM_MAX_OPS, LITE_SLAM_MAX_CELLS);
+    nock_eval_stack_set_limit(LITE_SLAM_MAX_STACK);
     __builtin_memcpy(saved, nock_abort, sizeof saved);
     jumped = setjmp(nock_abort);
     if (jumped != 0) {
@@ -510,7 +510,7 @@ static void do_jetcheck(noun payload, const char *name)
         const char *label;
         noun core, vec;
         if (!fast_reg_entry(i, &label, &core)) {
-            uart_puts("I3L1 jetcheck_stale entry=");
+            uart_puts("LITE1 jetcheck_stale entry=");
             put_u64((uint64_t)i);
             uart_puts("\r\n");
             continue;
@@ -518,7 +518,7 @@ static void do_jetcheck(noun payload, const char *name)
         vec = jc_vectors(payload, label);
         if (!noun_is_cell(vec)) {
             bare++;
-            uart_puts("I3L1 jetcheck_unvectored label=");
+            uart_puts("LITE1 jetcheck_unvectored label=");
             uart_puts(label);
             uart_puts("\r\n");
             continue;
@@ -551,7 +551,7 @@ static void do_jetcheck(noun payload, const char *name)
                 mismatch++;
                 verdict = "mismatch";
             }
-            uart_puts("I3L1 jetcheck name=");
+            uart_puts("LITE1 jetcheck name=");
             uart_puts(name);
             uart_puts(" label=");
             uart_puts(label);
@@ -569,7 +569,7 @@ static void do_jetcheck(noun payload, const char *name)
             (void)heap_scratch_rewind(mark);
         }
     }
-    uart_puts("I3L1 jetcheck_summary name=");
+    uart_puts("LITE1 jetcheck_summary name=");
     uart_puts(name);
     uart_puts(" entries=");
     put_u64((uint64_t)n);
@@ -588,12 +588,12 @@ static void do_jetcheck(noun payload, const char *name)
 
 static int do_peek(noun path, const char *name)
 {
-    i3_host_result_t r;
+    lite_host_result_t r;
     int ok;
     heap_set_mode(HEAP_MODE_SCRATCH);
-    ok = i3_host_peek(path, &r);
+    ok = lite_host_peek(path, &r);
     if (ok) {
-        uart_puts("I3L1 peek name=");
+        uart_puts("LITE1 peek name=");
         uart_puts(name);
         uart_puts(" noun=");
         print_noun(r.product, 0);
@@ -610,22 +610,22 @@ static int do_peek(noun path, const char *name)
 static int do_state_hash(const char *name)
 {
     static const char hexd[] = "0123456789abcdef";
-    i3_host_result_t r;
-    uint8_t hash[I3_DIGEST_BYTES];
+    lite_host_result_t r;
+    uint8_t hash[LITE_DIGEST_BYTES];
     uint64_t event = 0, scratch0, free0;
     uint32_t i;
     int ok;
     heap_set_mode(HEAP_MODE_SCRATCH);
     scratch0 = heap_cells_used(HEAP_MODE_SCRATCH);
     free0 = heap_persist_free_cells();
-    ok = i3_host_state_hash(&event, hash, &r);
-    uart_puts("I3L1 state-hash name=");
+    ok = lite_host_state_hash(&event, hash, &r);
+    uart_puts("LITE1 state-hash name=");
     uart_puts(name);
     if (ok) {
         uart_puts(" event=");
         put_u64(event);
         uart_puts(" hash=");
-        for (i = 0; i < I3_DIGEST_BYTES; i++) {
+        for (i = 0; i < LITE_DIGEST_BYTES; i++) {
             uart_putc(hexd[hash[i] >> 4]);
             uart_putc(hexd[hash[i] & 15u]);
         }
@@ -644,8 +644,8 @@ static int do_state_hash(const char *name)
 
 static int do_persist(const char *name)
 {
-    i3_host_result_t r;
-    int ok = i3_host_persist(&r);
+    lite_host_result_t r;
+    int ok = lite_host_persist(&r);
     print_persist(name, &r);
     return ok;
 }
@@ -653,36 +653,36 @@ static int do_persist(const char *name)
 static int read_app(const uint8_t **jam, uint64_t *jam_len, const char **hex)
 {
     volatile const uint8_t *base =
-        (volatile const uint8_t *)(uintptr_t)I3_APP_BASE;
+        (volatile const uint8_t *)(uintptr_t)LITE_APP_BASE;
     uint64_t n = 0;
     uint32_t i;
     for (i = 0; i < 8; i++)
         n |= (uint64_t)base[i] << (8u * i);
-    if (n == 0 || n > I3_CUE_MAX_INPUT_BYTES)
+    if (n == 0 || n > LITE_CUE_MAX_INPUT_BYTES)
         return 0;
     *jam_len = n;
-    *hex = (const char *)(uintptr_t)(I3_APP_BASE + 8u);
-    *jam = (const uint8_t *)(uintptr_t)(I3_APP_BASE + 8u + I3_APP_SHA256_HEX_LEN);
+    *hex = (const char *)(uintptr_t)(LITE_APP_BASE + 8u);
+    *jam = (const uint8_t *)(uintptr_t)(LITE_APP_BASE + 8u + LITE_APP_SHA256_HEX_LEN);
     return 1;
 }
 
 static int do_load_app(const char *name)
 {
-    i3_host_result_t r;
+    lite_host_result_t r;
     const uint8_t *jam;
     const char *hex;
     uint64_t jam_len;
     int ok;
     if (!read_app(&jam, &jam_len, &hex)) {
-        uart_puts("I3L1 load-app name=");
+        uart_puts("LITE1 load-app name=");
         uart_puts(name);
         uart_puts(" missing=yes abort=none\r\n");
         return 0;
     }
     heap_set_mode(HEAP_MODE_SCRATCH);
-    ok = i3_host_load_app(jam, jam_len, hex, &r);
+    ok = lite_host_load_app(jam, jam_len, hex, &r);
     if (ok) {
-        uart_puts("I3L1 effects name=");
+        uart_puts("LITE1 effects name=");
         uart_puts(name);
         uart_puts(" noun=");
         print_noun(r.effects, 0);
@@ -693,8 +693,8 @@ static int do_load_app(const char *name)
     if (ok)
         print_persist(name, &r);
     heap_scratch_reset();
-#if defined(I3_COMPACT)
-    i3_host_handoff(); /* row 221: effects handed off, scratch reset */
+#if defined(LITE_COMPACT)
+    lite_host_handoff(); /* row 221: effects handed off, scratch reset */
 #endif
     return ok;
 }
@@ -753,7 +753,7 @@ static int run_plan(noun plan)
                     l = c->tail;
                 }
                 if (!ok) {
-                    uart_puts("I3L1 without name=");
+                    uart_puts("LITE1 without name=");
                     uart_puts(name);
                     uart_puts(" unknown-label=yes\r\n");
                 } else {
@@ -770,7 +770,7 @@ static int run_plan(noun plan)
         } else if (tag_is(tag, "load-app")) {
             (void)do_load_app(name);
         } else {
-            uart_puts("I3L1 skip tag=");
+            uart_puts("LITE1 skip tag=");
             print_name(tag);
             uart_puts("\r\n");
         }
@@ -809,7 +809,7 @@ static int plan_has_call(noun plan)
 static int read_plan(const uint8_t **plan, uint64_t *plan_len)
 {
     volatile const uint8_t *base =
-        (volatile const uint8_t *)(uintptr_t)I3_PLAN_BASE;
+        (volatile const uint8_t *)(uintptr_t)LITE_PLAN_BASE;
     uint64_t n = 0;
     uint32_t i;
     for (i = 0; i < 8; i++)
@@ -819,60 +819,60 @@ static int read_plan(const uint8_t **plan, uint64_t *plan_len)
         *plan_len = 0;
         return 1;
     }
-    if (n > I3_CUE_MAX_INPUT_BYTES)
+    if (n > LITE_CUE_MAX_INPUT_BYTES)
         return 0;
-    *plan = (const uint8_t *)(uintptr_t)(I3_PLAN_BASE + 8u);
+    *plan = (const uint8_t *)(uintptr_t)(LITE_PLAN_BASE + 8u);
     *plan_len = n;
     return 1;
 }
 
-void i3_l1_probe_boot(void)
+void lite_probe_boot(void)
 {
     const uint8_t *plan_bytes;
     uint64_t plan_len;
     noun plan = NOUN_ZERO;
 
-    uart_puts("I3L1 start\r\n");
+    uart_puts("LITE1 start\r\n");
     print_unjetted();
-    if (!i3_host_ready()) {
-        uart_puts("I3L1 terminal=host-not-ready\r\n");
+    if (!lite_host_ready()) {
+        uart_puts("LITE1 terminal=host-not-ready\r\n");
         return;
     }
     print_fast();
     print_jet_hits();
 
     if (!read_plan(&plan_bytes, &plan_len)) {
-        uart_puts("I3L1 terminal=plan-cue-refuse\r\n");
+        uart_puts("LITE1 terminal=plan-cue-refuse\r\n");
         return;
     }
-    uart_puts("I3L1 plan_bytes=");
+    uart_puts("LITE1 plan_bytes=");
     put_u64(plan_len);
     uart_puts("\r\n");
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     uint64_t plan_cells0 = heap_cells_used(HEAP_MODE_PERSIST);
 #endif
     if (plan_len != 0) {
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
         /* Row 221: the plan is test input; a persist flip would drop it, so
          * it is cued into the bottom of scratch, which every reset keeps,
          * and it is a harness root of the atom store rebuild. */
         heap_scratch_reset();
         heap_set_mode(HEAP_MODE_SCRATCH);
-        if (!i3_host_cue_bytes_scratch(plan_bytes, plan_len, &plan)) {
-            uart_puts("I3L1 terminal=plan-cue-refuse\r\n");
+        if (!lite_host_cue_bytes_scratch(plan_bytes, plan_len, &plan)) {
+            uart_puts("LITE1 terminal=plan-cue-refuse\r\n");
             return;
         }
         heap_scratch_floor_set();
-        i3_host_harness_root(plan);
+        lite_host_harness_root(plan);
 #else
         heap_set_mode(HEAP_MODE_PERSIST);
-        if (!i3_host_cue_bytes(plan_bytes, plan_len, &plan)) {
-            uart_puts("I3L1 terminal=plan-cue-refuse\r\n");
+        if (!lite_host_cue_bytes(plan_bytes, plan_len, &plan)) {
+            uart_puts("LITE1 terminal=plan-cue-refuse\r\n");
             return;
         }
 #endif
     }
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     /* The plan is test input, not node state: move the cap past it, and
      * only by its size, so replay already done this boot still counts
      * against H (a write boot after replay must fit what the next boot
@@ -890,7 +890,7 @@ void i3_l1_probe_boot(void)
     if (plan_len == 0) {
         if (!mini_plan()) {
             print_fast();
-            uart_puts("I3L1 terminal=mini-fail\r\n");
+            uart_puts("LITE1 terminal=mini-fail\r\n");
             return;
         }
     } else {
@@ -898,5 +898,5 @@ void i3_l1_probe_boot(void)
         (void)do_persist("final");
     }
     print_fast();
-    uart_puts("I3L1 terminal=done\r\n");
+    uart_puts("LITE1 terminal=done\r\n");
 }

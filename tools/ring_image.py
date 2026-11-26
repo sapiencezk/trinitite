@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: MIT
 """Row 212 PR 1c: read the lite node's recorder ring image off the device.
 
-The ring layout is in src/i3_ring.h. This tool reads a ring image (on QEMU the
+The ring layout is in src/lite_ring.h. This tool reads a ring image (on QEMU the
 semihost file build/ring.img; on the board the ring extent read off the SD card),
 checks it (header checksum, record digests, consecutive seq, consecutive event
 numbers within each segment, sha256 of each checkpoint's jam = its D), and can
 turn it into a cold-store image that an unmodified lite node (the same flag-on
-image, I3_LITE_LOG=1) boots for an exact replay off the device: the chosen
-checkpoint as a state BLOB and its `[%i3-ckpt N sid D kernel-blake3]` header,
+image, LITE_LOG=1) boots for an exact replay off the device: the chosen
+checkpoint as a state BLOB and its `[%lite-ckpt N sid D kernel-blake3]` header,
 then every input after it as LOG entries, with the superblock's log base at N
 (entries 1..N dropped). The node then boots from that checkpoint (row 212 (3)),
 replays the inputs and answers /state-hash.
@@ -27,7 +27,7 @@ from jam import jam  # noqa: E402
 RING_MAGIC, REC_MAGIC = 0x0031474E49523349, 0x52523349
 DATA0, SLOT, REC_HDR = 1024, 512, 64
 GENESIS, CKPT, INPUT, WRAP = 1, 2, 3, 4
-UINT64_MAX = 0xFFFF_FFFF_FFFF_FFFF  # never a valid gen, as in src/i3_ring.c (h.gen == UINT64_MAX)
+UINT64_MAX = 0xFFFF_FFFF_FFFF_FFFF  # never a valid gen, as in src/lite_ring.c (h.gen == UINT64_MAX)
 KIND = {GENESIS: "genesis", CKPT: "ckpt", INPUT: "input"}
 HDR = struct.Struct("<QIIQQQQQQQQQQ32s")
 REC = struct.Struct("<IIQQQ32s")
@@ -118,7 +118,7 @@ def chain(img: bytes, h: dict, prefix: bool = False) -> list[dict]:
 
 
 def records(path) -> tuple[dict, list[dict]]:
-    """As the node opens the ring (src/i3_ring.c open_slots): the newest valid header whose
+    """As the node opens the ring (src/lite_ring.c open_slots): the newest valid header whose
     chain is intact (fallback 0, status=ok), else the other slot (fallback 1, torn-older),
     else the longest valid prefix from the tail of either slot, newest first (prefix true,
     torn-prefix; head and last_n then describe the prefix, as the node commits them).
@@ -233,7 +233,7 @@ def cold_image(path, out, start="oldest") -> dict:
     if seg["kind"] == "ckpt":
         sid = hash62(seg["jam"])
         put(KIND_BLOB, seg["jam"])
-        hdr = (cord("i3-ckpt"), (seg["n"], (sid, (int.from_bytes(seg["d"], "little"),
+        hdr = (cord("lite-ckpt"), (seg["n"], (sid, (int.from_bytes(seg["d"], "little"),
                                                   int.from_bytes(seg["kb"], "little")))))
         put(KIND_BLOB, atom_bytes(jam(hdr)))
         # Row 221 (7): the record's job_sum (jobs after the device's log base when it was

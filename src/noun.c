@@ -5,7 +5,7 @@
 #include "blake3.h"
 #include "uart.h"
 #include "nock.h"
-#include "i2_admission_envelope.h"
+#include "admission_envelope.h"
 
 /*
  * Split cell heap (see memory.h):
@@ -21,13 +21,13 @@ static int      persist_sel;   /* 0 or 1 — active semispace */
 static int      noun_tx_live;
 static int      noun_tx_mode;
 static uint8_t *noun_tx_cell_mark;
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
 /* Row 221 code region (memory.h). code_build: persist allocations go to the
  * code region (boot only). code_end: its bump once the build is done. */
 static int      code_build;
 static int      code_overflow;
 static uint8_t *code_saved_ptr;
-static uint8_t *code_end = (uint8_t *)(uintptr_t)I3_CODE_BASE;
+static uint8_t *code_end = (uint8_t *)(uintptr_t)LITE_CODE_BASE;
 #endif
 
 
@@ -54,16 +54,16 @@ static uint8_t *persist_base(int sel)
     return (uint8_t *)(uintptr_t)(HEAP_BASE + (uint64_t)sel * HEAP_PERSIST_HALF);
 }
 
-#if defined(I3_PERSIST_HEADROOM_CELLS)
-/* Test knob (I3_PERSIST_HEADROOM_CELLS=<cells>, off by default): cap the live
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
+/* Test knob (LITE_PERSIST_HEADROOM_CELLS=<cells>, off by default): cap the live
  * persist half at <cells> past the bump pointer when the cap is armed, so a
  * short lite log reaches the persist ceiling that a full half reaches only
- * past ~3400 steps. Armed by i3_host_boot before replay, and again by the
+ * past ~3400 steps. Armed by lite_host_boot before replay, and again by the
  * L1 probe after it cues its plan. */
 static uint8_t *persist_cap;
 void heap_persist_cap_arm(void)
 {
-    persist_cap = persist_ptr + (uint64_t)(I3_PERSIST_HEADROOM_CELLS) * sizeof(cell_t);
+    persist_cap = persist_ptr + (uint64_t)(LITE_PERSIST_HEADROOM_CELLS) * sizeof(cell_t);
 }
 
 /* Move the cap out by `cells`: test input cued into persist after the cap
@@ -80,11 +80,11 @@ void heap_persist_cap_extend(uint64_t cells)
 
 static uint8_t *persist_limit(int sel)
 {
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
     if (code_build)
-        return (uint8_t *)(uintptr_t)I3_CODE_TOP;
+        return (uint8_t *)(uintptr_t)LITE_CODE_TOP;
 #endif
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     if (persist_cap && sel == persist_sel && persist_cap < persist_base(sel) + HEAP_PERSIST_HALF)
         return persist_cap;
 #endif
@@ -101,7 +101,7 @@ int heap_get_mode(void)
     return heap_mode;
 }
 
-#if defined(I3_COMPACT) && defined(I3_L1_PROBE)
+#if defined(LITE_COMPACT) && defined(LITE_PROBE)
 /* Row 221 tests: the L1 plan is test input, cued into the bottom of scratch
  * (a persist flip would drop it), and every reset leaves it there. */
 static uint8_t *scratch_floor;
@@ -113,7 +113,7 @@ void heap_scratch_floor_set(void)
 
 void heap_scratch_reset(void)
 {
-#if defined(I3_COMPACT) && defined(I3_L1_PROBE)
+#if defined(LITE_COMPACT) && defined(LITE_PROBE)
     if (scratch_floor) {
         scratch_ptr = scratch_floor;
         return;
@@ -156,7 +156,7 @@ static void *heap_alloc(size_t bytes) {
         p   = persist_ptr;
         top = persist_limit(persist_sel);
         if (p > top || (size_t)(top - p) < bytes) {
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
             if (code_build)
                 code_overflow = 1;
 #endif
@@ -184,7 +184,7 @@ static void *heap_alloc_checked(size_t bytes)
         p = persist_ptr;
         top = persist_limit(persist_sel);
         if (p > top || (size_t)(top - p) < bytes) {
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
             if (code_build)
                 code_overflow = 1;
 #endif
@@ -225,12 +225,12 @@ int alloc_cell_checked(noun head, noun tail, noun *out)
 
 void cell_inc(noun n) {
     if (!noun_is_cell(n)) return;
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
     /* Row 221 (3): nothing writes the code region after the boot build. The
-     * refcount is unused on the I3 host, so its cells keep the counts they
+     * refcount is unused on the lite host, so its cells keep the counts they
      * had when the build ended. */
-    if (!code_build && cell_ptr(n) >= (uint32_t)I3_CODE_BASE
-        && cell_ptr(n) < (uint32_t)I3_CODE_TOP)
+    if (!code_build && cell_ptr(n) >= (uint32_t)LITE_CODE_BASE
+        && cell_ptr(n) < (uint32_t)LITE_CODE_TOP)
         return;
 #endif
     cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
@@ -240,9 +240,9 @@ void cell_inc(noun n) {
 /* ── Deep copy (cells → current heap mode; atoms shared) ─────────────────── */
 /*
  * Open-addressed map old cell_ptr → new noun. Linear scan was O(n²) and made
- * persist_reclaim of a ~7k-cell I2 gate too slow for QEMU smoke.
+ * a copy of a few thousand cells too slow for QEMU.
  */
-#define COPY_MAP_MAX  I2_COPY_MAP_ENTRIES
+#define COPY_MAP_MAX  ENVELOPE_COPY_MAP_ENTRIES
 #define COPY_DEPTH_MAX 256u
 static uint32_t g_copy_key[COPY_MAP_MAX];
 static noun     g_copy_val[COPY_MAP_MAX];
@@ -274,13 +274,13 @@ static int cell_in_live_persist(uint32_t ptr)
     uintptr_t p = (uintptr_t)ptr;
     uintptr_t base = (uintptr_t)persist_base(persist_sel);
     uintptr_t bump = (uintptr_t)persist_ptr;
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
     /* Row 221 (3): the copier keeps code-region cells as they are, the
      * same way it keeps cells already in the live half. */
-    if (p >= (uintptr_t)I3_CODE_BASE && p < (uintptr_t)code_end)
+    if (p >= (uintptr_t)LITE_CODE_BASE && p < (uintptr_t)code_end)
         return 1;
     if (code_build)
-        return p >= (uintptr_t)I3_CODE_BASE && p < bump;
+        return p >= (uintptr_t)LITE_CODE_BASE && p < bump;
 #endif
     return p >= base && p < bump;
 }
@@ -320,7 +320,7 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
         if (!g_copy_used[i]) {
-            if (g_copy_entries >= I2_COPY_MAP_ADMITTED)
+            if (g_copy_entries >= ENVELOPE_COPY_MAP_ADMITTED)
                 break;
             g_copy_key[i] = op;
             g_copy_val[i] = neu;
@@ -757,7 +757,7 @@ int noun_eq(noun a, noun b) {
     return 0;
 }
 
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
 /* ── Row 221 (row 212 (c)): code region, persist flip, atom store rebuild ── */
 
 /* Boot only: persist allocations go to the code region until heap_code_end.
@@ -766,7 +766,7 @@ int noun_eq(noun a, noun b) {
 void heap_code_begin(void)
 {
     code_saved_ptr = persist_ptr;
-    persist_ptr = (uint8_t *)(uintptr_t)I3_CODE_BASE;
+    persist_ptr = (uint8_t *)(uintptr_t)LITE_CODE_BASE;
     code_overflow = 0;
     code_build = 1;
 }
@@ -783,12 +783,12 @@ int heap_code_overflowed(void) { return code_overflow; }
 uint64_t heap_code_bytes(void)
 {
     uint8_t *end = code_build ? persist_ptr : code_end;
-    return (uint64_t)(end - (uint8_t *)(uintptr_t)I3_CODE_BASE);
+    return (uint64_t)(end - (uint8_t *)(uintptr_t)LITE_CODE_BASE);
 }
 
 int heap_in_code(uint32_t ptr)
 {
-    return (uintptr_t)ptr >= (uintptr_t)I3_CODE_BASE && (uintptr_t)ptr < (uintptr_t)code_end;
+    return (uintptr_t)ptr >= (uintptr_t)LITE_CODE_BASE && (uintptr_t)ptr < (uintptr_t)code_end;
 }
 
 int heap_in_live_persist(uint32_t ptr)
@@ -800,12 +800,12 @@ int heap_in_live_persist(uint32_t ptr)
 /* Row 221 (5): a transaction on the other persist half. Begin moves the
  * bump to the other half's base; abort puts the old half and bump back, so
  * the node keeps running on the old half; commit keeps the new half. Under
- * the I3_PERSIST_HEADROOM_CELLS test knob the cap is lifted for the copy and
+ * the LITE_PERSIST_HEADROOM_CELLS test knob the cap is lifted for the copy and
  * re-armed after the commit at the new bump (H cells of headroom again). */
 static uint8_t *cmp_saved_ptr;
 static int      cmp_saved_sel;
 static int      cmp_active;
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
 static uint8_t *cmp_saved_cap;
 #endif
 
@@ -813,7 +813,7 @@ void heap_compact_begin(void)
 {
     cmp_saved_ptr = persist_ptr;
     cmp_saved_sel = persist_sel;
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     cmp_saved_cap = persist_cap;
     persist_cap = 0;
 #endif
@@ -827,7 +827,7 @@ void heap_compact_commit(void)
     if (!cmp_active)
         return;
     cmp_active = 0;
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     if (cmp_saved_cap)
         heap_persist_cap_arm();
 #endif
@@ -839,7 +839,7 @@ void heap_compact_abort(void)
         return;
     persist_ptr = cmp_saved_ptr;
     persist_sel = cmp_saved_sel;
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     persist_cap = cmp_saved_cap;
 #endif
     cmp_active = 0;

@@ -5,24 +5,31 @@
 #include "blake3.h"
 #include "bounded_cue.h"
 #include "cold.h"
-#include "i2_admission_envelope.h"
-#include "i2_admission_metrics.h"
-#include "i3_admission.h"
-#include "i3_host.h"
+#include "admission_envelope.h"
+#include "admission_metrics.h"
+#include "lite_admission.h"
+#include "lite_host.h"
 #if defined(COLD_LITE_LOG)
-#include "i3_ring.h"
+#include "lite_ring.h"
 #endif
-#if defined(I3_L1_PROBE)
-#include "i3_l1_probe.h"
+#if defined(LITE_PROBE)
+#include "lite_probe.h"
 #endif
 #include "jam.h"
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 #include "ckpt_jam.h"
 #endif
 #include "nock.h"
 #include "setjmp.h"
 #include "sha256.h"
 #include "uart.h"
+
+/* The checkpoint header tag. The writer stores %lite-ckpt; until the v0 reset before
+ * Genesis (1499kernel, decision of 2026-11-23) the boot also takes a header
+ * an earlier image wrote as %i3-ckpt, so a node's checkpoints survive the
+ * rename (1499kernel row 389). */
+#define CKPT_TAG "lite-ckpt"
+#define CKPT_TAG_OLD "i3-ckpt"
 
 #define KICK_FORMULA_TEXT "[9 2 0 1]"
 
@@ -37,13 +44,13 @@ static uint64_t g_jam_len;
 static const char *g_stop;
 static const char STOP_PERSIST[] = "persist";
 /* Row 200 persist stop (share): a live step must leave this many persist cells
- * free, 1/16 of what was free when replay began (i3_host_boot). Replaying
+ * free, 1/16 of what was free when replay began (lite_host_boot). Replaying
  * a step keeps a few more cells than the live step did (its job was
  * decoded from the log, not shared with input already in persist), so the
  * reserve is what lets the next boot replay every entry the live boot
  * appended before it stopped. */
 static uint64_t g_persist_reserve;
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 /* Q10: persist free cells right after this image's kernel cue, which every
  * boot of the image (same kernel, kernel-blake3 in the header) starts from. */
 static uint64_t g_boot_persist_free;
@@ -90,7 +97,7 @@ static void put_hex(const uint8_t *p, uint32_t n)
     }
 }
 
-const char *i3_host_abort_name(int jumped, uint64_t reason)
+const char *lite_host_abort_name(int jumped, uint64_t reason)
 {
     if (jumped == 0)
         return "none";
@@ -214,25 +221,25 @@ static uint64_t effect_list_len(noun effects)
     return n;
 }
 
-static cue_bounded_limits_t i3_limits(void)
+static cue_bounded_limits_t lite_limits(void)
 {
     cue_bounded_limits_t limits;
-    limits.max_input_bytes = I3_CUE_MAX_INPUT_BYTES;
-    limits.max_atom_bytes = I3_CUE_MAX_ATOM_BYTES;
-    limits.max_total_atom_bytes = I3_CUE_MAX_TOTAL_ATOM_BYTES;
-    limits.max_cache_entries = I3_CUE_CACHE_ADMITTED;
-    limits.max_work = I3_CUE_MAX_WORK;
-    limits.max_backrefs = I3_CUE_MAX_BACKREFS;
-    limits.max_depth = I3_CUE_MAX_DEPTH;
-    limits.max_nodes = I3_CUE_MAX_NODES;
-    limits.max_cells = I3_CUE_MAX_CELLS;
+    limits.max_input_bytes = LITE_CUE_MAX_INPUT_BYTES;
+    limits.max_atom_bytes = LITE_CUE_MAX_ATOM_BYTES;
+    limits.max_total_atom_bytes = LITE_CUE_MAX_TOTAL_ATOM_BYTES;
+    limits.max_cache_entries = LITE_CUE_CACHE_ADMITTED;
+    limits.max_work = LITE_CUE_MAX_WORK;
+    limits.max_backrefs = LITE_CUE_MAX_BACKREFS;
+    limits.max_depth = LITE_CUE_MAX_DEPTH;
+    limits.max_nodes = LITE_CUE_MAX_NODES;
+    limits.max_cells = LITE_CUE_MAX_CELLS;
     return limits;
 }
 
 static void host_budget(void)
 {
-    nock_budget_set_limits(I3_SLAM_MAX_OPS, I3_SLAM_MAX_CELLS);
-    nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
+    nock_budget_set_limits(LITE_SLAM_MAX_OPS, LITE_SLAM_MAX_CELLS);
+    nock_eval_stack_set_limit(LITE_SLAM_MAX_STACK);
 }
 
 static int host_nock(noun subject, noun formula, noun *product)
@@ -250,7 +257,7 @@ static int host_nock(noun subject, noun formula, noun *product)
     return 0;
 }
 
-static void clear_result(i3_host_result_t *out)
+static void clear_result(lite_host_result_t *out)
 {
     if (!out)
         return;
@@ -270,7 +277,7 @@ static void clear_result(i3_host_result_t *out)
     out->persist_copy_map_capacity = noun_copy_map_capacity();
 }
 
-static void fill_eval(i3_host_result_t *out, int jumped, uint64_t ticks)
+static void fill_eval(lite_host_result_t *out, int jumped, uint64_t ticks)
 {
     if (!out)
         return;
@@ -294,23 +301,27 @@ static void nv_flush(void)
     if (cold_nv_enabled())
         (void)cold_nv_flush();
 #if defined(COLD_LITE_LOG)
-    i3_ring_flush();
+    lite_ring_flush();
 #endif
 }
 
 #if defined(COLD_LITE_LOG)
 /* Row 212 PR 1c: every accepted entry also goes to the recorder ring, as the
- * same jam bytes the cold log holds (src/i3_ring.c). A ring that cannot take
+ * same jam bytes the cold log holds (src/lite_ring.c). A ring that cannot take
  * it skips inputs until its next checkpoint; the step is not affected. */
 static void ring_input(uint64_t num, noun job)
 {
     const uint8_t *bytes;
     uint64_t len;
     if (jam_encode_bytes_checked(job, &bytes, &len) == 0)
-        i3_ring_input(num, bytes, len);
+        lite_ring_input(num, bytes, len);
 }
 #endif
 
+/* The trip, persist-trip and base records are stored in the cold store and
+ * found by the hash of their jam, so their tags (%i3-trip, %i3-trip-persist,
+ * %i3-base) are versioned on-media constants, kept byte-identical (1499kernel
+ * row 389 Q2 A). */
 static int trip_noun(uint64_t num, noun *out)
 {
     return nest(tas("i3-trip"), direct(num), out);
@@ -336,7 +347,7 @@ static void host_stop(const char *reason)
     if (g_stop)
         return;
     g_stop = reason;
-    uart_puts("I3H stop reason=");
+    uart_puts("LITEH stop reason=");
     uart_puts(reason);
     uart_puts(" event=");
     put_u64(g_event_num);
@@ -389,18 +400,18 @@ static int install_sample(noun template, noun sample, noun *out)
  * and g_kernel / g_event_num never move, so state never points into
  * scratch. The cells of a prepared copy whose append then fails are left
  * unreferenced in persist. The heap mode is restored for the caller. */
-static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_out);
+static int persist_prepare(noun kernel, lite_host_result_t *out, noun *installed_out);
 
 /* Distinct cells in `job`, as a decode from the log builds them: every
  * cell counts once, whichever heap it sits in now (a live job may share
  * cells already in persist; its replay will not). Iterative, with a fixed
  * visited set. The limit is the log decoder's own: replay cues each entry
- * under cue_i2_limits (cold.c decode_object), whose max_cells is
- * I2_CUE_MAX_CELLS, and a decode builds at least one cell per distinct
+ * under cue_envelope_limits (cold.c decode_object), whose max_cells is
+ * ENVELOPE_CUE_MAX_CELLS, and a decode builds at least one cell per distinct
  * cell. A job above it could never replay, so it counts as unbounded and
  * the step takes the row 200 persist stop instead of being accepted. The
  * set is twice the limit, so it is at most half full. */
-#define JOB_CELLS_MAX ((uint32_t)I2_CUE_MAX_CELLS)
+#define JOB_CELLS_MAX ((uint32_t)ENVELOPE_CUE_MAX_CELLS)
 #define JOB_SET_BITS 17u
 #define JOB_SET_SIZE (1u << JOB_SET_BITS)
 #define JOB_STACK_MAX (2u * JOB_CELLS_MAX)
@@ -469,14 +480,14 @@ static uint64_t live_reserve(uint64_t cells)
 }
 
 /* Live step: prepare the persist copy and keep the reserve, or refuse. */
-static int persist_prepare_live(noun kernel, noun job, i3_host_result_t *out,
+static int persist_prepare_live(noun kernel, noun job, lite_host_result_t *out,
                                 noun *installed_out)
 {
     uint64_t cells = job_cells(job);
     if (!persist_prepare(kernel, out, installed_out))
         return 0;
     if (heap_persist_free_cells() < live_reserve(cells)) {
-        uart_puts("I3H persist reserve=");
+        uart_puts("LITEH persist reserve=");
         put_u64(live_reserve(cells));
         uart_puts(" share=");
         put_u64(g_persist_reserve);
@@ -491,7 +502,7 @@ static int persist_prepare_live(noun kernel, noun job, i3_host_result_t *out,
     return 1;
 }
 
-static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_out)
+static int persist_prepare(noun kernel, lite_host_result_t *out, noun *installed_out)
 {
     noun sample, copy, installed;
     uint64_t t0, t1;
@@ -524,7 +535,7 @@ static int persist_prepare(noun kernel, i3_host_result_t *out, noun *installed_o
     return ok;
 }
 
-int i3_host_persist(i3_host_result_t *out)
+int lite_host_persist(lite_host_result_t *out)
 {
     noun installed;
     if (!persist_prepare(g_kernel, out, &installed))
@@ -535,15 +546,15 @@ int i3_host_persist(i3_host_result_t *out)
 
 static void print_cue(cue_bounded_status_t status, uint64_t ticks)
 {
-    uint64_t cells = g_i2_admission_metrics.cue_cells_hwm;
-    uint64_t nodes = g_i2_admission_metrics.cue_nodes_hwm;
+    uint64_t cells = g_admission_metrics.cue_cells_hwm;
+    uint64_t nodes = g_admission_metrics.cue_nodes_hwm;
     uint64_t atoms = nodes > cells ? nodes - cells : 0;
-    uart_puts("I3H cue status=");
+    uart_puts("LITEH cue status=");
     uart_puts(cue_bounded_status_name(status));
     uart_puts(" cells=");
     put_u64(cells);
     uart_puts(" cells_bound=");
-    put_u64(I3_CUE_MAX_CELLS);
+    put_u64(LITE_CUE_MAX_CELLS);
     uart_puts(" atoms=");
     put_u64(atoms);
     uart_puts(" ticks=");
@@ -551,40 +562,40 @@ static void print_cue(cue_bounded_status_t status, uint64_t ticks)
     uart_puts(" first_bound=");
     uart_puts(status == CUE_BOUNDED_OK ? "none" : cue_bounded_status_name(status));
     uart_puts(" work=");
-    put_u64(g_i2_admission_metrics.cue_work_hwm);
+    put_u64(g_admission_metrics.cue_work_hwm);
     uart_puts(" work_bound=");
-    put_u64(I3_CUE_MAX_WORK);
+    put_u64(LITE_CUE_MAX_WORK);
     uart_puts(" nodes=");
     put_u64(nodes);
     uart_puts(" nodes_bound=");
-    put_u64(I3_CUE_MAX_NODES);
+    put_u64(LITE_CUE_MAX_NODES);
     uart_puts(" backrefs=");
-    put_u64(g_i2_admission_metrics.cue_backrefs_hwm);
+    put_u64(g_admission_metrics.cue_backrefs_hwm);
     uart_puts(" backrefs_bound=");
-    put_u64(I3_CUE_MAX_BACKREFS);
+    put_u64(LITE_CUE_MAX_BACKREFS);
     uart_puts(" cache=");
-    put_u64(g_i2_admission_metrics.cue_cache_entries_hwm);
+    put_u64(g_admission_metrics.cue_cache_entries_hwm);
     uart_puts(" cache_bound=");
-    put_u64(I3_CUE_CACHE_ADMITTED);
+    put_u64(LITE_CUE_CACHE_ADMITTED);
     uart_puts(" depth=");
-    put_u64(g_i2_admission_metrics.cue_depth_hwm);
+    put_u64(g_admission_metrics.cue_depth_hwm);
     uart_puts(" depth_bound=");
-    put_u64(I3_CUE_MAX_DEPTH);
+    put_u64(LITE_CUE_MAX_DEPTH);
     uart_puts(" atom_bytes=");
-    put_u64(g_i2_admission_metrics.cue_atom_bytes_hwm);
+    put_u64(g_admission_metrics.cue_atom_bytes_hwm);
     uart_puts("\r\n");
 }
 
-int i3_host_ready(void)
+int lite_host_ready(void)
 {
     return g_ready;
 }
 
-int i3_host_cue_bytes(const uint8_t *bytes, uint64_t len, noun *out)
+int lite_host_cue_bytes(const uint8_t *bytes, uint64_t len, noun *out)
 {
-    cue_bounded_limits_t limits = i3_limits();
+    cue_bounded_limits_t limits = lite_limits();
     cue_bounded_status_t status;
-    if (!bytes || !out || len == 0 || len > I3_CUE_MAX_INPUT_BYTES)
+    if (!bytes || !out || len == 0 || len > LITE_CUE_MAX_INPUT_BYTES)
         return 0;
     while (len > 1 && bytes[len - 1] == 0)
         len--;
@@ -595,13 +606,13 @@ int i3_host_cue_bytes(const uint8_t *bytes, uint64_t len, noun *out)
     return 1;
 }
 
-#if defined(I3_COMPACT)
-/* Row 221 tests: the L1 plan is cued into scratch (see i3_l1_probe.c). */
-int i3_host_cue_bytes_scratch(const uint8_t *bytes, uint64_t len, noun *out)
+#if defined(LITE_COMPACT)
+/* Row 221 tests: the L1 plan is cued into scratch (see lite_probe.c). */
+int lite_host_cue_bytes_scratch(const uint8_t *bytes, uint64_t len, noun *out)
 {
-    cue_bounded_limits_t limits = i3_limits();
+    cue_bounded_limits_t limits = lite_limits();
     cue_bounded_status_t status;
-    if (!bytes || !out || len == 0 || len > I3_CUE_MAX_INPUT_BYTES)
+    if (!bytes || !out || len == 0 || len > LITE_CUE_MAX_INPUT_BYTES)
         return 0;
     while (len > 1 && bytes[len - 1] == 0)
         len--;
@@ -644,8 +655,8 @@ static int parse_sha256_hex(const char *hex, uint8_t out[32], int *is_zero)
  * `--app-sha256`): hash the jammed bundle natively, refuse before cue/poke on
  * mismatch, lowercase-hex digest with the same `sha256 {actual} != expected
  * {expected}` naming. An all-zero expected digest is the "no gate" sentinel. */
-int i3_host_load_app(const uint8_t *jam, uint64_t jam_len,
-                     const char *expected_sha256, i3_host_result_t *out)
+int lite_host_load_app(const uint8_t *jam, uint64_t jam_len,
+                     const char *expected_sha256, lite_host_result_t *out)
 {
     uint8_t digest[32], want[32];
     int is_zero = 0, gated, match = 0;
@@ -653,7 +664,7 @@ int i3_host_load_app(const uint8_t *jam, uint64_t jam_len,
     noun app_noun, cause;
 
     clear_result(out);
-    if (!jam || jam_len == 0 || jam_len > I3_CUE_MAX_INPUT_BYTES)
+    if (!jam || jam_len == 0 || jam_len > LITE_CUE_MAX_INPUT_BYTES)
         return 0;
 
     sha256_hash(jam, jam_len, digest);
@@ -671,34 +682,34 @@ int i3_host_load_app(const uint8_t *jam, uint64_t jam_len,
     }
 
     if (gated && !match) {
-        uart_puts("I3H app-sha256 sha256 ");
+        uart_puts("LITEH app-sha256 sha256 ");
         put_hex(digest, 32);
         uart_puts(" != expected ");
-        for (i = 0; i < I3_APP_SHA256_HEX_LEN; i++)
+        for (i = 0; i < LITE_APP_SHA256_HEX_LEN; i++)
             uart_putc(expected_sha256[i]);
         uart_puts("\r\n");
         return 0;
     }
-    uart_puts("I3H app-sha256 sha256 ");
+    uart_puts("LITEH app-sha256 sha256 ");
     put_hex(digest, 32);
     uart_puts(gated ? " match=yes\r\n" : " gate=no\r\n");
 
-#if defined(I3_CHECKPOINT_EVERY)
+#if defined(LITE_CHECKPOINT_EVERY)
     /* Row 317 step 2 (Round 5): name the first cue bound a refused bundle hits.
-     * i3_host_cue_bytes inlined to keep the status; under the checkpoint flag
+     * lite_host_cue_bytes inlined to keep the status; under the checkpoint flag
      * only, so flag-off images stay byte-identical (row 221 (11)). */
     {
-        cue_bounded_limits_t limits = i3_limits();
+        cue_bounded_limits_t limits = lite_limits();
         cue_bounded_status_t status;
         uint64_t len = jam_len;
-#if defined(I3_CKPT_TEST_APPCELLS)
+#if defined(LITE_CKPT_TEST_APPCELLS)
         limits.max_cells = 1000u; /* test build: a bundle meets the cells bound */
 #endif
         while (len > 1 && jam[len - 1] == 0)
             len--;
         status = cue_bounded_bytes(jam, len, &limits, HEAP_MODE_PERSIST, &app_noun);
         if (status != CUE_BOUNDED_OK) {
-            uart_puts("I3H app cue refused reason=");
+            uart_puts("LITEH app cue refused reason=");
             uart_puts(cue_bounded_status_name(status));
             uart_puts("\r\n");
             return 0;
@@ -706,13 +717,13 @@ int i3_host_load_app(const uint8_t *jam, uint64_t jam_len,
         noun_tx_commit();
     }
 #else
-    if (!i3_host_cue_bytes(jam, jam_len, &app_noun))
+    if (!lite_host_cue_bytes(jam, jam_len, &app_noun))
         return 0;
 #endif
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (!nest(tas("load-bundle"), app_noun, &cause))
         return 0;
-    return i3_host_poke(cause, out);
+    return lite_host_poke(cause, out);
 }
 
 /* KP2 crash re-entry: the de-moled fast path lets a bail escape to the
@@ -746,26 +757,26 @@ static void put_goof(noun goof)
     const uint8_t *bytes;
     uint64_t n;
     if (jam_encode_bytes_checked(goof, &bytes, &n) != 0) {
-        uart_puts("I3H crud goof=unjammable\r\n");
+        uart_puts("LITEH crud goof=unjammable\r\n");
         return;
     }
     if (n > 4096) {
-        uart_puts("I3H crud goof-bytes=");
+        uart_puts("LITEH crud goof-bytes=");
         put_u64(n);
         uart_puts("\r\n");
         return;
     }
-    uart_puts("I3H crud goof=");
+    uart_puts("LITEH crud goof=");
     put_hex(bytes, (uint32_t)n);
     uart_puts("\r\n");
 }
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
-/* Row 212 PR 1a: lite checkpoint writer, flag-gated (I3_CHECKPOINT_EVERY=K,
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
+/* Row 212 PR 1a: lite checkpoint writer, flag-gated (LITE_CHECKPOINT_EVERY=K,
  * default off; with the flag off none of this is compiled). After every K
  * accepted live steps the host writes the kernel state (internal.outer,
  * axis 27; see ckpt_maybe_write) to cold media, then a header record
- *   [%i3-ckpt N state-id sha256(jam state) kernel-blake3]
+ *   [%lite-ckpt N state-id sha256(jam state) kernel-blake3]
  * and verifies both by reading back and re-hashing. kernel-blake3 is
  * g_jam_blake3: BLAKE3-256 of the pill's kernel jam bytes exactly as read
  * at boot (all jam_len bytes, trailing zero bytes included), not of a
@@ -776,64 +787,64 @@ static void put_goof(noun goof)
  * the step itself is already committed and is not affected. The host
  * hashes and stores bytes; apart from the wrapper shape check below it
  * interprets nothing (decision 164). */
-#define I3_CKPT_STATE_AXIS 27
+#define LITE_CKPT_STATE_AXIS 27
 
 /* Bounds. Row 317 (3), Q7: row 212 (4)'s rule, a checkpoint is written only if its
  * cue fits the 128k-cell cue bound, in place of #10's stand-in (65,536
  * cells and jam.c's 128 KiB writer). The bound is ckpt_cue_limits: the
- * host's cue limits with at most I3_CKPT_CUE_MAX_CELLS cells and at most
+ * host's cue limits with at most LITE_CKPT_CUE_MAX_CELLS cells and at most
  * CKPT_JAM_MAX_BYTES (4 MiB, the checkpoint object capacity) of input.
  * The writer's read-back and the checkpoint boot cue with it; the cell walk
  * and the size check below only skip a state that cannot fit before it is
  * written to media. */
-#define I3_CKPT_CUE_MAX_CELLS CKPT_CUE_MAX_CELLS /* ckpt_jam.h */
-#define I3_CKPT_CELLS_MAX I3_CKPT_CUE_MAX_CELLS
-#define I3_CKPT_JAM_MAX CKPT_JAM_MAX_BYTES
+#define LITE_CKPT_CUE_MAX_CELLS CKPT_CUE_MAX_CELLS /* ckpt_jam.h */
+#define LITE_CKPT_CELLS_MAX LITE_CKPT_CUE_MAX_CELLS
+#define LITE_CKPT_JAM_MAX CKPT_JAM_MAX_BYTES
 /* The walk's own visited set (at most half full) and stack. A pending entry
  * is a sibling left on the way down, so the stack holds at most the noun's
- * depth plus one; past I3_CUE_MAX_DEPTH the state could not cue anyway. */
-#define I3_CKPT_SET_BITS 18u
-#define I3_CKPT_SET_SIZE (1u << I3_CKPT_SET_BITS)
-#define I3_CKPT_STACK_SLOTS 65536u
-#define I3_CKPT_STACK_MAX I3_CKPT_STACK_SLOTS
-#define I3_CKPT_WRAPPER_TAG 0u
+ * depth plus one; past LITE_CUE_MAX_DEPTH the state could not cue anyway. */
+#define LITE_CKPT_SET_BITS 18u
+#define LITE_CKPT_SET_SIZE (1u << LITE_CKPT_SET_BITS)
+#define LITE_CKPT_STACK_SLOTS 65536u
+#define LITE_CKPT_STACK_MAX LITE_CKPT_STACK_SLOTS
+#define LITE_CKPT_WRAPPER_TAG 0u
 /* Boot-side test knobs (row 212 PR 1b; 1499kernel tools/lite_checkpoint_boot.py): the
- * writer stores a deliberately bad header for every N >= I3_CKPT_TEST_FROM
+ * writer stores a deliberately bad header for every N >= LITE_CKPT_TEST_FROM
  * (default 1, i.e. all), so a flag-on boot of that log must reject it and
  * fall back (row 212 (3)). hdrshape drops the kernel-blake3 field, hdrsid
  * names a state id that is not in the store, hdrd flips one bit of D. The
  * state blob itself is written and verified as usual. */
-#if defined(I3_CKPT_TEST_HDRSHAPE) || defined(I3_CKPT_TEST_HDRSID) || defined(I3_CKPT_TEST_HDRD)
-#if !defined(I3_CKPT_TEST_FROM)
-#define I3_CKPT_TEST_FROM 1
+#if defined(LITE_CKPT_TEST_HDRSHAPE) || defined(LITE_CKPT_TEST_HDRSID) || defined(LITE_CKPT_TEST_HDRD)
+#if !defined(LITE_CKPT_TEST_FROM)
+#define LITE_CKPT_TEST_FROM 1
 #endif
-#define I3_CKPT_BAD_HDR(n) ((n) >= (uint64_t)I3_CKPT_TEST_FROM)
+#define LITE_CKPT_BAD_HDR(n) ((n) >= (uint64_t)LITE_CKPT_TEST_FROM)
 #endif
-_Static_assert(I3_CKPT_STACK_MAX <= I3_CKPT_STACK_SLOTS, "ckpt stack fits");
-_Static_assert(I3_CKPT_STACK_SLOTS > I3_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN + 1u, "ckpt stack holds any cueable depth");
-_Static_assert(I3_CKPT_CELLS_MAX <= I3_CKPT_CUE_MAX_CELLS, "ckpt cells fit");
-_Static_assert(I3_CKPT_SET_SIZE >= 2u * I3_CKPT_CUE_MAX_CELLS, "ckpt set at most half full");
-_Static_assert(I3_CKPT_JAM_MAX <= CKPT_JAM_MAX_BYTES, "ckpt jam fits");
-_Static_assert(I3_CKPT_CUE_MAX_CELLS <= I3_CUE_MAX_CELLS, "ckpt cue bound within the host's");
-_Static_assert(CKPT_JAM_MAX_BYTES <= I3_CUE_MAX_INPUT_BYTES, "ckpt cue input within the host's");
+_Static_assert(LITE_CKPT_STACK_MAX <= LITE_CKPT_STACK_SLOTS, "ckpt stack fits");
+_Static_assert(LITE_CKPT_STACK_SLOTS > LITE_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN + 1u, "ckpt stack holds any cueable depth");
+_Static_assert(LITE_CKPT_CELLS_MAX <= LITE_CKPT_CUE_MAX_CELLS, "ckpt cells fit");
+_Static_assert(LITE_CKPT_SET_SIZE >= 2u * LITE_CKPT_CUE_MAX_CELLS, "ckpt set at most half full");
+_Static_assert(LITE_CKPT_JAM_MAX <= CKPT_JAM_MAX_BYTES, "ckpt jam fits");
+_Static_assert(LITE_CKPT_CUE_MAX_CELLS <= LITE_CUE_MAX_CELLS, "ckpt cue bound within the host's");
+_Static_assert(CKPT_JAM_MAX_BYTES <= LITE_CUE_MAX_INPUT_BYTES, "ckpt cue input within the host's");
 
 static cue_bounded_limits_t ckpt_cue_limits(void)
 {
-    cue_bounded_limits_t limits = i3_limits();
-    limits.max_cells = I3_CKPT_CUE_MAX_CELLS;
+    cue_bounded_limits_t limits = lite_limits();
+    limits.max_cells = LITE_CKPT_CUE_MAX_CELLS;
     limits.max_input_bytes = CKPT_JAM_MAX_BYTES;
     /* Q8: a state as deep as live admission lets it grow (ckpt_jam.h). */
-    limits.max_depth = I3_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN;
+    limits.max_depth = LITE_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN;
     return limits;
 }
 
 /* Row 328: D is the kernel's /state-hash of the state, (digest state), a
- * Tip5 noun digest (I3_DIGEST_BYTES little-endian bytes), computed by the
+ * Tip5 noun digest (LITE_DIGEST_BYTES little-endian bytes), computed by the
  * same C walk the kernel's hash-hashable-noun jet runs (nock_tip5_digest).
  * It was sha256 of ++jam's bytes, the old (shax (jam state)). bytes, when
  * asked, is the length of ++jam's bytes from the checkpoint writer's ++jam
  * (ckpt_jam_hoon_bytes; jam_hoon_checked's rule, CKPT_JAM_MAX_BYTES). */
-static int ckpt_digest(noun state, uint8_t out[I3_DIGEST_BYTES], uint64_t *bytes)
+static int ckpt_digest(noun state, uint8_t out[LITE_DIGEST_BYTES], uint64_t *bytes)
 {
     const uint8_t *b;
     uint64_t n;
@@ -866,7 +877,7 @@ static int bytes_atom(const uint8_t *b, uint32_t len, noun *out)
 
 static void ckpt_skip(uint64_t n, const char *why)
 {
-    uart_puts("I3H ckpt skip event=");
+    uart_puts("LITEH ckpt skip event=");
     put_u64(n);
     uart_puts(" reason=");
     uart_puts(why);
@@ -902,25 +913,25 @@ static int ckpt_wrapper_ok(noun core, noun *state)
 {
     noun tag, rest;
     if (!ckpt_axis(core, 12, &tag) || !noun_is_direct(tag)
-        || direct_val(tag) != I3_CKPT_WRAPPER_TAG)
+        || direct_val(tag) != LITE_CKPT_WRAPPER_TAG)
         return 0;
     if (!ckpt_axis(core, 13, &rest) || !noun_is_cell(rest))
         return 0;
-    return ckpt_axis(core, I3_CKPT_STATE_AXIS, state);
+    return ckpt_axis(core, LITE_CKPT_STATE_AXIS, state);
 }
 
 /* Distinct cells in `state`, the walk job_cells makes with its own
- * visited set and stack (row 317 (3): sized for I3_CKPT_CUE_MAX_CELLS).
- * Returns 0 with *out the count when at most I3_CKPT_CELLS_MAX cells, else
+ * visited set and stack (row 317 (3): sized for LITE_CKPT_CUE_MAX_CELLS).
+ * Returns 0 with *out the count when at most LITE_CKPT_CELLS_MAX cells, else
  * the skip reason: "cells" past the limit, "stack" if the walk stack would
- * overflow (deeper than any state that cues, see I3_CKPT_STACK_SLOTS); it is
+ * overflow (deeper than any state that cues, see LITE_CKPT_STACK_SLOTS); it is
  * a separate reason so it is never reported as a cell count. */
-static uint32_t g_ckpt_set[I3_CKPT_SET_SIZE];
-static uint32_t g_ckpt_stack[I3_CKPT_STACK_SLOTS];
+static uint32_t g_ckpt_set[LITE_CKPT_SET_SIZE];
+static uint32_t g_ckpt_stack[LITE_CKPT_STACK_SLOTS];
 static const char *ckpt_cells(noun state, uint32_t *out)
 {
     uint32_t sp = 0, cells = 0, i;
-    for (i = 0; i < I3_CKPT_SET_SIZE; i++)
+    for (i = 0; i < LITE_CKPT_SET_SIZE; i++)
         g_ckpt_set[i] = 0;
     *out = 0;
     if (!noun_is_cell(state))
@@ -930,9 +941,9 @@ static const char *ckpt_cells(noun state, uint32_t *out)
         uint32_t op = g_ckpt_stack[--sp], k, h;
         int seen = 0;
         cell_t *c;
-        h = (op * 2654435761u) >> (32u - I3_CKPT_SET_BITS);
-        for (k = 0; k < I3_CKPT_SET_SIZE; k++) {
-            uint32_t slot_i = (h + k) & (I3_CKPT_SET_SIZE - 1u);
+        h = (op * 2654435761u) >> (32u - LITE_CKPT_SET_BITS);
+        for (k = 0; k < LITE_CKPT_SET_SIZE; k++) {
+            uint32_t slot_i = (h + k) & (LITE_CKPT_SET_SIZE - 1u);
             if (g_ckpt_set[slot_i] == op) {
                 seen = 1;
                 break;
@@ -944,16 +955,16 @@ static const char *ckpt_cells(noun state, uint32_t *out)
         }
         if (seen)
             continue;
-        if (++cells > I3_CKPT_CELLS_MAX)
+        if (++cells > LITE_CKPT_CELLS_MAX)
             return "cells";
         c = (cell_t *)(uintptr_t)op;
         if (noun_is_cell(c->head)) {
-            if (sp >= I3_CKPT_STACK_MAX)
+            if (sp >= LITE_CKPT_STACK_MAX)
                 return "stack";
             g_ckpt_stack[sp++] = cell_ptr(c->head);
         }
         if (noun_is_cell(c->tail)) {
-            if (sp >= I3_CKPT_STACK_MAX)
+            if (sp >= LITE_CKPT_STACK_MAX)
                 return "stack";
             g_ckpt_stack[sp++] = cell_ptr(c->tail);
         }
@@ -984,7 +995,7 @@ static const char STOP_ROTATED[] = "rotated";
 
 /* ── Row 221 (row 212 (c)): compaction after a verified checkpoint ──────
  * (2) Only a running node compacts, right after checkpoint N verifies and
- * after the host has handed off that step's effects (i3_host_handoff, which
+ * after the host has handed off that step's effects (lite_host_handoff, which
  * the driver calls once it has consumed the effects and reset scratch), so
  * the effects are not a root. Replay, a stopped node and a skipped
  * checkpoint never compact; no input is taken until it ends.
@@ -993,7 +1004,7 @@ static const char STOP_ROTATED[] = "rotated";
  * region; axis 27 of the new core must hash to D before the commit.
  * (5) The copy runs in a transaction on the other persist half; the commit
  * stores the core root and the half selector; any failure aborts and logs
- * `I3H compact skip event=N reason=...`, and the node runs on the old half.
+ * `LITEH compact skip event=N reason=...`, and the node runs on the old half.
  * (6) After the commit the atom store keeps the boot prefix and every atom
  * reachable from the state and the host roots (the poke and peek formulas,
  * the fast-hint registry, the crash trace); the walk stops at code-region
@@ -1001,12 +1012,12 @@ static const char STOP_ROTATED[] = "rotated";
  * bump mark. (8) Nothing is written to media and no state hash changes. */
 static int g_cmp_pending;
 static uint64_t g_cmp_n;
-static uint8_t g_cmp_d[I3_DIGEST_BYTES];
+static uint8_t g_cmp_d[LITE_DIGEST_BYTES];
 
-static void compact_arm(uint64_t n, const uint8_t d[I3_DIGEST_BYTES])
+static void compact_arm(uint64_t n, const uint8_t d[LITE_DIGEST_BYTES])
 {
     uint32_t i;
-    for (i = 0; i < I3_DIGEST_BYTES; i++)
+    for (i = 0; i < LITE_DIGEST_BYTES; i++)
         g_cmp_d[i] = d[i];
     g_cmp_n = n;
     g_cmp_pending = 1;
@@ -1074,11 +1085,11 @@ static int cmp_live(uint64_t h62)
     return 0;
 }
 
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
 /* Test harness root (the L1 plan, cued into the bottom of scratch). */
 static noun g_cmp_harness;
 static uint64_t g_cmp_harness_top;
-void i3_host_harness_root(noun plan)
+void lite_host_harness_root(noun plan)
 {
     g_cmp_harness = plan;
     g_cmp_harness_top = HEAP_SCRATCH_BASE + heap_scratch_mark();
@@ -1101,7 +1112,7 @@ static void cmp_walk(noun root, int allow_scratch, int verify)
             if (heap_in_code(p))
                 continue;
             if (!heap_in_live_persist(p)) {
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
                 if (!(allow_scratch && (uint64_t)p >= HEAP_SCRATCH_BASE
                       && (uint64_t)p < g_cmp_harness_top)) {
                     g_cw.wild++;
@@ -1178,7 +1189,7 @@ static void cmp_mark(int verify)
     cmp_walk(g_poke_fol, 0, verify);
     cmp_walk(g_peek_fol, 0, verify);
     nock_host_roots(cmp_root_cb);
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
     /* Test harness root: the L1 plan. */
     cmp_walk(g_cmp_harness, 1, verify);
 #endif
@@ -1186,7 +1197,7 @@ static void cmp_mark(int verify)
 
 static void compact_skip(uint64_t n, const char *why)
 {
-    uart_puts("I3H compact skip event=");
+    uart_puts("LITEH compact skip event=");
     put_u64(n);
     uart_puts(" reason=");
     uart_puts(why);
@@ -1197,7 +1208,7 @@ static void compact_run(void)
 {
     uint64_t n = g_cmp_n, mark, base, t0, t1, t2, t3, t4, before_cells, sel0;
     noun sample, copy, core, state;
-    uint8_t dig[I3_DIGEST_BYTES];
+    uint8_t dig[LITE_DIGEST_BYTES];
     int mode = heap_get_mode();
     atom_compact_t st;
     cell_t *kc, *pc;
@@ -1253,7 +1264,7 @@ static void compact_run(void)
     /* (4) axis 27 of the new core must hash to D */
     mark = heap_scratch_mark();
     heap_set_mode(HEAP_MODE_SCRATCH);
-    if (!ckpt_wrapper_ok(core, &state) || !ckpt_digest(state, dig, 0) || !digest_eq(dig, g_cmp_d, I3_DIGEST_BYTES)) {
+    if (!ckpt_wrapper_ok(core, &state) || !ckpt_digest(state, dig, 0) || !digest_eq(dig, g_cmp_d, LITE_DIGEST_BYTES)) {
         (void)heap_scratch_rewind(mark);
         heap_compact_abort();
         heap_set_mode(mode);
@@ -1279,7 +1290,7 @@ static void compact_run(void)
     (void)heap_scratch_rewind(base + CMP_ROOM - HEAP_SCRATCH_BASE);
     cmp_mark(0);
     t3 = cntvct();
-    uart_puts("I3H compact walk event=");
+    uart_puts("LITEH compact walk event=");
     put_u64(n);
     uart_puts(" cells=");
     put_u64(g_cw.cells);
@@ -1311,7 +1322,7 @@ static void compact_run(void)
     t4 = cntvct();
     (void)heap_scratch_rewind(mark);
     heap_set_mode(mode);
-    uart_puts("I3H compact ok event=");
+    uart_puts("LITEH compact ok event=");
     put_u64(n);
     uart_puts(" half=");
     put_u64(sel0);
@@ -1362,7 +1373,7 @@ static void compact_run(void)
 
 /* The driver calls this once it has handed off the effects of the step it
  * just ran and reset scratch. */
-void i3_host_handoff(void)
+void lite_host_handoff(void)
 {
     if (g_cmp_pending)
         compact_run();
@@ -1390,7 +1401,7 @@ static void ckpt_verified(uint64_t n, noun state)
             g_base = now;
             /* Row 221 (7) Live: entries B+1..P leave the sum. */
             g_job_sum = after;
-            uart_puts("I3H log base event=");
+            uart_puts("LITEH log base event=");
             put_u64(now.index);
             uart_puts(" ckpt=");
             put_u64(n);
@@ -1403,7 +1414,7 @@ static void ckpt_verified(uint64_t n, noun state)
             uart_puts("\r\n");
         } else {
             /* Nothing is dropped; the next verified checkpoint tries again. */
-            uart_puts("I3H log base fail event=");
+            uart_puts("LITEH log base fail event=");
             put_u64(g_last_ck_n);
             uart_puts(" ckpt=");
             put_u64(n);
@@ -1413,9 +1424,9 @@ static void ckpt_verified(uint64_t n, noun state)
     g_last_ck_n = n;
     g_last_ck_sum = g_job_sum;
     /* The ring records ++jam's bytes, from the checkpoint writer's buffer. */
-    if (n % (uint64_t)I3_RING_EVERY == 0 && ckpt_jam_hoon_bytes(state, &jb, &bytes) == 0) {
+    if (n % (uint64_t)LITE_RING_EVERY == 0 && ckpt_jam_hoon_bytes(state, &jb, &bytes) == 0) {
         sha256_hash(jb, bytes, dig);
-        i3_ring_checkpoint(n, dig, g_job_sum, jb, bytes);
+        lite_ring_checkpoint(n, dig, g_job_sum, jb, bytes);
     }
     nv_flush();
     heap_set_mode(mode);
@@ -1425,21 +1436,21 @@ static void ckpt_verified(uint64_t n, noun state)
 /* Row 212 (4), row 317 (3): besides every K accepted entries, a checkpoint
  * is written when persist headroom falls under one checkpoint plus margin.
  * One checkpoint is the state's cells at the last walk (at least
- * I3_CKPT_HEADROOM_MIN before the first); the margin is one more, on top of
+ * LITE_CKPT_HEADROOM_MIN before the first); the margin is one more, on top of
  * the reserve a live step must leave (live_reserve). A verified checkpoint
- * lets compaction (row 221, I3_LITE_LOG=1) free the persist half. The
+ * lets compaction (row 221, LITE_LOG=1) free the persist half. The
  * trigger fires once each time headroom falls under the line and re-arms
  * when it is back above it, so a node that cannot compact (a 1b image, a
  * skipped checkpoint or compaction) writes one extra checkpoint, not one per
  * step; the row 200 persist stop still applies. */
-#define I3_CKPT_HEADROOM_MIN 4096u
+#define LITE_CKPT_HEADROOM_MIN 4096u
 static uint64_t g_ckpt_state_cells;
 static int g_ckpt_hr_fired;
 
 static int ckpt_headroom_due(uint64_t n)
 {
-    uint64_t one = g_ckpt_state_cells > I3_CKPT_HEADROOM_MIN
-                   ? g_ckpt_state_cells : I3_CKPT_HEADROOM_MIN;
+    uint64_t one = g_ckpt_state_cells > LITE_CKPT_HEADROOM_MIN
+                   ? g_ckpt_state_cells : LITE_CKPT_HEADROOM_MIN;
     uint64_t need = add_sat(live_reserve(0), add_sat(one, one));
     uint64_t free = heap_persist_free_cells();
     if (free >= need) {
@@ -1449,7 +1460,7 @@ static int ckpt_headroom_due(uint64_t n)
     if (g_ckpt_hr_fired)
         return 0;
     g_ckpt_hr_fired = 1;
-    uart_puts("I3H ckpt headroom event=");
+    uart_puts("LITEH ckpt headroom event=");
     put_u64(n);
     uart_puts(" free=");
     put_u64(free);
@@ -1462,7 +1473,7 @@ static int ckpt_headroom_due(uint64_t n)
 static void ckpt_maybe_write(void)
 {
     noun state, loaded, hdr, xs[5];
-    uint8_t dig[I3_DIGEST_BYTES], dig2[I3_DIGEST_BYTES], hd[I3_DIGEST_BYTES], hd2[I3_DIGEST_BYTES];
+    uint8_t dig[LITE_DIGEST_BYTES], dig2[LITE_DIGEST_BYTES], hd[LITE_DIGEST_BYTES], hd2[LITE_DIGEST_BYTES];
     uint64_t n = g_event_num - 1, bytes = 0, stored = 0, sid, hid;
     uint32_t cells = 0;
     cue_bounded_limits_t limits = ckpt_cue_limits();
@@ -1472,7 +1483,7 @@ static void ckpt_maybe_write(void)
      * step reaches here, and the guard makes it explicit. */
     if (g_replaying || g_stop || n == 0)
         return;
-    if (n % (uint64_t)I3_CHECKPOINT_EVERY && !ckpt_headroom_due(n))
+    if (n % (uint64_t)LITE_CHECKPOINT_EVERY && !ckpt_headroom_due(n))
         return;
     /* The application state is internal.outer: the core's sample (axis 6) is
      * the NockApp wrapper's outer-state [%0 desk-hash internal], so the
@@ -1484,15 +1495,15 @@ static void ckpt_maybe_write(void)
         return;
     }
     /* Before anything goes to media: a state past the cue bound's cells
-     * (I3_CKPT_CELLS_MAX) or past the checkpoint object (I3_CKPT_JAM_MAX,
+     * (LITE_CKPT_CELLS_MAX) or past the checkpoint object (LITE_CKPT_JAM_MAX,
      * the stored bytes) cannot fit, so it is skipped. */
     why = ckpt_cells(state, &cells);
-    g_ckpt_state_cells = why ? I3_CKPT_CELLS_MAX : cells;
+    g_ckpt_state_cells = why ? LITE_CKPT_CELLS_MAX : cells;
     if (why) {
         ckpt_skip(n, why);
         return;
     }
-    if (ckpt_jam_size_checked(state, I3_CKPT_JAM_MAX, &stored) != 0) {
+    if (ckpt_jam_size_checked(state, LITE_CKPT_JAM_MAX, &stored) != 0) {
         ckpt_skip(n, "jam-size");
         return;
     }
@@ -1506,7 +1517,7 @@ static void ckpt_maybe_write(void)
         ckpt_skip(n, "persist");
         return;
     }
-    uart_puts("I3H ckpt size event=");
+    uart_puts("LITEH ckpt size event=");
     put_u64(n);
     uart_puts(" cells=");
     put_u64(cells);
@@ -1521,34 +1532,34 @@ static void ckpt_maybe_write(void)
     else if (!(sid = cold_store_ckpt(state)))
         why = "store-state";
     else if (!noun_is_cell(loaded = cold_load_scratch(sid, &limits)) || !ckpt_digest(loaded, dig2, 0)
-             || !digest_eq(dig, dig2, I3_DIGEST_BYTES))
+             || !digest_eq(dig, dig2, LITE_DIGEST_BYTES))
         why = "verify-state";
     else {
         uint32_t arity = 5;
-        uint8_t hdig[I3_DIGEST_BYTES];
+        uint8_t hdig[LITE_DIGEST_BYTES];
         uint32_t i;
-        for (i = 0; i < I3_DIGEST_BYTES; i++)
+        for (i = 0; i < LITE_DIGEST_BYTES; i++)
             hdig[i] = dig[i];
-        xs[0] = tas("i3-ckpt");
+        xs[0] = tas(CKPT_TAG);
         xs[1] = direct(n);
         xs[2] = direct(sid);
-#if defined(I3_CKPT_TEST_HDRSHAPE)
-        if (I3_CKPT_BAD_HDR(n))
+#if defined(LITE_CKPT_TEST_HDRSHAPE)
+        if (LITE_CKPT_BAD_HDR(n))
             arity = 4;
-#elif defined(I3_CKPT_TEST_HDRSID)
-        if (I3_CKPT_BAD_HDR(n))
+#elif defined(LITE_CKPT_TEST_HDRSID)
+        if (LITE_CKPT_BAD_HDR(n))
             xs[2] = direct(sid ^ 1u);
-#elif defined(I3_CKPT_TEST_HDRD)
-        if (I3_CKPT_BAD_HDR(n))
+#elif defined(LITE_CKPT_TEST_HDRD)
+        if (LITE_CKPT_BAD_HDR(n))
             hdig[0] ^= 1u;
 #endif
-        if (!bytes_atom(hdig, I3_DIGEST_BYTES, &xs[3]) || !bytes_atom(g_jam_blake3, 32, &xs[4])
+        if (!bytes_atom(hdig, LITE_DIGEST_BYTES, &xs[3]) || !bytes_atom(g_jam_blake3, 32, &xs[4])
             || !tuple(xs, arity, &hdr) || !ckpt_digest(hdr, hd, 0))
             why = "alloc";
         /* The header read back must jam to the same bytes as the one
          * written (all five fields), not merely be a cell. */
         else if (!(hid = cold_store(hdr)) || !noun_is_cell(loaded = cold_load_scratch(hid, &limits))
-                 || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2, I3_DIGEST_BYTES))
+                 || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2, LITE_DIGEST_BYTES))
             why = "verify-header";
     }
     if (!why)
@@ -1558,13 +1569,13 @@ static void ckpt_maybe_write(void)
         ckpt_skip(n, why);
         return;
     }
-    uart_puts("I3H ckpt ok event=");
+    uart_puts("LITEH ckpt ok event=");
     put_u64(n);
     uart_puts(" bytes=");
     put_u64(bytes);
     /* the field keeps its name; D is now the Tip5 /state-hash (row 328) */
     uart_puts(" sha256=");
-    put_hex(dig, I3_DIGEST_BYTES);
+    put_hex(dig, LITE_DIGEST_BYTES);
     uart_puts("\r\n");
 #if defined(COLD_LITE_LOG)
     ckpt_verified(n, state);
@@ -1574,7 +1585,7 @@ static void ckpt_maybe_write(void)
 #endif
 
 static int crud_repoke(noun cause, uint64_t mote, noun trace,
-                       i3_host_result_t *out)
+                       lite_host_result_t *out)
 {
     noun input_xs[4] = {direct(0), direct(0), direct(0), cause};
     noun job_input, goof, wire, arvo_rest, crud, ovum, ovo, subject, product;
@@ -1609,7 +1620,7 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
         /* A crash past %crud, or a host abort in the %crud step: no entry,
          * and the application stops (rows 141, 198). */
         host_stop(jumped == NOCK_ABORT_CRASH
-                  ? "crud" : i3_host_abort_name(jumped, nock_budget_abort_reason()));
+                  ? "crud" : lite_host_abort_name(jumped, nock_budget_abort_reason()));
         nock_budget_finish();
         return 0;
     }
@@ -1633,7 +1644,7 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
         g_kernel = next;
         g_event_num++;
         nock_budget_finish();
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
         ckpt_maybe_write();
 #endif
         return 1;
@@ -1643,7 +1654,7 @@ static int crud_repoke(noun cause, uint64_t mote, noun trace,
     return 0;
 }
 
-int i3_host_poke(noun cause, i3_host_result_t *out)
+int lite_host_poke(noun cause, lite_host_result_t *out)
 {
     noun job, subject, product;
     uint64_t t0, t1;
@@ -1655,7 +1666,7 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
         return 0;
     }
     if (g_stop) {
-        uart_puts("I3H refused stopped=");
+        uart_puts("LITEH refused stopped=");
         uart_puts(g_stop);
         uart_puts("\r\n");
         return 0;
@@ -1677,7 +1688,7 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
          * ordinary replies and never reach here. */
         if (jumped == NOCK_ABORT_CRASH)
             return crud_repoke(cause, nock_crash_mote(), nock_trace_get(), out);
-        host_stop(i3_host_abort_name(jumped, nock_budget_abort_reason()));
+        host_stop(lite_host_abort_name(jumped, nock_budget_abort_reason()));
         nock_budget_finish();
         return 0;
     }
@@ -1704,7 +1715,7 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
         g_kernel = next;
         g_event_num++;
         nock_budget_finish();
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
         ckpt_maybe_write();
 #endif
         return 1;
@@ -1713,7 +1724,7 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
     return 0;
 }
 
-int i3_host_peek(noun path, i3_host_result_t *out)
+int lite_host_peek(noun path, lite_host_result_t *out)
 {
     noun subject, product;
     uint64_t t0, t1;
@@ -1753,10 +1764,10 @@ int i3_host_peek(noun path, i3_host_result_t *out)
  * event number N, the count of accepted log entries after a clean replay. A
  * stopped node (rows 141, 200) refuses the request. Not on the step path: it
  * runs only when asked, as a peek. Row 328: /state-hash is (digest state), a
- * Tip5 digest below 2^320; the I3_DIGEST_BYTES hash bytes are the atom's
+ * Tip5 digest below 2^320; the LITE_DIGEST_BYTES hash bytes are the atom's
  * little-endian bytes, as the full node prints them. A wider atom is
  * refused, never cut. */
-int i3_host_state_hash(uint64_t *event, uint8_t hash[I3_DIGEST_BYTES], i3_host_result_t *out)
+int lite_host_state_hash(uint64_t *event, uint8_t hash[LITE_DIGEST_BYTES], lite_host_result_t *out)
 {
     noun path;
     if (!out)
@@ -1765,16 +1776,16 @@ int i3_host_state_hash(uint64_t *event, uint8_t hash[I3_DIGEST_BYTES], i3_host_r
     if (!g_ready || g_replaying)
         return 0;
     if (g_stop) {
-        uart_puts("I3H state-hash refused stopped=");
+        uart_puts("LITEH state-hash refused stopped=");
         uart_puts(g_stop);
         uart_puts("\r\n");
         return 0;
     }
     if (!nest(tas("state-hash"), NOUN_ZERO, &path))
         return 0;
-    if (!i3_host_peek(path, out) || !noun_is_atom(out->product))
+    if (!lite_host_peek(path, out) || !noun_is_atom(out->product))
         return 0;
-    if (!noun_atom_read_fixed(out->product, hash, I3_DIGEST_BYTES))
+    if (!noun_atom_read_fixed(out->product, hash, LITE_DIGEST_BYTES))
         return 0;
     *event = g_event_num - 1;
     return 1;
@@ -1801,7 +1812,7 @@ static void halt(void)
 
 static int replay_fail(uint64_t i, const char *why)
 {
-    uart_puts("I3H replay fail entry=");
+    uart_puts("LITEH replay fail entry=");
     put_u64(i);
     uart_puts(" reason=");
     uart_puts(why);
@@ -1814,7 +1825,7 @@ static int replay_fail(uint64_t i, const char *why)
  * entry is the %crud ovo itself), its event number must be the next one,
  * and any failure stops the boot. Replay runs without the op budget
  * (decision 198); the cell and stack limits stay. */
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 /* Row 212 PR 1b: after a checkpoint boot at N, entries 1..N are read only
  * to move the cursor and to count their jobs into g_job_sum (so the row 213
  * reserve is the one a from-zero replay of the same log keeps); they are
@@ -1837,8 +1848,8 @@ static int replay_log(void)
 #else
     uint64_t n = cold_log_len(), i, cur = 0;
 #endif
-    i3_host_result_t r;
-    uart_puts("I3H replay entries=");
+    lite_host_result_t r;
+    uart_puts("LITEH replay entries=");
     put_u64(n);
     uart_puts("\r\n");
     g_replaying = 1;
@@ -1849,8 +1860,8 @@ static int replay_log(void)
 #endif
         noun job, subject, product;
         int jumped;
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
-        /* Q8: a live job sits in PERSIST (i3_host_cue_bytes), so the state
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
+        /* Q8: a live job sits in PERSIST (lite_host_cue_bytes), so the state
          * it leaves may hold it deeper than noun_copy_checked's 256 frames
          * walk: only the new cells are copied. Its replay decodes into
          * SCRATCH, and the copy of such a state fails. Then the entry runs
@@ -1867,7 +1878,7 @@ again:
         heap_set_mode(HEAP_MODE_SCRATCH);
 #else
         /* The job decodes into SCRATCH, as a live step's job does, and is
-         * dropped by heap_scratch_reset below; i3_host_persist copies only
+         * dropped by heap_scratch_reset below; lite_host_persist copies only
          * what the new state keeps. Decoding it into the persist heap left
          * every replayed job there for the whole boot, so replay ran out of
          * persist (reason=persist) before live use did. */
@@ -1877,7 +1888,7 @@ again:
         if (!noun_is_cell(job))
             return replay_fail(i, "read");
         cell_t *jc = (cell_t *)(uintptr_t)cell_ptr(job);
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
         if (i < skip) {
             if (!noun_is_atom(jc->head) || direct_val(jc->head) != i + 1)
                 return replay_fail(i, "event-num");
@@ -1895,8 +1906,8 @@ again:
         job_seen(job_cells(job));
         if (!nest(g_kernel, job, &subject))
             return replay_fail(i, "alloc");
-        nock_budget_set_limits(0, I3_SLAM_MAX_CELLS);
-        nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
+        nock_budget_set_limits(0, LITE_SLAM_MAX_CELLS);
+        nock_eval_stack_set_limit(LITE_SLAM_MAX_STACK);
         jumped = host_nock(subject, g_poke_fol, &product);
         nock_budget_finish();
         if (jumped != 0 || !noun_is_cell(product))
@@ -1904,8 +1915,8 @@ again:
         g_kernel = ((cell_t *)(uintptr_t)cell_ptr(product))->tail;
         g_event_num++;
         clear_result(&r);
-        if (!i3_host_persist(&r)) {
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+        if (!lite_host_persist(&r)) {
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
             if (!in_persist) {
                 heap_scratch_reset();
                 g_kernel = before;
@@ -1921,12 +1932,12 @@ again:
         heap_scratch_reset();
     }
     g_replaying = 0;
-    uart_puts("I3H replay done event=");
+    uart_puts("LITEH replay done event=");
     put_u64(g_event_num);
     uart_puts("\r\n");
 #if defined(COLD_LITE_LOG)
     /* Row 221 (7): the job sum counted from the log base. */
-    uart_puts("I3H replay job_sum=");
+    uart_puts("LITEH replay job_sum=");
     put_u64(g_job_sum);
     uart_puts("\r\n");
 #endif
@@ -1940,13 +1951,13 @@ static void stop_after_trip(void)
 {
     noun trip, manage, local, cause;
     noun m_xs[4], c_xs[5];
-    i3_host_result_t r;
+    lite_host_result_t r;
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (persist_trip_noun(g_event_num, &trip) && noun_is_cell(cold_load(cold_jam_hash(trip)))) {
         /* Row 200: a persist-stopped node stays stopped on every boot, logs
          * nothing, and does not rewrite its trip. */
         g_stop = STOP_PERSIST;
-        uart_puts("I3H trip-stop reason=persist\r\n");
+        uart_puts("LITEH trip-stop reason=persist\r\n");
         heap_scratch_reset();
         return;
     }
@@ -1961,15 +1972,15 @@ static void stop_after_trip(void)
     c_xs[2] = NOUN_ZERO; c_xs[3] = NOUN_ZERO; c_xs[4] = NOUN_ZERO;
     if (!tuple(c_xs, 5, &cause))
         return;
-    uart_puts("I3H trip-stop ok=");
-    uart_puts(i3_host_poke(cause, &r) ? "yes" : "no");
+    uart_puts("LITEH trip-stop ok=");
+    uart_puts(lite_host_poke(cause, &r) ? "yes" : "no");
     uart_puts("\r\n");
     heap_scratch_reset();
 }
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 /* Row 212 PR 1b: boot from a checkpoint (docs/lite-checkpoint-writer.md,
- * Boot). Take the newest header [%i3-ckpt N sid D kernel-blake3] that
+ * Boot). Take the newest header [%lite-ckpt N sid D kernel-blake3] that
  * verifies: N within the log, kernel-blake3 equal to this boot's
  * g_jam_blake3 (BLAKE3-256 of the pill's kernel jam bytes as read), the
  * state blob sid loads and sha256(jam state) = D; then the state goes
@@ -1984,17 +1995,17 @@ static void stop_after_trip(void)
  * its scratch is reset, but persist cells a failed persist copy already
  * took are not returned (bump heap). Never boots from an unverified image:
  * the state is installed only after every check passed. */
-#define I3_CKPT_HDR_MAX_BYTES 256u
+#define LITE_CKPT_HDR_MAX_BYTES 256u
 
 typedef struct {
-    noun tag;
+    noun tag, old_tag;
     uint64_t below;   /* only headers with N < below */
 #if defined(COLD_LITE_LOG)
     uint64_t min;     /* PR 1c: only headers with N >= the log base */
 #endif
     int found, shape_ok;
     uint64_t n, sid;
-    uint8_t d[I3_DIGEST_BYTES], kb[32];
+    uint8_t d[LITE_DIGEST_BYTES], kb[32];
 } ckpt_find_t;
 
 static int ckpt_find_cb(void *ctx, noun blob)
@@ -2003,7 +2014,7 @@ static int ckpt_find_cb(void *ctx, noun blob)
     noun x[5], cur = blob;
     uint32_t i;
     uint64_t n;
-    uint8_t d[I3_DIGEST_BYTES], kb[32];
+    uint8_t d[LITE_DIGEST_BYTES], kb[32];
     int shape_ok = 1;
     for (i = 0; i < 4; i++) {
         cell_t *c;
@@ -2018,9 +2029,10 @@ static int ckpt_find_cb(void *ctx, noun blob)
         cur = c->tail;
     }
     x[4] = cur;
-    /* A header is a cell whose head is %i3-ckpt and whose second field is
-     * the event number; anything else in the store is not a header. */
-    if (x[0] != f->tag || !noun_is_direct(x[1]))
+    /* A header is a cell whose head is %lite-ckpt (or %i3-ckpt) and whose
+     * second field is the event number; anything else in the store is not
+     * a header. */
+    if ((x[0] != f->tag && x[0] != f->old_tag) || !noun_is_direct(x[1]))
         goto done;
     n = direct_val(x[1]);
     if (n >= f->below || (f->found && n < f->n))
@@ -2030,13 +2042,13 @@ static int ckpt_find_cb(void *ctx, noun blob)
         goto done;
 #endif
     if (shape_ok)
-        shape_ok = noun_is_direct(x[2]) && noun_atom_read_fixed(x[3], d, I3_DIGEST_BYTES)
+        shape_ok = noun_is_direct(x[2]) && noun_atom_read_fixed(x[3], d, LITE_DIGEST_BYTES)
                    && noun_atom_read_fixed(x[4], kb, 32);
     f->found = 1;
     f->shape_ok = shape_ok;
     f->n = n;
     f->sid = shape_ok ? direct_val(x[2]) : 0;
-    for (i = 0; i < I3_DIGEST_BYTES; i++)
+    for (i = 0; i < LITE_DIGEST_BYTES; i++)
         f->d[i] = shape_ok ? d[i] : 0;
     for (i = 0; i < 32; i++)
         f->kb[i] = shape_ok ? kb[i] : 0;
@@ -2068,10 +2080,10 @@ static int load_formula(noun *out)
 static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
 {
     noun state, booted, desk, old, fol, subject, product, xs[3];
-    uint8_t dig[I3_DIGEST_BYTES];
+    uint8_t dig[LITE_DIGEST_BYTES];
     cue_bounded_limits_t limits;
     uint64_t saved_event = g_event_num;
-    i3_host_result_t r;
+    lite_host_result_t r;
     int jumped;
     if (!f->shape_ok)
         return "shape";
@@ -2089,7 +2101,7 @@ again:
     heap_set_mode(HEAP_MODE_SCRATCH);
     if (!noun_is_cell(state))
         return "sid";
-    if (!ckpt_digest(state, dig, 0) || !digest_eq(dig, f->d, I3_DIGEST_BYTES))
+    if (!ckpt_digest(state, dig, 0) || !digest_eq(dig, f->d, LITE_DIGEST_BYTES))
         return "hash";
     /* The booted core must have the wrapper shape the writer saved from;
      * its desk-hash (axis 26) is the booted build's, as on any +load. */
@@ -2101,13 +2113,13 @@ again:
     if (!tuple(xs, 3, &old) || !load_formula(&fol) || !nest(g_kernel, old, &subject))
         return "alloc";
     /* As replay (decision 198): no op budget, the cell and stack limits stay. */
-    nock_budget_set_limits(0, I3_SLAM_MAX_CELLS);
-    nock_eval_stack_set_limit(I3_SLAM_MAX_STACK);
+    nock_budget_set_limits(0, LITE_SLAM_MAX_CELLS);
+    nock_eval_stack_set_limit(LITE_SLAM_MAX_STACK);
     jumped = host_nock(subject, fol, &product);
-    uart_puts("I3H ckpt boot load event=");
+    uart_puts("LITEH ckpt boot load event=");
     put_u64(f->n);
     uart_puts(" abort=");
-    uart_puts(i3_host_abort_name(jumped, nock_budget_abort_reason()));
+    uart_puts(lite_host_abort_name(jumped, nock_budget_abort_reason()));
     if (jumped == NOCK_ABORT_CRASH) {
         uint64_t m = nock_crash_mote();
         uart_puts(" mote=");
@@ -2127,12 +2139,12 @@ again:
     if (jumped != 0 || !noun_is_cell(product))
         return "load";
     if (!ckpt_wrapper_ok(product, &state) || !ckpt_digest(state, dig, 0)
-        || !digest_eq(dig, f->d, I3_DIGEST_BYTES))
+        || !digest_eq(dig, f->d, LITE_DIGEST_BYTES))
         return "load-hash";
     booted = g_kernel;
     g_kernel = product;
     clear_result(&r);
-    if (!i3_host_persist(&r)) {
+    if (!lite_host_persist(&r)) {
         g_kernel = booted;
         g_event_num = saved_event;
         if (!in_persist) {
@@ -2156,7 +2168,8 @@ static uint64_t ckpt_boot(void)
     uint64_t log_len = cold_log_len(), rejected = 0;
 #endif
     const char *why;
-    f.tag = tas("i3-ckpt");
+    f.tag = tas(CKPT_TAG);
+    f.old_tag = tas(CKPT_TAG_OLD);
     f.below = UINT64_MAX;
 #if defined(COLD_LITE_LOG)
     /* A checkpoint before the base cannot boot: its entries are dropped. */
@@ -2164,15 +2177,15 @@ static uint64_t ckpt_boot(void)
 #endif
     for (;;) {
         f.found = 0;
-        if (cold_blob_scan(I3_CKPT_HDR_MAX_BYTES, ckpt_find_cb, &f) != 0 || !f.found)
+        if (cold_blob_scan(LITE_CKPT_HDR_MAX_BYTES, ckpt_find_cb, &f) != 0 || !f.found)
             break;
         why = ckpt_try(&f, log_len);
         heap_scratch_reset();
         if (!why) {
-            uart_puts("I3H ckpt boot event=");
+            uart_puts("LITEH ckpt boot event=");
             put_u64(f.n);
             uart_puts(" sha256=");
-            put_hex(f.d, I3_DIGEST_BYTES);
+            put_hex(f.d, LITE_DIGEST_BYTES);
             uart_puts(" log=");
             put_u64(log_len);
             uart_puts("\r\n");
@@ -2181,7 +2194,7 @@ static uint64_t ckpt_boot(void)
 #endif
             return f.n;
         }
-        uart_puts("I3H ckpt boot reject event=");
+        uart_puts("LITEH ckpt boot reject event=");
         put_u64(f.n);
         uart_puts(" reason=");
         uart_puts(why);
@@ -2195,7 +2208,7 @@ static uint64_t ckpt_boot(void)
      * stops (row 141 stop) and reports it. It never boots from an unverified
      * image." Rotated = entries 1..B dropped (B > 0). */
     if (g_base.index > 0) {
-        uart_puts("I3H ckpt boot none rejected=");
+        uart_puts("LITEH ckpt boot none rejected=");
         put_u64(rejected);
         uart_puts(" fallback=stop base=");
         put_u64(g_base.index);
@@ -2204,7 +2217,7 @@ static uint64_t ckpt_boot(void)
         return 0;
     }
 #endif
-    uart_puts("I3H ckpt boot none rejected=");
+    uart_puts("LITEH ckpt boot none rejected=");
     put_u64(rejected);
     uart_puts(" fallback=zero\r\n");
     return 0;
@@ -2226,7 +2239,7 @@ static int lite_boot(void)
         g_base.job_sum = 0;
         g_base.len = cold_log_len();
     }
-    uart_puts("I3H log boot base=");
+    uart_puts("LITEH log boot base=");
     put_u64(g_base.index);
     uart_puts(" len=");
     put_u64(g_base.len);
@@ -2236,7 +2249,7 @@ static int lite_boot(void)
     from = ckpt_boot();
     if (g_rotated) {
         g_stop = STOP_ROTATED;
-        uart_puts("I3H stop reason=rotated base=");
+        uart_puts("LITEH stop reason=rotated base=");
         put_u64(g_base.index);
         uart_puts(" log=");
         put_u64(g_base.len);
@@ -2245,22 +2258,22 @@ static int lite_boot(void)
     }
     if (!replay_log(from))
         return 0;
-    i3_ring_boot(g_event_num - 1, g_jam_blake3);
+    lite_ring_boot(g_event_num - 1, g_jam_blake3);
     return 1;
 }
 #endif
 
 /* Row 221 (3): a build that overflows the code region halts with its own
  * terminal reason. */
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
 static void code_region_check(void)
 {
     if (heap_code_overflowed()) {
-        uart_puts("I3H code region overflow bytes=");
+        uart_puts("LITEH code region overflow bytes=");
         put_u64(heap_code_bytes());
         uart_puts(" size=");
-        put_u64(I3_CODE_SIZE);
-        uart_puts("\r\nI3H terminal=code-region\r\n");
+        put_u64(LITE_CODE_SIZE);
+        uart_puts("\r\nLITEH terminal=code-region\r\n");
         halt();
     }
 }
@@ -2268,7 +2281,7 @@ static void code_region_check(void)
 #define code_region_check() ((void)0)
 #endif
 
-void i3_host_boot(void)
+void lite_host_boot(void)
 {
     const uint8_t *jam;
     uint64_t jam_len, cue_len;
@@ -2278,33 +2291,33 @@ void i3_host_boot(void)
     cue_bounded_status_t status;
     uint64_t t0, t1;
     int jumped;
-    i3_host_result_t persist;
+    lite_host_result_t persist;
 
     g_ready = 0;
     g_event_num = 1;
     g_stop = 0;
     g_replaying = 0;
     g_job_sum = 0;
-    uart_puts("I3H start\r\n");
+    uart_puts("LITEH start\r\n");
     fast_reset();
 
     (void)read_pill(&jam, &jam_len, &shape);
-    if (shape != I3_PILL_SHAPE_NOCKAPP) {
-        uart_puts("I3H terminal=pill-refuse\r\n");
+    if (shape != LITE_PILL_SHAPE_NOCKAPP) {
+        uart_puts("LITEH terminal=pill-refuse\r\n");
         halt();
     }
-    if (jam_len == 0 || jam_len > I3_CUE_MAX_INPUT_BYTES) {
-        uart_puts("I3H cue status=input cells=0 cells_bound=");
-        put_u64(I3_CUE_MAX_CELLS);
+    if (jam_len == 0 || jam_len > LITE_CUE_MAX_INPUT_BYTES) {
+        uart_puts("LITEH cue status=input cells=0 cells_bound=");
+        put_u64(LITE_CUE_MAX_CELLS);
         uart_puts(" ticks=0 first_bound=input\r\n");
-        uart_puts("I3H terminal=cue-refuse\r\n");
+        uart_puts("LITEH terminal=cue-refuse\r\n");
         halt();
     }
 
     g_jam_len = jam_len;
     blake3_hash(jam, (size_t)jam_len, g_jam_blake3);
 
-    uart_puts("I3H jam bytes=");
+    uart_puts("LITEH jam bytes=");
     put_u64(jam_len);
     uart_puts("\r\n");
 
@@ -2312,8 +2325,8 @@ void i3_host_boot(void)
     while (cue_len > 1 && jam[cue_len - 1] == 0)
         cue_len--;
 
-    limits = i3_limits();
-#if defined(I3_COMPACT)
+    limits = lite_limits();
+#if defined(LITE_COMPACT)
     /* Row 221 (3): the cue, the formulas and the kick build in the code
      * region, once. */
     heap_code_begin();
@@ -2324,12 +2337,12 @@ void i3_host_boot(void)
     print_cue(status, t1 - t0);
     if (status != CUE_BOUNDED_OK) {
         code_region_check();
-        uart_puts("I3H terminal=cue-refuse\r\n");
+        uart_puts("LITEH terminal=cue-refuse\r\n");
         halt();
     }
     noun_tx_commit();
 
-    uart_puts("I3H kernel bytes=");
+    uart_puts("LITEH kernel bytes=");
     put_u64(g_jam_len);
     uart_puts(" blake3=");
     put_hex(g_jam_blake3, 32);
@@ -2339,7 +2352,7 @@ void i3_host_boot(void)
     if (!kick_formula(&kick_fol) || !slam_formula(&g_poke_fol)
         || !peek_formula(&g_peek_fol)) {
         code_region_check();
-        uart_puts("I3H terminal=formula-fail\r\n");
+        uart_puts("LITEH terminal=formula-fail\r\n");
         halt();
     }
 
@@ -2347,7 +2360,7 @@ void i3_host_boot(void)
     t0 = cntvct();
     jumped = host_nock(root, kick_fol, &g_kernel);
     t1 = cntvct();
-    uart_puts("I3H kick nock_ops_used=");
+    uart_puts("LITEH kick nock_ops_used=");
     put_u64(nock_ops_used());
     uart_puts(" nock_cells_used=");
     put_u64(nock_cells_used());
@@ -2358,12 +2371,12 @@ void i3_host_boot(void)
     uart_puts(" parse=");
     uart_puts((jumped == 0 && noun_is_cell(g_kernel)) ? "yes" : "no");
     uart_puts(" abort=");
-    uart_puts(i3_host_abort_name(jumped, nock_budget_abort_reason()));
+    uart_puts(lite_host_abort_name(jumped, nock_budget_abort_reason()));
     uart_puts(" formula=");
     uart_puts(KICK_FORMULA_TEXT);
     uart_puts("\r\n");
     nock_budget_finish();
-    uart_puts("I3H fast clues=");
+    uart_puts("LITEH fast clues=");
     put_u64(fast_clue_count());
     uart_puts(" cold=");
     put_u64((uint64_t)fast_cold_count());
@@ -2378,24 +2391,24 @@ void i3_host_boot(void)
     uart_puts("\r\n");
     if (jumped != 0 || !noun_is_cell(g_kernel)) {
         code_region_check();
-        uart_puts("I3H terminal=kick-fail\r\n");
+        uart_puts("LITEH terminal=kick-fail\r\n");
         halt();
     }
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
     heap_code_end();
-    uart_puts("I3H code region bytes=");
+    uart_puts("LITEH code region bytes=");
     put_u64(heap_code_bytes());
     uart_puts(" cells=");
     put_u64(heap_code_bytes() / sizeof(cell_t));
     uart_puts(" size=");
-    put_u64(I3_CODE_SIZE);
+    put_u64(LITE_CODE_SIZE);
     uart_puts("\r\n");
 #endif
 
     g_ready = 1;
     clear_result(&persist);
-    (void)i3_host_persist(&persist);
-    uart_puts("I3H persist_copy ticks=");
+    (void)lite_host_persist(&persist);
+    uart_puts("LITEH persist_copy ticks=");
     put_u64(persist.persist_ticks);
     uart_puts(" ok=");
     uart_puts(persist.persist_ok ? "yes" : "no");
@@ -2405,14 +2418,14 @@ void i3_host_boot(void)
     put_u64(persist.persist_copy_map_capacity);
     uart_puts("\r\n");
     if (!persist.persist_ok) {
-        uart_puts("I3H terminal=persist-fail\r\n");
+        uart_puts("LITEH terminal=persist-fail\r\n");
         g_ready = 0;
         halt();
     }
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
     /* Row 221 (6): the atoms from the kernel cue are the fixed prefix. */
     atom_store_pin();
-    uart_puts("I3H atom prefix bytes=");
+    uart_puts("LITEH atom prefix bytes=");
     put_u64(atom_store_pin_bytes());
     uart_puts(" atoms=");
     put_u64(atom_store_index_occupancy());
@@ -2424,16 +2437,16 @@ void i3_host_boot(void)
 #if defined(COLD_MEDIA_SEMIHOST)
     cold_nv_arm();
 #endif
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     heap_persist_cap_arm();
-    uart_puts("I3H persist_headroom cells=");
-    put_u64(I3_PERSIST_HEADROOM_CELLS);
+    uart_puts("LITEH persist_headroom cells=");
+    put_u64(LITE_PERSIST_HEADROOM_CELLS);
     uart_puts("\r\n");
 #endif
     g_persist_reserve = heap_persist_free_cells() / 16;
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
     ckpt_jam_reset(); /* region memory is not zeroed at boot */
-#if defined(I3_CKPT_TEST_PERSIST)
+#if defined(LITE_CKPT_TEST_PERSIST)
     g_boot_persist_free = 0;
 #else
     g_boot_persist_free = heap_persist_free_cells();
@@ -2441,19 +2454,19 @@ void i3_host_boot(void)
     {
         /* Q8: replay decodes each entry under the live admission limits,
          * with the depth of the log entry's wrapper on top (ckpt_jam.h). */
-        cue_bounded_limits_t log_limits = i3_limits();
-        log_limits.max_depth = I3_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN;
+        cue_bounded_limits_t log_limits = lite_limits();
+        log_limits.max_depth = LITE_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN;
         cold_set_log_limits(&log_limits);
     }
 #endif
 #if defined(COLD_LITE_LOG)
     if (!lite_boot()) {
-#elif defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#elif defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
     if (!replay_log(ckpt_boot())) {
 #else
     if (!replay_log()) {
 #endif
-        uart_puts("I3H terminal=replay-fail\r\n");
+        uart_puts("LITEH terminal=replay-fail\r\n");
         g_ready = 0;
         halt();
     }
@@ -2461,9 +2474,9 @@ void i3_host_boot(void)
     if (!g_rotated)
 #endif
     stop_after_trip();
-    uart_puts("I3H ready\r\n");
-#if defined(I3_L1_PROBE)
-    i3_l1_probe_boot();
+    uart_puts("LITEH ready\r\n");
+#if defined(LITE_PROBE)
+    lite_probe_boot();
 #endif
     halt();
 }

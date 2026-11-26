@@ -107,7 +107,7 @@ void     hot_hits_reset(void);
 int      nock_tip5_digest(noun n, uint8_t out[40]);
 
 void     fast_reset(void);
-void     nock_host_roots(void (*f)(noun, int)); /* row 221, I3_COMPACT only */
+void     nock_host_roots(void (*f)(noun, int)); /* row 221, LITE_COMPACT only */
 uint64_t fast_clue_count(void);
 int      fast_reg_count(void);
 int      fast_cold_count(void);
@@ -119,7 +119,7 @@ int      fast_first_clue_ok(void);
 noun     fast_first_clue(void);
 int      fast_chum_count(void);
 noun     fast_chum_at(int i);
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
 noun     fast_core_lookup(noun label);
 int      fast_core_count(void);
 const char *fast_core_name(int i);

@@ -5,6 +5,7 @@
 #include "memory.h"
 #include "runtime_stats.h"
 
+/* The descriptor magic is a versioned on-media constant, kept byte-identical (1499kernel row 389 Q2 A). */
 #define COLD_MEDIA_DESC_MAGIC 0x31444D433249ULL /* "I2CMD1\0\0" LE */
 
 typedef struct __attribute__((packed)) {
@@ -408,7 +409,7 @@ cold_media_status_t cold_media_ring_load(uint8_t *window, uint64_t bytes)
     cold_media_status_t status = ring_begin(0);
     if (status != COLD_MEDIA_OK)
         return status;
-    if (bytes != (uint64_t)(I3_RING_BYTES)
+    if (bytes != (uint64_t)(LITE_RING_BYTES)
         || ring_range(0, COLD_MEDIA_RING_SECTORS) != COLD_MEDIA_OK)
         return COLD_MEDIA_UNDERSIZED;
     uint64_t total = ring_deadline(COLD_MEDIA_RING_LOAD_SECONDS), chunk = 0;

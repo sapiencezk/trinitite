@@ -1,7 +1,7 @@
 # What remains of the original Trinitite
 
 Trinitite started as a bare-metal Forth OS hosting a Nock 4K evaluator. The
-lite node keeps the pieces below; the Forth system, the Arvo/Shrine kernel
+lite node keeps the pieces below; the Forth system, the kernel event
 loop, subject knowledge analysis, the scheduler, timers, MMIO and networking
 effects, multi-core workers and live kernel swap were removed by 1499kernel
 row 389. Further work on this tree is planned in 1499kernel's `docs/PLAN.md`.

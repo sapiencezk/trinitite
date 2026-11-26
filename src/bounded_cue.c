@@ -1,12 +1,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "bounded_cue.h"
-#include "i2_admission_envelope.h"
-#include "i2_admission_metrics.h"
+#include "admission_envelope.h"
+#include "admission_metrics.h"
 #include "memory.h"
 
 /* High-RAM table. mini.jam unique graph nodes 283416; cue also caches
- * backref sites, ~550k entries. Production M12 table is 131072 in .bss. */
+ * backref sites, ~550k entries. */
 #define BOUNDED_CACHE_MAX       1048576u
 #define BOUNDED_ATOM_LIMBS_MAX  32768u /* 256 KiB */
 
@@ -38,16 +38,16 @@ static bounded_cache_entry_t *const g_bounded_cache =
     (bounded_cache_entry_t *)(uintptr_t)PLATFORM_CUE_CACHE_BASE;
 static uint64_t g_bounded_atom_limbs[BOUNDED_ATOM_LIMBS_MAX];
 
-const cue_bounded_limits_t cue_i2_limits = {
-    .max_input_bytes = I2_CUE_MAX_INPUT_BYTES,
-    .max_depth = I2_CUE_MAX_DEPTH,
-    .max_nodes = I2_CUE_MAX_NODES,
-    .max_cells = I2_CUE_MAX_CELLS,
-    .max_backrefs = I2_CUE_MAX_BACKREFS,
-    .max_cache_entries = I2_CUE_CACHE_ADMITTED,
-    .max_atom_bytes = I2_CUE_MAX_ATOM_BYTES,
-    .max_total_atom_bytes = I2_CUE_MAX_TOTAL_ATOM_BYTES,
-    .max_work = I2_CUE_MAX_WORK
+const cue_bounded_limits_t cue_envelope_limits = {
+    .max_input_bytes = ENVELOPE_CUE_MAX_INPUT_BYTES,
+    .max_depth = ENVELOPE_CUE_MAX_DEPTH,
+    .max_nodes = ENVELOPE_CUE_MAX_NODES,
+    .max_cells = ENVELOPE_CUE_MAX_CELLS,
+    .max_backrefs = ENVELOPE_CUE_MAX_BACKREFS,
+    .max_cache_entries = ENVELOPE_CUE_CACHE_ADMITTED,
+    .max_atom_bytes = ENVELOPE_CUE_MAX_ATOM_BYTES,
+    .max_total_atom_bytes = ENVELOPE_CUE_MAX_TOTAL_ATOM_BYTES,
+    .max_work = ENVELOPE_CUE_MAX_WORK
 };
 
 static int charge(cue_reader_t *r, uint64_t n)
@@ -274,15 +274,15 @@ static int decode_noun(cue_reader_t *r, uint32_t depth, noun *out)
 
 static void note_reader(const cue_reader_t *r)
 {
-    i2_admission_metrics_max(&g_i2_admission_metrics.cue_work_hwm, r->work);
-    i2_admission_metrics_max(&g_i2_admission_metrics.cue_depth_hwm, r->depth_hwm);
-    i2_admission_metrics_max(&g_i2_admission_metrics.cue_nodes_hwm, r->nodes);
-    i2_admission_metrics_max(&g_i2_admission_metrics.cue_cells_hwm, r->cells);
-    i2_admission_metrics_max(&g_i2_admission_metrics.cue_backrefs_hwm, r->backrefs);
-    i2_admission_metrics_max(
-        &g_i2_admission_metrics.cue_atom_bytes_hwm, r->total_atom_bytes);
-    i2_admission_metrics_max(
-        &g_i2_admission_metrics.cue_cache_entries_hwm, r->cache_entries);
+    admission_metrics_max(&g_admission_metrics.cue_work_hwm, r->work);
+    admission_metrics_max(&g_admission_metrics.cue_depth_hwm, r->depth_hwm);
+    admission_metrics_max(&g_admission_metrics.cue_nodes_hwm, r->nodes);
+    admission_metrics_max(&g_admission_metrics.cue_cells_hwm, r->cells);
+    admission_metrics_max(&g_admission_metrics.cue_backrefs_hwm, r->backrefs);
+    admission_metrics_max(
+        &g_admission_metrics.cue_atom_bytes_hwm, r->total_atom_bytes);
+    admission_metrics_max(
+        &g_admission_metrics.cue_cache_entries_hwm, r->cache_entries);
 }
 
 cue_bounded_status_t cue_bounded_bytes(const uint8_t *bytes, uint64_t len,

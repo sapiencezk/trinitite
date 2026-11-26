@@ -220,23 +220,24 @@ def _run_tests():
     check('parse [1 2 3]',   parse('[1 2 3]'),   (1, (2, 3)))
     check('parse 1.024',     parse('1.024'),      1024)
 
-    # known kernel atoms
+    # gate nouns: a %slog hint around a product, and a gate whose product
+    # carries its state
     SLOG = 0x676F6C73
-    hint_arvo   = ((11, ((SLOG, (0, 6)), ((1, 0), (0, 1)))),            (0, 0))
-    null_shrine = (((1, 0), ((0, 1), (1, 0))),                           (0, 0))
-    hint_shrine = ((11, ((SLOG, (0, 6)), ((1, 0), ((0, 1), (1, 0))))),  (0, 0))
+    slog_gate   = ((11, ((SLOG, (0, 6)), ((1, 0), (0, 1)))),            (0, 0))
+    state_gate  = (((1, 0), ((0, 1), (1, 0))),                           (0, 0))
+    slog_state  = ((11, ((SLOG, (0, 6)), ((1, 0), ((0, 1), (1, 0))))),  (0, 0))
 
-    check('hint-arvo  round-trip', cue(jam(hint_arvo)),   hint_arvo)
-    check('null-shrine round-trip', cue(jam(null_shrine)), null_shrine)
-    check('hint-shrine round-trip', cue(jam(hint_shrine)), hint_shrine)
+    check('slog gate round-trip', cue(jam(slog_gate)),   slog_gate)
+    check('state gate round-trip', cue(jam(state_gate)), state_gate)
+    check('slog state gate round-trip', cue(jam(slog_state)), slog_state)
 
-    # null-arvo atom from Dojo (pre-computed)
-    NULL_ARVO = 3533463315829630395733151849237
-    decoded = cue(NULL_ARVO)
+    # a gate atom jammed by Dojo (pre-computed)
+    DOJO_GATE = 3533463315829630395733151849237
+    decoded = cue(DOJO_GATE)
     if not deep(decoded):
-        print('FAIL  null-arvo atom decodes to a cell'); ok = False
+        print('FAIL  Dojo gate atom decodes to a cell'); ok = False
     else:
-        print('PASS  null-arvo atom decodes to a cell')
+        print('PASS  Dojo gate atom decodes to a cell')
 
     return ok
 

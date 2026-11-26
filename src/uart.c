@@ -13,7 +13,7 @@
 /*
  * Route PL011 (UART0) onto GPIO 14/15 (ALT0). enable_uart=1 clocks the
  * block; on a wireless CM4 the firmware otherwise leaves UART0 on the
- * Bluetooth pins. Compiled only into I3_HOST rpi4b images.
+ * Bluetooth pins. Compiled only into LITE_HOST rpi4b images.
  */
 #define BCM2838_GPIO_BASE 0xFE200000ULL
 #define BCM2838_GPFSEL1   0x04u

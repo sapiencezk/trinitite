@@ -4,9 +4,9 @@
 #include "noun.h"
 
 /* Row 212 PR 1c (running log + SD recorder ring): compiled only with
- * I3_CHECKPOINT_EVERY > 0 and I3_LITE_LOG (nested flag, default off), so the
+ * LITE_CHECKPOINT_EVERY > 0 and LITE_LOG (nested flag, default off), so the
  * flag-off and the 1b flag-on images are unchanged. */
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 && defined(I3_LITE_LOG)
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0 && defined(LITE_LOG)
 #define COLD_LITE_LOG 1
 #endif
 
@@ -50,7 +50,7 @@ uint64_t cold_store(noun n);
  * appending a blob, in the hash domain cold_store() uses. */
 uint64_t cold_jam_hash(noun n);
 noun cold_load(uint64_t hash62);
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 #include "bounded_cue.h"
 /* Row 212 checkpoint verify: cold_load, but the noun is decoded into SCRATCH
  * (the caller resets scratch), so a read-back costs no persist cells, and
@@ -78,7 +78,7 @@ int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
  * checkpoint whose verify moved the base there; audit only, boot does not
  * load it and counts from the base), and a check word over the 64 checksummed
  * superblock bytes plus those three fields. All zero = no base (B = 0).
- * Dropped entries still sit in the chain until compaction. The I3 host never
+ * Dropped entries still sit in the chain until compaction. The lite host never
  * reads them again (replay and log_len start at the base). */
 typedef struct {
     uint64_t index;    /* B */

@@ -8,7 +8,7 @@ nouns and their ++digest, which 1499kernel checks against Nockchain's Rust
 Tip5 (zkvm-jetpack's hash-hashable), its own Rust walk jet
 (c1499-core::tip5) and the Hoon arm on the full node.
 
-Boots tests/jetcheck/jetcheck.jam on the I3_HOST + I3_L1_PROBE image under
+Boots tests/jetcheck/jetcheck.jam on the LITE_HOST + LITE_PROBE image under
 QEMU and pokes [%digest n] for each vector, which runs ++digest of
 1499kernel's iec-types:
   jet   with every jet (the walk's own, hash-hashable-noun:digest-lib);
@@ -113,7 +113,7 @@ def main():
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out = b""
         deadline = time.monotonic() + 1800
-        while b"I3L1 terminal=" not in out and time.monotonic() < deadline:
+        while b"LITE1 terminal=" not in out and time.monotonic() < deadline:
             chunk = p.stdout.read1(65536)
             if not chunk:
                 break
@@ -123,9 +123,9 @@ def main():
     log = out.decode("utf-8", "replace").replace("\r", "")
     if a.log:
         a.log.write_text(log)
-    effects = dict(re.findall(r"^I3L1 effects name=(\S+) noun=(.*)$", log, re.M))
+    effects = dict(re.findall(r"^LITE1 effects name=(\S+) noun=(.*)$", log, re.M))
     cost = {m[0]: m[1:] for m in re.findall(
-        r"^I3L1 poke name=(\S+) nock_ops_used=(\d+) nock_cells_used=(\d+) "
+        r"^LITE1 poke name=(\S+) nock_ops_used=(\d+) nock_cells_used=(\d+) "
         r"nock_eval_stack_peak=\d+ ticks=(\d+) .* abort=(\S+)", log, re.M)}
     problems = []
     for name, noun in vecs:

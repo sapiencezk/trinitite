@@ -7,11 +7,11 @@
 /*
  * Row 212 (2) as amended (1499kernel #263): the lite node's fixed-size
  * recorder ring on SD (PR 1c). Compiled only with COLD_LITE_LOG
- * (I3_CHECKPOINT_EVERY > 0 and I3_LITE_LOG), so other images are unchanged.
+ * (LITE_CHECKPOINT_EVERY > 0 and LITE_LOG), so other images are unchanged.
  *
- * The ring is I3_RING_BYTES bytes (build-time, default 64 MiB, a multiple of
- * 512). It keeps periodic checkpoints (every I3_RING_EVERY events, default
- * 2,000, a multiple of I3_CHECKPOINT_EVERY) and every input between them, for
+ * The ring is LITE_RING_BYTES bytes (build-time, default 64 MiB, a multiple of
+ * 512). It keeps periodic checkpoints (every LITE_RING_EVERY events, default
+ * 2,000, a multiple of LITE_CHECKPOINT_EVERY) and every input between them, for
  * exact replay off the device; when full, the oldest checkpoint and its
  * inputs are overwritten. It is separate from the running log in the cold
  * store, and the node never reads it except to find its own head at boot.
@@ -39,16 +39,16 @@
  *     that holds the tail (the oldest live record).
  */
 #if defined(COLD_LITE_LOG)
-#ifndef I3_RING_BYTES
-#define I3_RING_BYTES 67108864ULL
+#ifndef LITE_RING_BYTES
+#define LITE_RING_BYTES 67108864ULL
 #endif
-#ifndef I3_RING_EVERY
-#define I3_RING_EVERY 2000
+#ifndef LITE_RING_EVERY
+#define LITE_RING_EVERY 2000
 #endif
 
-void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32]);
-void i3_ring_input(uint64_t n, const uint8_t *bytes, uint64_t len);
-void i3_ring_checkpoint(uint64_t n, const uint8_t d[32], uint64_t job_sum,
+void lite_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32]);
+void lite_ring_input(uint64_t n, const uint8_t *bytes, uint64_t len);
+void lite_ring_checkpoint(uint64_t n, const uint8_t d[32], uint64_t job_sum,
                         const uint8_t *jam, uint64_t len);
-void i3_ring_flush(void);
+void lite_ring_flush(void);
 #endif

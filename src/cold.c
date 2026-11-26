@@ -8,10 +8,11 @@
 #include "bounded_cue.h"
 #include "cold_media.h"
 #include "runtime_stats.h"
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 #include "ckpt_jam.h"
 #endif
 
+/* The magics are versioned on-media constants, kept byte-identical (1499kernel row 389 Q2 A). */
 #define COLD_MAGIC       0x32444C4F433249ULL /* "I2COLD2\0" LE */
 #define COLD_VERSION     2u
 #define COLD_SUPER_SIZE  128u
@@ -26,11 +27,11 @@
 #define KIND_LOG   2u
 #define KIND_SNAP  3u
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 /* Round 3, Q11 B: a checkpoint object (CKPT_JAM_MAX_BYTES) passes through
  * both scratches, so with the checkpoint flag they are 4 MiB each, in the
- * I3_CKPT_JAM region (memory.h), not in .bss. */
-#define JAM_SCRATCH_MAX ((uint32_t)I3_CKPT_COLD_SCRATCH_BYTES)
+ * LITE_CKPT_JAM region (memory.h), not in .bss. */
+#define JAM_SCRATCH_MAX ((uint32_t)LITE_CKPT_COLD_SCRATCH_BYTES)
 #else
 #define JAM_SCRATCH_MAX (256u * 1024u)
 #endif
@@ -67,9 +68,9 @@ typedef char cold_super_size_check[
 typedef char cold_obj_size_check[
     sizeof(cold_obj_hdr_t) == COLD_OBJ_SIZE ? 1 : -1];
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
-#define jam_scratch ((uint8_t *)(uintptr_t)(I3_CKPT_JAM_BASE + I3_CKPT_JAM_COLD_OFF))
-#define append_scratch ((uint8_t *)(uintptr_t)(I3_CKPT_JAM_BASE + I3_CKPT_JAM_APPEND_OFF))
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
+#define jam_scratch ((uint8_t *)(uintptr_t)(LITE_CKPT_JAM_BASE + LITE_CKPT_JAM_COLD_OFF))
+#define append_scratch ((uint8_t *)(uintptr_t)(LITE_CKPT_JAM_BASE + LITE_CKPT_JAM_APPEND_OFF))
 #else
 static uint8_t jam_scratch[JAM_SCRATCH_MAX];
 /* append_obj() validates the currently selected object before writing. That
@@ -578,11 +579,11 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
     return 0;
 }
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 /* Row 317 (3), Q8 (rows 212 (3), 213 (4), decision 131): the host sets the
  * cue limits a LOG entry decodes with on replay (and in the 1b checkpoint
  * boot's read of the skipped entries) to its live admission limits, so an
- * entry accepted live replays. Unset (a non-host image), cue_i2_limits. */
+ * entry accepted live replays. Unset (a non-host image), cue_envelope_limits. */
 static cue_bounded_limits_t g_log_limits;
 static int g_log_limits_set;
 
@@ -610,8 +611,8 @@ static int decode_object(const cold_super_t *s, uint64_t off,
         return -1;
     }
     /* object_validate left the verified payload in jam_scratch */
-    cue_bounded_limits_t limits = cue_i2_limits;
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+    cue_bounded_limits_t limits = cue_envelope_limits;
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
     if (kind == KIND_LOG && g_log_limits_set)
         limits = g_log_limits;
 #endif
@@ -686,11 +687,11 @@ noun cold_load(uint64_t hash62)
     return cold_load_in(hash62, HEAP_MODE_PERSIST);
 }
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 _Static_assert(CKPT_JAM_MAX_BYTES <= JAM_SCRATCH_MAX, "a checkpoint object fits the scratch");
 
 /* Row 317 (3), Q7: the checkpoint's reads cue with the caller's limits (the
- * 128k-cell checkpoint cue bound, row 212 (4)), not the log's cue_i2_limits.
+ * 128k-cell checkpoint cue bound, row 212 (4)), not the log's cue_envelope_limits.
  * decode_object and cold_load_in with a limits argument; they are kept
  * apart from those two so the flag-off image is unchanged. */
 static int decode_object_limits(const cold_super_t *s, uint64_t off, uint32_t kind,
@@ -925,7 +926,7 @@ noun cold_log_next(uint64_t *cursor)
             break;
         if (h.kind == KIND_LOG) {
             noun out;
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
             if (decode_object(s, off, KIND_LOG, g_log_heap_mode, &out) != 0)
 #else
             if (decode_object(s, off, KIND_LOG,

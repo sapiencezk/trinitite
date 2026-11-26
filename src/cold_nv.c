@@ -13,7 +13,7 @@
  * mirrors each ordered logical phase through the target-private EMMC2 path.
  */
 
-/* Angel semihosting (AArch64): HLT #0xF000, x0=op, x1=&params */
+/* ARM semihosting (AArch64): HLT #0xF000, x0=op, x1=&params */
 #define SYS_OPEN   0x01
 #define SYS_CLOSE  0x02
 #define SYS_WRITE  0x05

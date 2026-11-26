@@ -1,6 +1,6 @@
 # Lite host contract
 
-What the lite host image (`I3_HOST=1`, the only image this tree builds) does
+What the lite host image (`LITE_HOST=1`, the only image this tree builds) does
 with a NockApp kernel, and what it reads and writes. 1499kernel owns the
 kernel, its causes and its effects (`docs/PLAN.md`, `docs/HANDOVER.md`); this
 file covers the host side only. The checkpoint, running log, recorder ring
@@ -16,13 +16,13 @@ The pill, the plan and the application bundle sit in RAM at fixed offsets from
 
 | Blob | Offset | Layout |
 |---|---|---|
-| pill | `PILL_BASE` | `[u64 LE jam length][u8 shape][7 bytes][kernel jam]`; shape 2 (NockApp) is the only one accepted (`I3H terminal=pill-refuse` otherwise) |
-| plan | `I3_PLAN_BASE` = `PILL_BASE` + 0x01000000 | `[u64 LE length][jam of the step list]`, read by the `I3_L1_PROBE` driver |
-| application | `I3_APP_BASE` = `PILL_BASE` + 0x03000000 | `[u64 LE jam length][64 ASCII hex SHA-256][bundle jam]` |
+| pill | `PILL_BASE` | `[u64 LE jam length][u8 shape][7 bytes][kernel jam]`; shape 2 (NockApp) is the only one accepted (`LITEH terminal=pill-refuse` otherwise) |
+| plan | `LITE_PLAN_BASE` = `PILL_BASE` + 0x01000000 | `[u64 LE length][jam of the step list]`, read by the `LITE_PROBE` driver |
+| application | `LITE_APP_BASE` = `PILL_BASE` + 0x03000000 | `[u64 LE jam length][64 ASCII hex SHA-256][bundle jam]` |
 
-The kernel jam may be up to `I3_CUE_MAX_INPUT_BYTES` (16 MiB less the 16-byte
-header) and is cued with the bounds of `src/i3_admission.h`; a cue past a
-bound halts with `I3H terminal=cue-refuse`.
+The kernel jam may be up to `LITE_CUE_MAX_INPUT_BYTES` (16 MiB less the 16-byte
+header) and is cued with the bounds of `src/lite_admission.h`; a cue past a
+bound halts with `LITEH terminal=cue-refuse`.
 
 An application bundle is loaded only if its SHA-256, computed natively before
 any cue, equals the expected digest; an all-zero digest skips the gate. On a
@@ -35,14 +35,14 @@ match it is cued and poked as `[%load-bundle bundle]`.
 2. Read the cold store from the media; with a checkpoint cadence, boot from
    the newest verified checkpoint, else from the kicked kernel.
 3. Replay every logged entry after it through the same slam, checking each
-   event number, then install the result (`I3H replay …`).
-4. `I3H ready`; the diagnostic driver (if built) then runs the plan.
+   event number, then install the result (`LITEH replay …`).
+4. `LITEH ready`; the diagnostic driver (if built) then runs the plan.
 
 ## 3. Pokes and peeks
 
 Each poke slams the kernel's poke arm with a job `[event_num ovum]` under the
-per-slam caps (`I3_SLAM_MAX_OPS` 4,000,000, `I3_SLAM_MAX_CELLS` 1,200,000,
-`I3_SLAM_MAX_STACK` 1,024 evaluator frames). The product must parse as
+per-slam caps (`LITE_SLAM_MAX_OPS` 4,000,000, `LITE_SLAM_MAX_CELLS` 1,200,000,
+`LITE_SLAM_MAX_STACK` 1,024 evaluator frames). The product must parse as
 `[effects new-core]`; the new core is copied into the persist heap and becomes
 the kernel. Peeks use the peek arm under the same caps and change nothing.
 
@@ -58,7 +58,7 @@ appended past `%crud`. A crash past `%crud`, a failed append, and a host abort
 (ops, cells, stack) append nothing and stop the application: later pokes are
 refused, and the next boot, after replay, applies a journaled `%manage` STOP
 once. A step that would leave less persist room than replay needs also stops
-it (`I3H stop reason=persist`). Under `COLD_MEDIA=semihost` each append
+it (`LITEH stop reason=persist`). Under `COLD_MEDIA=semihost` each append
 rewrites `build/cold.img`, so the run needs `-semihosting`.
 
 ## 4. Memory
@@ -66,7 +66,7 @@ rewrites `build/cold.img`, so the run needs `-semihosting`.
 | Region | Range | On exhaustion |
 |---|---|---|
 | Persist cells | two 16 MiB semispaces from `HEAP_BASE` | `heap exhausted` |
-| Scratch cells | `HEAP_SCRATCH_BASE` .. `HEAP_TOP`, 32 MiB (64 MiB high in qemu RAM with `I3_UNJETTED`) | `scratch exhausted` |
+| Scratch cells | `HEAP_SCRATCH_BASE` .. `HEAP_TOP`, 32 MiB (64 MiB high in qemu RAM with `LITE_UNJETTED`) | `scratch exhausted` |
 | Atom store | 64k-slot index, 4 MiB of records | `atom store exhausted/collision` |
 | Cold store | 8 MiB RAM window at `COLD_BASE`, mirrored to the media | append fails, the application stops |
 
@@ -104,7 +104,7 @@ Nock battery. Every other hint is inert.
 
 ## 7. UART
 
-Every host line starts with `I3H `, every diagnostic-driver line with `I3L1 `.
+Every host line starts with `LITEH `, every diagnostic-driver line with `LITE1 `.
 1499kernel's `tools/lite_probe.py`, `tools/lite_checkpoint_boot.py` and
 related tools parse them; their names and fields are an interface (a change
 is a 1499kernel row). The console is PL011 at 115200 8N1 (rpi4b: GPIO 14/15).

@@ -20,12 +20,12 @@ Toolchain: `aarch64-elf-gcc` and binutils (`brew install aarch64-elf-gcc
 aarch64-elf-binutils`), QEMU for the tests (`brew install qemu`).
 
 ```sh
-make PLATFORM=qemu-virt I3_HOST=1                 # the host image on QEMU virt
-make PLATFORM=qemu-virt I3_HOST=1 I3_L1_PROBE=1   # plus the diagnostic plan driver
-make PLATFORM=rpi4b I3_HOST=1                     # the Pi 4 image
+make PLATFORM=qemu-virt LITE_HOST=1                 # the host image on QEMU virt
+make PLATFORM=qemu-virt LITE_HOST=1 LITE_PROBE=1   # plus the diagnostic plan driver
+make PLATFORM=rpi4b LITE_HOST=1                     # the Pi 4 image
 ```
 
-`I3_HOST=1` is the default and the only value: the lite host is the only image.
+`LITE_HOST=1` is the default and the only value: the lite host is the only image.
 The result is `kernel8.img` (and `kernel8.elf`); each configuration also keeps
 its own copy under `.build/`.
 
@@ -33,13 +33,13 @@ its own copy under `.build/`.
 |---|---|---|
 | `PLATFORM` | `rpi4b` (default), `qemu-virt` | memory map, UART, linker script |
 | `COLD_MEDIA` | `ram` (default), `semihost`, `rpi4-sd` | where the cold store lives: RAM only, a QEMU semihosting file (`build/cold.img`), the Pi's SD card |
-| `I3_L1_PROBE=1` | | the diagnostic driver: pokes and peeks a plan blob, prints `I3L1` lines |
-| `I3_UNJETTED=1` | qemu-virt, with `I3_L1_PROBE` | the diagnostic budget, 16x the slam caps |
-| `I3_CHECKPOINT_EVERY=K` | default 2000; empty turns it off | the checkpoint writer and the boot from the newest checkpoint |
-| `I3_LITE_LOG=1` | with a checkpoint cadence | the running log, the SD recorder ring and compaction |
-| `I3_RING_BYTES`, `I3_RING_EVERY` | with `I3_LITE_LOG` | ring size and ring checkpoint cadence |
-| `I3_PERSIST_HEADROOM_CELLS=N` | | test knob: cap persist growth at N cells past boot |
-| `I3_CKPT_TEST`, `I3_CKPT_TEST_FROM`, `I3_PLANT_RSH_RAW`, `I3_PLANT_LABEL_ONLY` | | test-only checkpoint and jet-plant knobs (see the Makefile) |
+| `LITE_PROBE=1` | | the diagnostic driver: pokes and peeks a plan blob, prints `LITE1` lines |
+| `LITE_UNJETTED=1` | qemu-virt, with `LITE_PROBE` | the diagnostic budget, 16x the slam caps |
+| `LITE_CHECKPOINT_EVERY=K` | default 2000; empty turns it off | the checkpoint writer and the boot from the newest checkpoint |
+| `LITE_LOG=1` | with a checkpoint cadence | the running log, the SD recorder ring and compaction |
+| `LITE_RING_BYTES`, `LITE_RING_EVERY` | with `LITE_LOG` | ring size and ring checkpoint cadence |
+| `LITE_PERSIST_HEADROOM_CELLS=N` | | test knob: cap persist growth at N cells past boot |
+| `LITE_CKPT_TEST`, `LITE_CKPT_TEST_FROM`, `LITE_PLANT_RSH_RAW`, `LITE_PLANT_LABEL_ONLY` | | test-only checkpoint and jet-plant knobs (see the Makefile) |
 
 ## Running under QEMU
 
@@ -49,7 +49,7 @@ addresses):
 | Blob | Address | Layout |
 |---|---|---|
 | pill | `0x50000000` | `[u64 jam length][u8 shape = 2 (NockApp)][7 bytes 0][kernel jam]` |
-| plan (`I3_L1_PROBE`) | `0x51000000` | `[u64 length][jam of the plan steps]` |
+| plan (`LITE_PROBE`) | `0x51000000` | `[u64 length][jam of the plan steps]` |
 | application | `0x53000000` | `[u64 jam length][64 hex SHA-256, all 0 = no gate][bundle jam]` |
 
 ```sh
@@ -60,7 +60,7 @@ qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 2G -nographic \
 ```
 
 Add `-semihosting` for `COLD_MEDIA=semihost`. Every host line starts with
-`I3H`, every diagnostic line with `I3L1`; 1499kernel's `tools/lite_probe.py`
+`LITEH`, every diagnostic line with `LITE1`; 1499kernel's `tools/lite_probe.py`
 builds the blobs and parses the lines. The host contract is
 [docs/HOST-CONTRACT.md](docs/HOST-CONTRACT.md).
 
@@ -96,7 +96,7 @@ At boot the image drives the fixed output bank (GPIO 17, 27 and 22) low.
 
 Trinitite began as Sigilante's bare-metal Forth/Nock OS for the Raspberry Pi.
 1499kernel grew its own host on it, and row 389 removed everything the lite
-node does not run: the Forth system and REPL, the Arvo/Shrine kernel loop,
+node does not run: the Forth system and REPL, the event-loop kernel shapes,
 subject knowledge analysis, and the earlier native research line. What
 remains of the original is described in [ROADMAP.md](ROADMAP.md).
 

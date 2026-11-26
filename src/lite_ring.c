@@ -1,19 +1,19 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * Row 212 PR 1c: the recorder ring (i3_ring.h has the layout). The working
- * copy is a RAM window of I3_RING_BYTES at I3_RING_WINDOW_BASE (memory.h);
+ * Row 212 PR 1c: the recorder ring (lite_ring.h has the layout). The working
+ * copy is a RAM window of LITE_RING_BYTES at LITE_RING_WINDOW_BASE (memory.h);
  * each change is mirrored to the media:
  *   COLD_MEDIA=rpi4-sd  write-through by whole sectors to the ring extent
  *                       (cold_media_ring_*, cold_media.h; loaded whole at
  *                       boot, 5 s per 256 KiB chunk, 60 s in total),
  *   COLD_MEDIA=semihost the changed bytes go to the host file build/ring.img
- *                       at each i3_ring_flush (QEMU tests reload it with
+ *                       at each lite_ring_flush (QEMU tests reload it with
  *                       -device loader at the window address),
  *   COLD_MEDIA=ram      RAM only (volatile).
  *
  * Faults. A ring media fault (load, write or barrier) is logged
- * (`I3H ring media fault op=... status=...`) and turns the ring off for the
- * rest of the boot (`I3H ring off reason=media`). It never sets the cold
+ * (`LITEH ring media fault op=... status=...`) and turns the ring off for the
+ * rest of the boot (`LITEH ring off reason=media`). It never sets the cold
  * session's reset state (cold_media.c), so the cold log and the node go on.
  *
  * Order per record: free space (evict oldest segments, wrap), and if that
@@ -34,8 +34,8 @@
  * size (status=reformat), and never after a chain check fails. Its own magic
  * with no header or record to trust is status=corrupt; anything else is
  * status=foreign. Both leave the media as it is and run without the ring.
- * GAP (Steward's ruling): an all-zero range that belongs to another partition
- * is still formatted. No rpi4-sd image with I3_LITE_LOG on is deployed until
+ * GAP (the steward's ruling): an all-zero range that belongs to another partition
+ * is still formatted. No rpi4-sd image with LITE_LOG on is deployed until
  * the layout descriptor names the ring, and the board run uses a card whose
  * ring area was zeroed on purpose (docs/lite-checkpoint-writer.md).
  * Not measured on the board: SD append time, torn-write behaviour of real
@@ -45,7 +45,7 @@
 #include <stdint.h>
 #include "cold.h"
 #if defined(COLD_LITE_LOG)
-#include "i3_ring.h"
+#include "lite_ring.h"
 #include "blake3.h"
 #include "cold_media.h"
 #include "memory.h"
@@ -53,11 +53,12 @@
 #include "runtime_stats.h"
 #include "uart.h"
 
-#define RING_R       ((uint64_t)(I3_RING_BYTES))
-#define RING_BASE    I3_RING_WINDOW_BASE
+#define RING_R       ((uint64_t)(LITE_RING_BYTES))
+#define RING_BASE    LITE_RING_WINDOW_BASE
 #define RING_SLOT    512u
 #define RING_DATA0   1024u
 #define RING_SECTOR  512u
+/* The ring magics are versioned on-media constants, kept byte-identical (1499kernel row 389 Q2 A). */
 #define RING_MAGIC   0x0031474E49523349ULL /* "I3RING1\0" LE */
 #define REC_MAGIC    0x52523349u           /* "I3RR" LE */
 #define REC_HDR      64u
@@ -67,11 +68,11 @@
 #define REC_WRAP     4u
 #define CKPT_META    72u /* D || kernel-blake3 || job_sum (u64 LE) */
 
-_Static_assert(RING_R % 512u == 0, "I3_RING_BYTES is a multiple of 512");
-_Static_assert(RING_R >= 4096u, "I3_RING_BYTES >= 4096");
-_Static_assert(RING_R <= 0x08000000ULL, "I3_RING_BYTES <= 128 MiB (window)");
-_Static_assert(I3_RING_EVERY > 0 && I3_RING_EVERY % I3_CHECKPOINT_EVERY == 0,
-               "I3_RING_EVERY is a multiple of I3_CHECKPOINT_EVERY");
+_Static_assert(RING_R % 512u == 0, "LITE_RING_BYTES is a multiple of 512");
+_Static_assert(RING_R >= 4096u, "LITE_RING_BYTES >= 4096");
+_Static_assert(RING_R <= 0x08000000ULL, "LITE_RING_BYTES <= 128 MiB (window)");
+_Static_assert(LITE_RING_EVERY > 0 && LITE_RING_EVERY % LITE_CHECKPOINT_EVERY == 0,
+               "LITE_RING_EVERY is a multiple of LITE_CHECKPOINT_EVERY");
 
 typedef struct __attribute__((packed)) {
     uint64_t magic;
@@ -150,7 +151,7 @@ static void media_fault(const char *op, cold_media_status_t st,
                         uint64_t off, uint64_t len)
 {
     int64_t v = (int64_t)st;
-    uart_puts("I3H ring media fault op=");
+    uart_puts("LITEH ring media fault op=");
     uart_puts(op);
     uart_puts(" status=");
     if (v < 0) {
@@ -163,7 +164,7 @@ static void media_fault(const char *op, cold_media_status_t st,
     put_u64(off);
     uart_puts(" len=");
     put_u64(len);
-    uart_puts("\r\nI3H ring off reason=media\r\n");
+    uart_puts("\r\nLITEH ring off reason=media\r\n");
     g_ok = 0;
 }
 #endif
@@ -364,7 +365,7 @@ static int next_seg(uint64_t *off, uint64_t *seq)
 
 static void ring_fail(uint64_t n, const char *why)
 {
-    uart_puts("I3H ring skip event=");
+    uart_puts("LITEH ring skip event=");
     put_u64(n);
     uart_puts(" reason=");
     uart_puts(why);
@@ -522,12 +523,12 @@ static const char *open_slots(const ring_hdr_t h[2], const int v[2],
 static void off_corrupt(void)
 {
     g_ok = 0;
-    uart_puts("I3H ring boot status=corrupt\r\nI3H ring off reason=corrupt\r\n"
-              "I3H ring hint: media kept as is; copy the ring extent off and read it "
+    uart_puts("LITEH ring boot status=corrupt\r\nLITEH ring off reason=corrupt\r\n"
+              "LITEH ring hint: media kept as is; copy the ring extent off and read it "
               "with tools/ring_image.py show, then zero the extent to start a new ring\r\n");
 }
 
-void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
+void lite_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
 {
     ring_hdr_t h[2], o;
     int v[2];
@@ -546,11 +547,11 @@ void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
             if (cold_media_active())
                 media_fault("load", st, 0, RING_R);
             g_ok = 0;
-            uart_puts("I3H ring boot status=media\r\n");
+            uart_puts("LITEH ring boot status=media\r\n");
             return;
         }
         t1 = runtime_counter_now();
-        uart_puts("I3H ring load bytes=");
+        uart_puts("LITEH ring load bytes=");
         put_u64(RING_R);
         uart_puts(" ticks=");
         put_u64(t1 >= t0 ? t1 - t0 : 0);
@@ -577,9 +578,9 @@ void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
     } else if ((hdr_sound(0, &o) && o.ring_bytes != RING_R)
                || (hdr_sound(1, &o) && o.ring_bytes != RING_R)) {
         /* A whole header of ours for another ring size (the build changed
-         * I3_RING_BYTES): the only case that reformats over non-zero data. */
+         * LITE_RING_BYTES): the only case that reformats over non-zero data. */
         status = "reformat";
-        uart_puts("I3H ring reformat old_bytes=");
+        uart_puts("LITEH ring reformat old_bytes=");
         put_u64(o.ring_bytes);
         uart_puts(" new_bytes=");
         put_u64(RING_R);
@@ -592,7 +593,7 @@ void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
     } else {
         /* Not blank and not ours: never format data the ring did not create. */
         g_ok = 0;
-        uart_puts("I3H ring boot status=foreign\r\nI3H ring off reason=foreign\r\n");
+        uart_puts("LITEH ring boot status=foreign\r\nLITEH ring off reason=foreign\r\n");
         return;
     }
     if (g_ok)
@@ -603,12 +604,12 @@ void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
         else
             g_gap = g_h.last_n != log_len;
     }
-    uart_puts("I3H ring boot status=");
+    uart_puts("LITEH ring boot status=");
     uart_puts(g_ok ? status : "fail");
     uart_puts(" bytes=");
     put_u64(RING_R);
     uart_puts(" every=");
-    put_u64(I3_RING_EVERY);
+    put_u64(LITE_RING_EVERY);
     uart_puts(" records=");
     put_u64(empty() ? 0 : g_h.next_seq - g_h.tail_seq);
     uart_puts(" segments=");
@@ -626,7 +627,7 @@ void i3_ring_boot(uint64_t log_len, const uint8_t kernel_blake3[32])
     uart_puts("\r\n");
 }
 
-void i3_ring_input(uint64_t n, const uint8_t *bytes, uint64_t len)
+void lite_ring_input(uint64_t n, const uint8_t *bytes, uint64_t len)
 {
     uint64_t ev = 0;
     if (!g_ok || g_gap)
@@ -649,7 +650,7 @@ void i3_ring_input(uint64_t n, const uint8_t *bytes, uint64_t len)
         g_gap = 1;
 }
 
-void i3_ring_checkpoint(uint64_t n, const uint8_t d[32], uint64_t job_sum,
+void lite_ring_checkpoint(uint64_t n, const uint8_t d[32], uint64_t job_sum,
                         const uint8_t *jam, uint64_t len)
 {
     uint8_t meta[CKPT_META];
@@ -667,7 +668,7 @@ void i3_ring_checkpoint(uint64_t n, const uint8_t d[32], uint64_t job_sum,
         return;
     }
     g_gap = 0;
-    uart_puts("I3H ring ckpt event=");
+    uart_puts("LITEH ring ckpt event=");
     put_u64(n);
     uart_puts(" bytes=");
     put_u64(align8(REC_HDR + CKPT_META + len));
@@ -683,7 +684,7 @@ void i3_ring_checkpoint(uint64_t n, const uint8_t d[32], uint64_t job_sum,
 }
 
 #if defined(COLD_MEDIA_SEMIHOST)
-/* Angel semihosting, as cold_nv.c (only once cold_nv_arm armed it). */
+/* ARM semihosting, as cold_nv.c (only once cold_nv_arm armed it). */
 #define SYS_OPEN  0x01
 #define SYS_CLOSE 0x02
 #define SYS_WRITE 0x05
@@ -736,7 +737,7 @@ static void sh_close(int fd)
 }
 #endif
 
-void i3_ring_flush(void)
+void lite_ring_flush(void)
 {
 #if defined(COLD_MEDIA_SEMIHOST)
     int fd, ok;
