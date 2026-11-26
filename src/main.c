@@ -3,7 +3,6 @@
 #include "memory.h"
 #include "noun.h"
 #include "cold.h"
-#include "i2_admission_metrics.h"
 #include "digital_out.h"
 #include "i3_host.h"
 
@@ -15,7 +14,6 @@ void main(void) {
     uart_puts("I3H boot\r\n");
 
     noun_heap_init();
-    i2_admission_metrics_init();
     cold_init();
 
     i3_host_boot();

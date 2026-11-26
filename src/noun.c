@@ -1,7 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "noun.h"
-#include "i2_admission_metrics.h"
 #include "memory.h"
 #include "blake3.h"
 #include "uart.h"
@@ -256,26 +255,14 @@ static void copy_entry_inserted(void)
     g_copy_entries++;
     if (g_copy_entries > g_copy_entries_hwm)
         g_copy_entries_hwm = g_copy_entries;
-    i2_admission_metrics_max(
-        &g_i2_admission_metrics.copy_cache_entries_hwm,
-        g_copy_entries);
 }
 
-static void copy_probe(uint32_t probe)
-{
-    i2_admission_metrics_max(
-        &g_i2_admission_metrics.copy_probe_hwm,
-        (uint64_t)probe + 1u);
-}
 
 static void copy_map_clear(void)
 {
     for (uint32_t i = 0; i < COPY_MAP_MAX; i++)
         g_copy_used[i] = 0;
     g_copy_entries = 0;
-    g_i2_admission_metrics.copy_passes++;
-    g_i2_admission_metrics.copy_clear_count++;
-    g_i2_admission_metrics.copy_clear_bytes += sizeof g_copy_used;
 }
 
 
@@ -315,7 +302,6 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
     uint32_t op = cell_ptr(n);
     uint32_t h = op * 2654435761u;
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
-        copy_probe(k);
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
         if (!g_copy_used[i])
             break;
@@ -332,7 +318,6 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
     if (!alloc_cell_checked(nh, nt, &neu))
         return 0;
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
-        copy_probe(k);
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
         if (!g_copy_used[i]) {
             if (g_copy_entries >= I2_COPY_MAP_ADMITTED)

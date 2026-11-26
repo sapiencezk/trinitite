@@ -41,7 +41,7 @@ typedef enum {
     COLD_WRITE_SUPERBLOCK = 4
 } cold_write_phase_t;
 
-int cold_init(void);   /* auto-initialize only an exactly all-zero image */
+void cold_init(void);  /* auto-initialize only an exactly all-zero image */
 int cold_format(void); /* explicit destructive format */
 uint64_t cold_data_head(void);
 

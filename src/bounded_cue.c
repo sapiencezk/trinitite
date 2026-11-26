@@ -274,8 +274,6 @@ static int decode_noun(cue_reader_t *r, uint32_t depth, noun *out)
 
 static void note_reader(const cue_reader_t *r)
 {
-    if (r->status != CUE_BOUNDED_OK)
-        g_i2_admission_metrics.cue_rejects++;
     i2_admission_metrics_max(&g_i2_admission_metrics.cue_work_hwm, r->work);
     i2_admission_metrics_max(&g_i2_admission_metrics.cue_depth_hwm, r->depth_hwm);
     i2_admission_metrics_max(&g_i2_admission_metrics.cue_nodes_hwm, r->nodes);
@@ -285,32 +283,24 @@ static void note_reader(const cue_reader_t *r)
         &g_i2_admission_metrics.cue_atom_bytes_hwm, r->total_atom_bytes);
     i2_admission_metrics_max(
         &g_i2_admission_metrics.cue_cache_entries_hwm, r->cache_entries);
-    i2_admission_metrics_max(&g_i2_admission_metrics.cue_probe_hwm, r->probe_hwm);
 }
 
 cue_bounded_status_t cue_bounded_bytes(const uint8_t *bytes, uint64_t len,
                                        const cue_bounded_limits_t *limits,
                                        int heap_mode, noun *out)
 {
-    g_i2_admission_metrics.cue_calls++;
-    i2_admission_metrics_max(&g_i2_admission_metrics.cue_input_bytes_hwm, len);
     if (!bytes || !out || !limits || len == 0
         || len > limits->max_input_bytes
         || limits->max_cache_entries == 0
         || limits->max_cache_entries > BOUNDED_CACHE_MAX) {
-        g_i2_admission_metrics.cue_rejects++;
         return CUE_BOUNDED_INPUT;
     }
     if (!noun_tx_begin(heap_mode)) {
-        g_i2_admission_metrics.cue_rejects++;
         return CUE_BOUNDED_ALLOC;
     }
 
     for (uint32_t i = 0; i < BOUNDED_CACHE_MAX; i++)
         g_bounded_cache[i].used = 0;
-    g_i2_admission_metrics.cue_clear_count++;
-    g_i2_admission_metrics.cue_clear_bytes +=
-        (uint64_t)BOUNDED_CACHE_MAX * sizeof(bounded_cache_entry_t);
     cue_reader_t r = {
         .bytes = bytes,
         .bits = len * 8,

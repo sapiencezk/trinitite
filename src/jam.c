@@ -3,7 +3,6 @@
 #include "bignum.h"
 #include "nock.h"    /* nock_crash */
 #include "i2_admission_envelope.h"
-#include "i2_admission_metrics.h"
 #include "platform.h"
 
 /* ── Bitstream writer ─────────────────────────────────────────────────────── */
@@ -139,9 +138,6 @@ static void jcache_init(void) {
         return;
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) g_jcache[i].used = 0;
     g_jcache_used = 0;
-    g_i2_admission_metrics.jam_passes++;
-    g_i2_admission_metrics.jam_clear_count++;
-    g_i2_admission_metrics.jam_clear_bytes += sizeof g_jcache;
 }
 
 static uint32_t jcache_ptr_hash(noun n) {
@@ -237,8 +233,6 @@ static int jcache_get(noun n, uint64_t *pos) {
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) {
         if (!jam_charge(1))
             return 0;
-        i2_admission_metrics_max(
-            &g_i2_admission_metrics.jam_probe_hwm, (uint64_t)i + 1u);
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) return 0;
         if (g_jam_identity_keys ? g_jcache[idx].key == n
@@ -255,8 +249,6 @@ static int jcache_put(noun n, uint64_t pos) {
     for (uint32_t i = 0; i < JAM_CACHE_SZ; i++) {
         if (!jam_charge(1))
             return 0;
-        i2_admission_metrics_max(
-            &g_i2_admission_metrics.jam_probe_hwm, (uint64_t)i + 1u);
         uint32_t idx = (h + i) & (JAM_CACHE_SZ - 1);
         if (!g_jcache[idx].used) {
             if (g_jcache_used >= I2_JAM_CACHE_ADMITTED) {
@@ -267,9 +259,6 @@ static int jcache_put(noun n, uint64_t pos) {
             }
             g_jcache[idx].key = n; g_jcache[idx].pos = pos; g_jcache[idx].used = 1;
             g_jcache_used++;
-            i2_admission_metrics_max(
-                &g_i2_admission_metrics.jam_cache_entries_hwm,
-                g_jcache_used);
             return 1;
         }
         if (g_jam_identity_keys ? g_jcache[idx].key == n
