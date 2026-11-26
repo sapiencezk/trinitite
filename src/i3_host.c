@@ -101,7 +101,6 @@ const char *i3_host_abort_name(int jumped, uint64_t reason)
         return "crash";
     switch (reason) {
     case 1: return "ops";
-    case 2: return "wall";
     case 3: return "cells";
     case 4: return "stack";
     default: return jumped == NOCK_ABORT_BUDGET ? "ops" : "crash";
@@ -1795,7 +1794,7 @@ int i3_host_poke(noun cause, i3_host_result_t *out)
         /* A bail propagates here from the de-moled fast
          * path (NOCK_ABORT_CRASH). Re-poke through ~[/arvo]; a budget abort
          * (NOCK_ABORT_BUDGET) is not a bail and gets no %crud re-entry.
-         * Decision L2: each host abort (ops, wall, cells, stack) is a
+         * Decision L2: each host abort (ops, cells, stack) is a
          * host-set backstop like web fuel, so it stops the application
          * (row 141) with no entry. Kernel profile-budget refusals are
          * ordinary replies and never reach here. */

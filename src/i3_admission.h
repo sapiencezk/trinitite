@@ -2,7 +2,6 @@
 
 /*
  * I3 production admission for the lite-node NockApp host (I3_HOST).
- * M12's i2_admission_envelope.h is unchanged so `make` default stays m12.
  * Sized from L0.1 mini cue (cells 276545 / cache 553091 / work 8636577 /
  * depth 625) plus kernel.jam (287450 cells / 294685 unique) with headroom.
  * Per-slam numbers are the jetted R1 golden with headroom; I3_HOST enforces
