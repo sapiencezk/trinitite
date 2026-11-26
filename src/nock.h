@@ -7,10 +7,10 @@
  * nock(subject, formula)            → product  (crashes on error)
  * slot(axis, subject)               → noun     (Nock / operator)
  *
- * Jet pack (C hot_state, pure — no MMIO): arithmetic + WP3 structural/list/bit
+ * Jet pack (C hot_state, pure — no MMIO): arithmetic + structural/list/bit
  *   %dec %add %sub %mul %lth %gth %lte %gte %div %mod
  *   %eq %lsh %rsh %con %dis %mix %cap %mas %peg %lent %flop %weld
- *   L1 %fast: %turn %mole
+ *   %fast only: %turn %mole
  * Op 9 dispatches to C jets only.
  * honk %fast clues register the first battery per hot label; op 9 axis 2
  * matches that battery. %wild is unchanged and still wins when present.
@@ -65,7 +65,7 @@ noun     nock_trace_get(void);
 void     nock_trace_set(noun trace);
 noun     nock_mook(noun trace);
 
-/* ── Slam op budget (WP2) ────────────────────────────────────────────────── */
+/* ── Slam op budget ──────────────────────────────────────────────────────── */
 /*
  * Deterministic op counter checked on every nock_eval entry.
  * max_ops == 0 → unlimited (REPL / unit tests default).

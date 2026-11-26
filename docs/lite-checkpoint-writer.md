@@ -1,4 +1,4 @@
-# Row 212 lite checkpoint writer: plan (PR 1a, 1b and after)
+# Row 212 lite checkpoint writer: plan (writer, checkpoint boot and after)
 
 `tests/checkpoint_flag_off.sh`, the byte-identity gate named in the sections below, was retired by
 1499kernel row 389: deleting the code no lite image runs changed every image, which ends byte identity
@@ -12,20 +12,20 @@ PR was checked; 1499kernel's `tools/lite_checkpoint_boot.py` is the live check.
 Base: trinitite @ 9927b88c (trinitite#9 merged: row 200 amendment / PLAN row 213; trinitite#8's `jam_hoon_checked`).
 Branch: trinitite `feat/lite-checkpoint-writer`. Sources: PLAN row 212 (in #254) and its review notes.
 
-## Scope of PR 1a (this branch)
+## Scope of the writer (this branch)
 - Compile-time flag `LITE_CHECKPOINT_EVERY=K` (Makefile knob, requires `LITE_HOST=1`, adds `-ckK` to CONFIG_KEY).
   Unset = off = default. With it off no checkpoint code is compiled; `tests/checkpoint_flag_off.sh`
   shows byte-identical `kernel8.img` against 9927b88c in three configs.
 - Writer only. Boot does not read checkpoints, nothing is rotated, nothing is dropped. So rotation is
   "suspended" in the row 212 (4) sense for the whole PR, and row 200/213 replay-from-entry-1 is unchanged.
 
-## Format (1a)
+## Format (writer)
 After a committed live step (normal poke and the %crud re-poke path; never during replay, never once stopped)
 when N = event_num-1 is a multiple of K:
 1. Wrapper check: the core's sample (axis 6) must be `[%0 desk-hash internal]`, i.e. axis 12 is the atom 0
    and axis 13 is a cell (so axes 26 and 27 exist); the walk never crashes on an atom. Otherwise
    `LITEH ckpt skip reason=wrapper`. Then `state` = axis 27, internal.outer, which is exactly what `/state-hash` jams.
-2. Bounds (1a; replaced by the cue bound in the row 317 (3) Q7 section): skip when the state has **> 65,536** distinct cells (65,536 itself is accepted; same walk and
+2. Bounds (the writer; replaced by the cue bound in the row 317 (3) question 7 section): skip when the state has **> 65,536** distinct cells (65,536 itself is accepted; same walk and
    limit as `job_cells`, `ENVELOPE_CUE_MAX_CELLS`, a conservative stand-in for row 212's 128k-cell cue bound),
    or when the jam is > `JAM_MAX_BYTES` (128 KiB, the cold writer's buffer). Logs
    `LITEH ckpt skip reason=cells|jam-size`. If the walk's stack would overflow it logs `reason=stack`, never
@@ -42,7 +42,7 @@ when N = event_num-1 is a multiple of K:
    as the header written (all five fields; sha256 of both `jam_hoon_checked` encodings compared), else
    `reason=verify-header`. `kernel-blake3` is `g_jam_blake3` from `lite_host_boot`: BLAKE3-256 of the pill's
    kernel jam bytes exactly as read (all `jam_len` bytes, trailing zero bytes included). It is not a hash
-   of `jam(cue(pill))` and not cold's 62-bit identity. 1a only records it; nothing compares it yet.
+   of `jam(cue(pill))` and not cold's 62-bit identity. The writer only records it; nothing compares it yet.
 6. `nv_flush`, then `LITEH ckpt ok event=N bytes=… sha256=D`. Any failure: `LITEH ckpt skip event=N reason=…`;
    the step is already committed and unaffected.
 All checkpoint allocation is in SCRATCH (the caller's scratch reset drops it); persist is untouched, so the
@@ -55,7 +55,7 @@ legs accept exactly as many steps as with it off.
 - `tests/checkpoint_legs.py skip cells|jam|stack|wrapper`: each skip leg with a real state. The Makefile knob
   `LITE_CKPT_TEST=` (test builds only, requires `LITE_CHECKPOINT_EVERY`) shrinks one bound: cells 8, jam 8 bytes,
   walk stack 2, wrapper tag 1 instead of 0. Every step is still accepted.
-- `tests/checkpoint_boot.py` (1b): boot from a checkpoint plus the log tail against a from-zero replay
+- `tests/checkpoint_boot.py` (checkpoint boot): boot from a checkpoint plus the log tail against a from-zero replay
   of the same cold image, the writer's own reads and the full node, at N=6 and N=7; and the fallback
   legs (shape, sid, D, kernel-blake3, no checkpoint, older checkpoint). Writer knobs for it:
   `LITE_CKPT_TEST=hdrshape|hdrsid|hdrd` with `LITE_CKPT_TEST_FROM=M` (bad header for every N >= M).
@@ -63,7 +63,7 @@ legs accept exactly as many steps as with it off.
   flag on; it still passes with the flag-off accepted count, and no ckpt line appears during replay or after a stop.
 The Python tests run from a 1499kernel checkout (they use its tools and full node).
 
-## PR 1b: boot from a checkpoint (branch `feat/lite-checkpoint-boot`)
+## Checkpoint boot (branch `feat/lite-checkpoint-boot`)
 Same flag (`LITE_CHECKPOINT_EVERY`), off by default; with it off nothing below is compiled and
 `tests/checkpoint_flag_off.sh` shows byte-identical images. At boot, after the kernel is kicked and
 persisted and before replay (`ckpt_boot` in `src/lite_host.c`):
@@ -92,11 +92,11 @@ persisted and before replay (`ckpt_boot` in `src/lite_host.c`):
    log still starts at entry 1, replay from zero; if none is valid and the log has been rotated, the
    node stops (row 141 stop) and reports it. It never boots from an unverified image." A rejected header
    lowers the bound to its N and the search repeats. With none left: `LITEH ckpt boot none rejected=R
-   fallback=zero` and replay from entry 1. There is no rotation before 1c, so the log always starts at
+   fallback=zero` and replay from entry 1. There is no rotation before the running log, so the log always starts at
    entry 1 and the rotated-log stop cannot arise yet. A rejected attempt restores the booted core and
    event number and resets scratch; persist cells a failed persist copy took are not returned.
 
-### Former blocker (1b), resolved by row 219 (1499kernel #258)
+### Former blocker (checkpoint boot), resolved by row 219 (1499kernel #258)
 The wrapper's outer `+load` began `~&  build-hash+hash` (hoon/lib/wrapper.hoon, vendored from
 NockChain). Trinitite evaluates every dynamic hint's clue (src/nock.c op 11), and that `%slog` clue
 rendered the vase with `sell` (the type printer), unjetted. With the pre-#258 kernel (box, QEMU, chain-5
@@ -111,18 +111,18 @@ and `tests/checkpoint_boot.py` passes against it. With the landing kernel jam (1
 
 ## Row 317 (3): on by default (1499kernel row 317 step 2, stage 1)
 1499kernel PLAN row 317 (3) turns the writer on at row 212's cadence. Every `LITE_HOST=1` build with no
-`LITE_CHECKPOINT_EVERY` on the make line is now the K = 2,000 build: the writer (1a) and the checkpoint boot (1b)
+`LITE_CHECKPOINT_EVERY` on the make line is now the K = 2,000 build: the writer and the checkpoint boot
 are compiled in. `LITE_CHECKPOINT_EVERY=` (empty) compiles both out, and that image is byte-identical to the
 earlier flag-off image (`tests/checkpoint_flag_off.sh`, which also checks that no flag equals K = 2000).
-Non-`LITE_HOST` builds are unchanged. The boot rule, the fallback and the bounds are the 1b ones above; there is
-still no rotation (the ring, 1c) and no compaction (row 221), so the per-boot ceiling of row 200/213 is unchanged.
+Non-`LITE_HOST` builds are unchanged. The boot rule, the fallback and the bounds are the checkpoint boot ones above; there is
+still no rotation (the ring, the running log) and no compaction (row 221), so the per-boot ceiling of row 200/213 is unchanged.
 The lite legs that check it on the current kernel run in 1499kernel's lite-probe row
 (`tools/lite_checkpoint_boot.py`): a checkpoint at 2,000 with the default image, boot from it plus the tail,
 K = 4/5 against a from-zero replay and the full node, and the six fallback legs. The pinned expectations in
 `tests/checkpoint_boot.py` are for the October kernel (1499kernel 3d100787) and are not updated here.
 Not measured: per-step SD append, torn writes and checkpoint cost on the board (rpi4-sd, row 200).
 
-## Row 317 (3), Q7: the 128k-cell cue bound (1499kernel row 317 step 2, stage 2 step 1)
+## Row 317 (3), question 7: the 128k-cell cue bound (1499kernel row 317 step 2, stage 2 step 1)
 Row 212 (4): a checkpoint is written only if its cue fits the 128k-cell cue bound. That bound now replaces
 #10's stand-in (more than 65,536 distinct cells, or more than `JAM_MAX_BYTES`, 128 KiB, of jam):
 - `ckpt_cue_limits` is the host's cue limits (`lite_admission.h`) with at most 128,000 cells and at most
@@ -149,9 +149,9 @@ log (65,536 job cells, the 128 KiB log writer) and checks that its state, stored
 65,536 cells (one load cannot make one), and the log's own cue bound on replay (`cue_envelope_limits`), which this
 does not change.
 
-## Row 317 step 2, Round 3: replay of what live accepts, persist fit, capacity, region
+## Row 317 step 2, round 3: replay of what live accepts, persist fit, capacity, region
 All with the checkpoint flag only; `LITE_CHECKPOINT_EVERY=` images keep `cue_envelope_limits` and SCRATCH decode.
-- Q8 (rows 212 (3), 213 (4), decision 131). LOG entries decode with the live admission limits (`lite_limits`)
+- question 8 (rows 212 (3), 213 (4), decision 131). LOG entries decode with the live admission limits (`lite_limits`)
   instead of `cue_envelope_limits`; the depth is `LITE_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN` (1,024 + 64,
   `src/ckpt_jam.h`), because a logged entry (event number and cause) and a checkpoint state wrap the job or
   application live admission cued at 1,024. The checkpoint cue and the checkpoint writer's ++jam
@@ -161,10 +161,10 @@ All with the checkpoint flag only; `LITE_CHECKPOINT_EVERY=` images keep `cue_env
   an app of one 138-statement algorithm (139 is refused live) replays from zero and from a K=4 checkpoint to
   the full node's state. The live `/state-hash` peek of such a state is refused (its ++jam runs as Nock past
   the jet's depth and meets the peek's 128,000-cell limit); the leg reads the state as the checkpoint's D.
-- Q10 B (row 212 (4)). Before anything goes to media the writer skips `reason=persist` a state whose boot
+- question 10 (B) (row 212 (4)). Before anything goes to media the writer skips `reason=persist` a state whose boot
   would not fit: `2 * cells + g_persist_reserve` above the persist free right after this image's kernel cue
   (decode plus copy, or the PERSIST retry). Knob `LITE_CKPT_TEST=persist`; leg `persist`.
-- Q11 B. Capacity sized from the 128,000-cell bound (`src/ckpt_jam.h`): backref cache 2^19 entries
+- question 11 (B). Capacity sized from the 128,000-cell bound (`src/ckpt_jam.h`): backref cache 2^19 entries
   (393,216 admitted >= 2 * 128,000 + 1 distinct nouns), mug memo 2^18 (cells only, at most half full),
   buffer 4 MiB (2 bits a cell, at most 117 bits a leaf, plus the cue's 2 MiB of atom bytes: 4,001,167 bytes,
   asserted). The cold store's object and append scratches hold a checkpoint object, so with the flag they are
@@ -178,13 +178,13 @@ All with the checkpoint flag only; `LITE_CHECKPOINT_EVERY=` images keep `cue_env
   scratches are written before they are read. Knob `LITE_CKPT_TEST=dirty` fills the whole region with 0xA5
   first, as stale RAM; leg `dirty`. (The per-jam clears already tolerate stale contents: the leg also passes
   with the reset removed, so it guards against a regression rather than proving the reset.)
-- Q13 A. `tests/checkpoint_flag_off.sh` ONBASE must be at or after 175f888 (Q7 and the headroom trigger change
-  the 1b flag-on image by design), and at or after the last Round 3 commit that changes it (Q8 3c0a79d,
-  Q10 de85981, Q11 14d4828): ONBASE=14d4828 or later.
-- Round 5. A refused %load-bundle prints `LITEH app cue refused reason=<name>` (the first cue bound
+- question 13 (A). `tests/checkpoint_flag_off.sh` ONBASE must be at or after 175f888 (question 7 and the headroom trigger change
+  the checkpoint-boot flag-on image by design), and at or after the last round 3 commit that changes it (question 8 3c0a79d,
+  question 10 de85981, question 11 14d4828): ONBASE=14d4828 or later.
+- round 5. A refused %load-bundle prints `LITEH app cue refused reason=<name>` (the first cue bound
   hit, e.g. depth or cells), under LITE_CHECKPOINT_EVERY only, so flag-off images stay byte-identical
-  (row 221 (11)). The 1b flag-on image changes, so the flag-off gate's ONBASE moves to f87076f
-  (as in Q13): run `tests/checkpoint_flag_off.sh 8d287abd f87076f` (or later). Test knob
+  (row 221 (11)). The checkpoint-boot flag-on image changes, so the flag-off gate's ONBASE moves to f87076f
+  (as in question 13): run `tests/checkpoint_flag_off.sh 8d287abd f87076f` (or later). Test knob
   `LITE_CKPT_TEST=appcells` sets the bundle cue's cells bound to 1,000 (reason=cells).
 
 ## Row 317 (3), 212 (4): the headroom trigger (1499kernel row 317 step 2, stage 2)
@@ -195,7 +195,7 @@ walk). When `heap_persist_free_cells() < need` the next accepted entry writes a 
 and logs `LITEH ckpt headroom event=N free=F need=M` first. It fires once and re-arms when headroom is back
 above the line, so a node that cannot free persist (no compaction: flag-off `LITE_LOG`) writes one
 extra checkpoint, not one per step. The write itself, the 128k-cell cue bound and the persist fit are the
-Q7 rules above; the trigger only moves *when*.
+question 7 rules above; the trigger only moves *when*.
 
 - With `LITE_LOG=1` (running log, ring, compaction) a verified checkpoint compacts the persist half, so
   the trigger is what lifts the per-boot persist ceiling: `tools/lite_replay_ceiling.py --lifted` in
@@ -204,7 +204,7 @@ Q7 rules above; the trigger only moves *when*.
   each, no stop, and the final /state-hash equals the full node's.
 - Flag-off images (`LITE_CHECKPOINT_EVERY` unset) do not compile the trigger; they stay byte-identical.
 
-## Rotation (1c: see the PR 1c section)
+## Rotation (see the running log section)
 - Amended row 212 (2) (1499kernel #263): the node keeps the last verified checkpoint plus every entry after
   it, and the previous checkpoint until the next one verifies. Entries before the kept checkpoint are dropped.
   There is no time-based retention floor on the node: long-term history lives in the SD recorder ring (a
@@ -212,7 +212,7 @@ Q7 rules above; the trigger only moves *when*.
 - The base moves only after the newest checkpoint verified. If a checkpoint cannot be written (skip), the
   base does not move, and the 141/198/213 stop applies when the cold store is full.
 
-## SD log and compaction (base and ring in 1c; compaction 1d)
+## SD log and compaction (base and ring in the running log; compaction compaction)
 - Today `cold_log` is an append-only chain in the same cold image as blobs; there is no way to drop a prefix.
 - Plan: a log "base" field in the superblock (first retained entry index + the checkpoint header id it
   follows). Rotation = one superblock write moving the base; replay starts at base. Compaction = copy kept
@@ -221,9 +221,9 @@ Q7 rules above; the trigger only moves *when*.
 - Compaction also reclaims persist-reserve growth (row 213's lifetime limit) because replay then starts
   at the checkpoint, so the job sum restarts there.
 
-## PR 1c: running log + SD recorder ring (branch `feat/lite-recorder-ring`)
+## Running log + SD recorder ring (branch `feat/lite-recorder-ring`)
 Amended row 212 (2), (3) and (4) (1499kernel main, amendment 5091bb19). Build with
-`LITE_CHECKPOINT_EVERY=K LITE_LOG=1`; off by default. Flag-off images and 1b flag-on images
+`LITE_CHECKPOINT_EVERY=K LITE_LOG=1`; off by default. Flag-off images and checkpoint-boot flag-on images
 (`LITE_CHECKPOINT_EVERY` without `LITE_LOG`) are byte-identical to the base
 (`tests/checkpoint_flag_off.sh 8d287abd 6613d3b6`).
 
@@ -247,15 +247,15 @@ reset-required state, so the node stops under the existing cold rule (rows 141/1
 write. This is intended: the cold store's state on the media is then unknown. `tests/recorder_ring.py`
 `rebase-fault` covers only the first case (a fault before anything is written).
 
-*Based images and non-LITE images.* A cold image with a log base does not boot on a flag-off or 1b image:
+*Based images and non-LITE images.* A cold image with a log base does not boot on a flag-off or the checkpoint boot image:
 their `super_validate` (`src/cold.c`, the `#else` arm of the reserved-bytes check) requires the reserved
-superblock bytes to be zero and refuses the superblock (SUPERBLOCK). This is not fixed in 1c. That check is
-the flag-off image's own code: accepting a base there changes the bytes of every flag-off and 1b image,
+superblock bytes to be zero and refuses the superblock (SUPERBLOCK). This is not fixed in the running log. That check is
+the flag-off image's own code: accepting a base there changes the bytes of every flag-off and the checkpoint boot image,
 which must stay identical to the base, and images already built would refuse it anyway. Going back from a
 LITE image needs a fresh cold store (or compaction later).
 
 The drop is logical only. The dropped bytes stay in the 8 MiB cold chain until compaction (A/B media,
-1d, not in this PR) reclaims them, so the cold store still fills and the row 141/198/200 stop applies.
+compaction, not in this PR) reclaims them, so the cold store still fills and the row 141/198/200 stop applies.
 
 **Recorder ring** (`src/lite_ring.c`). This is a fixed-size byte ring: `LITE_RING_BYTES`, default 64 MiB, a
 multiple of 512, at most 128 MiB. Its RAM window is at DRAM + 0x30000000 (`src/memory.h` checks it against
@@ -370,17 +370,17 @@ and off by default. Flag-off images are byte-identical (`tests/checkpoint_flag_o
 - **IEC 61499.** Resources keep their operational state (Part 1 4.8; 6.3.3, Figure 24, Table 9), and no
   E_RESTART COLD or WARM fires (Part 1 6.3.2; Annex A, Table A.1). This is not a conformance claim.
 
-## Boot (PR 1b)
+## Boot (checkpoint boot)
 Newest header whose sid loads, re-hashes to D and whose kernel-blake3 equals the booted pill's `g_jam_blake3`
 (same bytes-as-read rule, so a pill re-jammed to different bytes does not match) → cue into the
 versioned `+load` → replay entries after N. Fallback per row 212 (3). Never boot from an unverified image.
-Implemented as above (PR 1b section); the `+load` blocker is resolved by row 219 (1499kernel #258).
+Implemented as above (checkpoint boot section); the `+load` blocker is resolved by row 219 (1499kernel #258).
 
 ## Open questions
 1. ~~Is sha256(jam(axis 6)) exactly `/state-hash` (row 199)?~~ **Answered** by the flag-on smoke run
    (`tests/checkpoint_axis.py`): the state is axis 27, not axis 6, and sha256(jam(axis 27)) with
    `jam_hoon_checked` equals the full node's `/state-hash` at N=2, 4, 6, 8, 10.
-   **Settled on the lite node itself (1b)** by `tests/checkpoint_boot.py`: in the same QEMU boot, each
+   **Settled on the lite node itself (checkpoint boot)** by `tests/checkpoint_boot.py`: in the same QEMU boot, each
    writer digest D = sha256(jam(axis 27)) equals the lite node's own `/state-hash` peek (row 199,
    `lite_host_state_hash`) read right after the step that wrote it: N=4 `df590166…` (N=6 sequence, K=4),
    N=5 `d73a8797…` (N=6 sequence, K=5), N=4 `c47a0420…` (N=7 sequence, K=4). Equal in all three
@@ -389,12 +389,12 @@ Implemented as above (PR 1b section); the `+load` blocker is resolved by row 219
    equal again). The
    two are the same bytes hashed two ways: the host's `jam_hoon_checked` + sha256, and the kernel's
    `(shax (jam state))` through the lite `%jam`/`%shax` jets (row 211).
-2. ~~Smoke run: D was identical at N=10/20/30 with R4 `[1 1]` events.~~ **Answered** by the same run: that
+2. ~~Smoke run: D was identical at N=10/20/30 with two-resource `[1 1]` events.~~ **Answered** by the same run: that
    digest covered axis 6. On axis 27 with events `1,1,1,1,0,1,0,1`, D moves exactly where `/state-hash`
    moves (3 distinct of 5: N=2; N=4=6; N=8=10).
 3. ~~Real cue bound: replace the 65,536 job counter with the 128k-cell cue bound check proper.~~ Done in
-   row 317 (3), Q7 (section above).
+   row 317 (3), question 7 (section above).
 4. Does a checkpoint BLOB written during cold-store pressure need its own headroom rule (cold media full)?
-5. ~~Cadence on persist headroom ("or when headroom falls under one checkpoint plus margin") is not in 1a.~~
+5. ~~Cadence on persist headroom ("or when headroom falls under one checkpoint plus margin") is not in the writer.~~
    Done in row 317 (3), 212 (4) (headroom trigger section above).
 6. Cost of writing a checkpoint every K steps (time, cold bytes) is not measured; no board run.

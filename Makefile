@@ -50,17 +50,17 @@ endif
 ifneq ($(LITE_PERSIST_HEADROOM_CELLS),)
 CFLAGS += -DLITE_PERSIST_HEADROOM_CELLS=$(LITE_PERSIST_HEADROOM_CELLS)
 endif
-# Row 212 PR 1a: lite checkpoint writer every K accepted entries, and (1b) boot
+# Row 212: the lite checkpoint writer every K accepted entries, and the boot
 # from the newest verified checkpoint. Row 317 (3) turns it on for every
 # image at row 212's cadence, K = 2,000; LITE_CHECKPOINT_EVERY= (empty)
 # compiles both out, as before.
 LITE_CHECKPOINT_EVERY ?= 2000
 ifneq ($(LITE_CHECKPOINT_EVERY),)
 CFLAGS += -DLITE_CHECKPOINT_EVERY=$(LITE_CHECKPOINT_EVERY)
-# Row 317 (3), Q7: the checkpoint writer's own jam (src/ckpt_jam.c).
+# Row 317 (3), question 7: the checkpoint writer's own jam (src/ckpt_jam.c).
 CKPT_OBJS = ckpt_jam.o
 endif
-# Row 212 PR 1c (amended row 212 (2)): LITE_LOG=1 adds the running log (the
+# Row 212 (2) as amended: LITE_LOG=1 adds the running log (the
 # log base in the cold superblock) and the SD recorder ring (src/lite_ring.c).
 # Nested under LITE_CHECKPOINT_EVERY, default off. LITE_RING_BYTES (bytes, a
 # multiple of 512, default 67108864 = 64 MiB) and LITE_RING_EVERY (events per ring
@@ -116,7 +116,7 @@ $(error LITE_UNJETTED=1 requires PLATFORM=qemu-virt; unjetted scratch is qemu-vi
 endif
 CFLAGS += -DLITE_UNJETTED=1
 endif
-# Test-only plant: re-introduce L3's raw-bit-count rsh jet so the jetcheck
+# Test-only plant: re-introduce an earlier rsh jet's raw-bit-count bug so the jetcheck
 # test can show it catches that class. Never set for a shipped image.
 ifeq ($(LITE_PLANT_RSH_RAW),1)
 ifneq ($(LITE_PROBE),1)

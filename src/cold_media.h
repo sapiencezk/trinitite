@@ -74,7 +74,7 @@ cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
 int cold_media_active(void);
 
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0 && defined(LITE_LOG) && defined(COLD_MEDIA_RPI4_SD)
-/* Row 212 PR 1c recorder ring (src/lite_ring.c) on sector media (rpi4-sd).
+/* Row 212, recorder ring (src/lite_ring.c) on sector media (rpi4-sd).
  *
  * Layout. The ring has its own extent, LITE_RING_BYTES / 512 sectors from
  * COLD_MEDIA_RING_START_LBA, after the cold extent (descriptor sector plus

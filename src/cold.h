@@ -3,9 +3,8 @@
 #include <stdint.h>
 #include "noun.h"
 
-/* Row 212 PR 1c (running log + SD recorder ring): compiled only with
- * LITE_CHECKPOINT_EVERY > 0 and LITE_LOG (nested flag, default off), so the
- * flag-off and the 1b flag-on images are unchanged. */
+/* Row 212, running log and SD recorder ring: compiled only with
+ * LITE_CHECKPOINT_EVERY > 0 and LITE_LOG (nested flag, default off). */
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0 && defined(LITE_LOG)
 #define COLD_LITE_LOG 1
 #endif
@@ -54,23 +53,23 @@ noun cold_load(uint64_t hash62);
 #include "bounded_cue.h"
 /* Row 212 checkpoint verify: cold_load, but the noun is decoded into SCRATCH
  * (the caller resets scratch), so a read-back costs no persist cells, and
- * (row 317 (3), Q7) cued with `limits`, the checkpoint cue bound.
+ * (row 317 (3), question 7) cued with `limits`, the checkpoint cue bound.
  * Compiled only with the checkpoint flag, so flag-off images are unchanged. */
 noun cold_load_scratch(uint64_t hash62, const cue_bounded_limits_t *limits);
 /* cold_store through the checkpoint writer's own jam (ckpt_jam.h). */
 uint64_t cold_store_ckpt(noun n);
-/* Q8: the cue limits LOG entries decode with (the host's live admission). */
+/* Row 317 question 8: the cue limits LOG entries decode with (the host's live admission). */
 void cold_set_log_limits(const cue_bounded_limits_t *limits);
-/* Q8: the heap LOG entries decode into (HEAP_MODE_SCRATCH by default). */
+/* Row 317 question 8: the heap LOG entries decode into (HEAP_MODE_SCRATCH by default). */
 void cold_set_log_heap_mode(int heap_mode);
 /* cold_load_scratch into the given heap. */
 noun cold_load_limits(uint64_t hash62, const cue_bounded_limits_t *limits, int heap_mode);
-/* Row 212 PR 1b: walk the BLOBs of at most max_len payload bytes in media
+/* Row 212 (checkpoint boot): walk the BLOBs of at most max_len payload bytes in media
  * order, each decoded into SCRATCH, for the checkpoint header search. */
 int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx);
 #endif
 #if defined(COLD_LITE_LOG)
-/* Row 212 (2) as amended, running log (PR 1c). The superblock's 32 reserved
+/* Row 212 (2) as amended, running log (running log). The superblock's 32 reserved
  * bytes carry the log base: index B (entries 1..B are dropped), a media
  * offset (an object boundary or data_head; entry B+1 is the first LOG object
  * at or after it), a row 213

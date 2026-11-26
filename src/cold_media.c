@@ -368,7 +368,7 @@ int cold_media_active(void)
 }
 
 #if defined(COLD_MEDIA_RING)
-/* Row 212 PR 1c recorder ring extent (cold_media.h). The ring shares the
+/* Row 212, recorder ring: the ring extent (cold_media.h). The ring shares the
  * backend and the owner lock with the cold store but keeps its own
  * reset-required flag: a ring fault never sets g_reset_required, so later
  * cold I/O is not refused because of it (row 212 (2): a ring failure never

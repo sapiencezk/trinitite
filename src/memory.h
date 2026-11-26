@@ -101,7 +101,7 @@
 #endif
 
 /*
- * Row 212 PR 1c: the recorder ring's RAM window (src/lite_ring.c), only with
+ * Row 212 (running log and ring): the recorder ring's RAM window (src/lite_ring.c), only with
  * LITE_CHECKPOINT_EVERY > 0 and LITE_LOG. It starts at DRAM + 0x30000000,
  * above every region below it (heap incl. the LITE_UNJETTED scratch, atom
  * store, cold window, pill scratch, and the pill, plan and app slots, which
@@ -164,7 +164,7 @@
 #endif
 
 /*
- * Row 317 (3), Q7, sized in Round 3 (Q11 B, ckpt_jam.h): the checkpoint
+ * Row 317 (3), question 7, sized in row 317 round 3 (question 11 (B), ckpt_jam.h): the checkpoint
  * region. With LITE_CHECKPOINT_EVERY > 0 only. Between the code region (or
  * .bss and the cue scratch) and the pill:
  *   +0x0000000  ckpt jam backref cache, 2^19 entries      12 MiB

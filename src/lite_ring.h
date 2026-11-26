@@ -6,7 +6,7 @@
 
 /*
  * Row 212 (2) as amended (1499kernel #263): the lite node's fixed-size
- * recorder ring on SD (PR 1c). Compiled only with COLD_LITE_LOG
+ * recorder ring on SD (running log). Compiled only with COLD_LITE_LOG
  * (LITE_CHECKPOINT_EVERY > 0 and LITE_LOG), so other images are unchanged.
  *
  * The ring is LITE_RING_BYTES bytes (build-time, default 64 MiB, a multiple of

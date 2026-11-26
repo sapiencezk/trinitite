@@ -2,13 +2,13 @@
 #include <stdint.h>
 #include "noun.h"
 
-/* Row 317 (3), Q7: the lite checkpoint writer's own jam (ckpt_jam.c), built
+/* Row 317 (3), question 7: the lite checkpoint writer's own jam (ckpt_jam.c), built
  * only with LITE_CHECKPOINT_EVERY. Its output buffer is the checkpoint object
  * capacity, which is also the input bound of the checkpoint cue (row 212 (4):
  * "fits the 128k-cell cue bound"). jam.c's 128 KiB writer (the %jam jet, the
  * log, cold_store) is unchanged.
  *
- * Round 3, Q11 B: every capacity is sized from that bound, so a state the
+ * row 317 round 3, question 11 (B): every capacity is sized from that bound, so a state the
  * checkpoint cue admits is never skipped for a full table or buffer:
  * - CKPT_CUE_MAX_CELLS cells, so at most CKPT_CUE_MAX_CELLS + 1 leaves and
  *   2 * CKPT_CUE_MAX_CELLS + 1 distinct nouns, each at most one backref
@@ -41,7 +41,7 @@ int ckpt_jam_hoon_bytes(noun n, const uint8_t **out, uint64_t *out_bytes);
  * stale RAM). Called once by lite_host_boot before any checkpoint jam. */
 void ckpt_jam_reset(void);
 
-/* Row 317 Round 3, Q8 (rows 212 (3), 213 (4), decision 131): what live
+/* Row 317 round 3, question 8 (rows 212 (3), 213 (4), decision 131): what live
  * admission accepts must replay, from zero and from a checkpoint. Live
  * admission cues a job or an application at depth LITE_CUE_MAX_DEPTH; the
  * log entry (the event number and the cause around it) and the checkpoint

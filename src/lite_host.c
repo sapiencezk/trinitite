@@ -39,7 +39,7 @@ static noun g_peek_fol;
 static uint64_t g_event_num = 1;
 static int g_ready;
 static uint64_t g_jam_len;
-/* Decision L2 (rows 141, 198): once set, the application is stopped and
+/* Rows 141 and 198: once set, the application is stopped and
  * every later poke is refused until the next boot. */
 static const char *g_stop;
 static const char STOP_PERSIST[] = "persist";
@@ -51,14 +51,14 @@ static const char STOP_PERSIST[] = "persist";
  * appended before it stopped. */
 static uint64_t g_persist_reserve;
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
-/* Q10: persist free cells right after this image's kernel cue, which every
+/* Row 317 question 10: persist free cells right after this image's kernel cue, which every
  * boot of the image (same kernel, kernel-blake3 in the header) starts from. */
 static uint64_t g_boot_persist_free;
 #endif
 /* The 1/16 share alone is not enough (row 200 amendment): a replayed step
  * decodes its job into scratch, so its persist copy pays for every kept
  * cell of that job, while the live step may share cells already in persist
- * (the application, about 2,760 cells in the R4 set). Persist is a bump
+ * (the application, about 2,760 cells in the two-resource applications). Persist is a bump
  * heap for the whole boot, so each replayed copy stays: the excess is a
  * SUM over jobs. The host cannot tell which cells of a job the kernel state
  * keeps, so it reserves the upper bound: the sum of the distinct cells of
@@ -183,7 +183,7 @@ static int kick_formula(noun *out)
 static int system_wire(noun *out)
 {
     /* [%poke %sys 1 ~] — NockApp SystemWire. The kernel only matches the
-     * %poke head; the source label is no longer L0. */
+     * %poke head; the source label is not checked. */
     noun rest;
     if (!nest(direct(1), NOUN_ZERO, &rest))
         return 0;
@@ -289,7 +289,7 @@ static void fill_eval(lite_host_result_t *out, int jumped, uint64_t ticks)
     out->abort_reason = nock_budget_abort_reason();
 }
 
-/* Decision L2: the input log on the cold-store media. One entry per accepted
+/* Row 200: the input log on the cold-store media. One entry per accepted
  * step, appended only after the step succeeded: the jam of the job the step
  * ran, `[event_num ovum]`, or for a crash the `%crud` ovo carrying the real
  * goof, as the full node's `event-log.sqlite3` and the web node's log
@@ -306,7 +306,7 @@ static void nv_flush(void)
 }
 
 #if defined(COLD_LITE_LOG)
-/* Row 212 PR 1c: every accepted entry also goes to the recorder ring, as the
+/* Row 212 (running log and ring): every accepted entry also goes to the recorder ring, as the
  * same jam bytes the cold log holds (src/lite_ring.c). A ring that cannot take
  * it skips inputs until its next checkpoint; the step is not affected. */
 static void ring_input(uint64_t num, noun job)
@@ -607,7 +607,7 @@ int lite_host_cue_bytes(const uint8_t *bytes, uint64_t len, noun *out)
 }
 
 #if defined(LITE_COMPACT)
-/* Row 221 tests: the L1 plan is cued into scratch (see lite_probe.c). */
+/* Row 221 tests: the diagnostic plan is cued into scratch (see lite_probe.c). */
 int lite_host_cue_bytes_scratch(const uint8_t *bytes, uint64_t len, noun *out)
 {
     cue_bounded_limits_t limits = lite_limits();
@@ -695,7 +695,7 @@ int lite_host_load_app(const uint8_t *jam, uint64_t jam_len,
     uart_puts(gated ? " match=yes\r\n" : " gate=no\r\n");
 
 #if defined(LITE_CHECKPOINT_EVERY)
-    /* Row 317 step 2 (Round 5): name the first cue bound a refused bundle hits.
+    /* Row 317 step 2, round 5: name the first cue bound a refused bundle hits.
      * lite_host_cue_bytes inlined to keep the status; under the checkpoint flag
      * only, so flag-off images stay byte-identical (row 221 (11)). */
     {
@@ -772,7 +772,7 @@ static void put_goof(noun goof)
 }
 
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
-/* Row 212 PR 1a: lite checkpoint writer, flag-gated (LITE_CHECKPOINT_EVERY=K,
+/* Row 212: the lite checkpoint writer, flag-gated (LITE_CHECKPOINT_EVERY=K,
  * default off; with the flag off none of this is compiled). After every K
  * accepted live steps the host writes the kernel state (internal.outer,
  * axis 27; see ckpt_maybe_write) to cold media, then a header record
@@ -780,16 +780,15 @@ static void put_goof(noun goof)
  * and verifies both by reading back and re-hashing. kernel-blake3 is
  * g_jam_blake3: BLAKE3-256 of the pill's kernel jam bytes exactly as read
  * at boot (all jam_len bytes, trailing zero bytes included), not of a
- * re-jam of the cued kernel. N is the last event the state follows. PR 1b
- * adds the boot side (ckpt_boot, below); nothing is rotated or dropped
- * (rotation stays suspended until PR 1c).
+ * re-jam of the cued kernel. N is the last event the state follows. The
+ * boot side is ckpt_boot, below; rotation is the running log's (LITE_LOG).
  * A checkpoint that cannot be written or verified is skipped and logged;
  * the step itself is already committed and is not affected. The host
  * hashes and stores bytes; apart from the wrapper shape check below it
  * interprets nothing (decision 164). */
 #define LITE_CKPT_STATE_AXIS 27
 
-/* Bounds. Row 317 (3), Q7: row 212 (4)'s rule, a checkpoint is written only if its
+/* Bounds. Row 317 (3), question 7: row 212 (4)'s rule, a checkpoint is written only if its
  * cue fits the 128k-cell cue bound, in place of #10's stand-in (65,536
  * cells and jam.c's 128 KiB writer). The bound is ckpt_cue_limits: the
  * host's cue limits with at most LITE_CKPT_CUE_MAX_CELLS cells and at most
@@ -808,7 +807,7 @@ static void put_goof(noun goof)
 #define LITE_CKPT_STACK_SLOTS 65536u
 #define LITE_CKPT_STACK_MAX LITE_CKPT_STACK_SLOTS
 #define LITE_CKPT_WRAPPER_TAG 0u
-/* Boot-side test knobs (row 212 PR 1b; 1499kernel tools/lite_checkpoint_boot.py): the
+/* Boot-side test knobs (row 212; 1499kernel tools/lite_checkpoint_boot.py): the
  * writer stores a deliberately bad header for every N >= LITE_CKPT_TEST_FROM
  * (default 1, i.e. all), so a flag-on boot of that log must reject it and
  * fall back (row 212 (3)). hdrshape drops the kernel-blake3 field, hdrsid
@@ -833,7 +832,7 @@ static cue_bounded_limits_t ckpt_cue_limits(void)
     cue_bounded_limits_t limits = lite_limits();
     limits.max_cells = LITE_CKPT_CUE_MAX_CELLS;
     limits.max_input_bytes = CKPT_JAM_MAX_BYTES;
-    /* Q8: a state as deep as live admission lets it grow (ckpt_jam.h). */
+    /* Row 317 question 8: a state as deep as live admission lets it grow (ckpt_jam.h). */
     limits.max_depth = LITE_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN;
     return limits;
 }
@@ -975,7 +974,7 @@ static const char *ckpt_cells(noun state, uint32_t *out)
 
 
 #if defined(COLD_LITE_LOG)
-/* Row 212 (2) as amended (1499kernel #263, 5091bb19), running log, PR 1c:
+/* Row 212 (2) as amended (1499kernel #263, 5091bb19), running log:
  * "The node keeps the last verified checkpoint plus every entry after it,
  * and the previous checkpoint until the next one verifies. Entries before
  * the kept checkpoint are dropped." When the checkpoint at N verifies, the
@@ -1086,7 +1085,7 @@ static int cmp_live(uint64_t h62)
 }
 
 #if defined(LITE_PROBE)
-/* Test harness root (the L1 plan, cued into the bottom of scratch). */
+/* Test harness root (the diagnostic plan, cued into the bottom of scratch). */
 static noun g_cmp_harness;
 static uint64_t g_cmp_harness_top;
 void lite_host_harness_root(noun plan)
@@ -1151,7 +1150,7 @@ static void cmp_walk(noun root, int allow_scratch, int verify)
     }
 }
 
-/* kind 1 (L1-only diagnostic tables, test harness): cells outside the code
+/* kind 1 (the diagnostic driver's tables, test harness): cells outside the code
  * region are not followed. */
 static int g_cmp_verify;
 static void cmp_root_cb(noun n, int kind)
@@ -1190,7 +1189,7 @@ static void cmp_mark(int verify)
     cmp_walk(g_peek_fol, 0, verify);
     nock_host_roots(cmp_root_cb);
 #if defined(LITE_PROBE)
-    /* Test harness root: the L1 plan. */
+    /* Test harness root: the diagnostic plan. */
     cmp_walk(g_cmp_harness, 1, verify);
 #endif
 }
@@ -1440,8 +1439,8 @@ static void ckpt_verified(uint64_t n, noun state)
  * the reserve a live step must leave (live_reserve). A verified checkpoint
  * lets compaction (row 221, LITE_LOG=1) free the persist half. The
  * trigger fires once each time headroom falls under the line and re-arms
- * when it is back above it, so a node that cannot compact (a 1b image, a
- * skipped checkpoint or compaction) writes one extra checkpoint, not one per
+ * when it is back above it, so a node that cannot compact (an image without
+ * LITE_LOG, a skipped checkpoint or compaction) writes one extra checkpoint, not one per
  * step; the row 200 persist stop still applies. */
 #define LITE_CKPT_HEADROOM_MIN 4096u
 static uint64_t g_ckpt_state_cells;
@@ -1507,7 +1506,7 @@ static void ckpt_maybe_write(void)
         ckpt_skip(n, "jam-size");
         return;
     }
-    /* Q10 (row 212 (4)): a boot from this checkpoint must hold the state in
+    /* Row 317 question 10 (row 212 (4)): a boot from this checkpoint must hold the state in
      * persist. ckpt_try decodes it and copies it (and, for a state deeper
      * than the copy walks, decodes it once more into PERSIST after a failed
      * copy), so it needs up to twice its cells, plus the persist share every
@@ -1682,7 +1681,7 @@ int lite_host_poke(noun cause, lite_host_result_t *out)
         /* A bail propagates here from the de-moled fast
          * path (NOCK_ABORT_CRASH). Re-poke through ~[/arvo]; a budget abort
          * (NOCK_ABORT_BUDGET) is not a bail and gets no %crud re-entry.
-         * Decision L2: each host abort (ops, cells, stack) is a
+         * Rows 141 and 198: each host abort (ops, cells, stack) is a
          * host-set backstop like web fuel, so it stops the application
          * (row 141) with no entry. Kernel profile-budget refusals are
          * ordinary replies and never reach here. */
@@ -1826,7 +1825,7 @@ static int replay_fail(uint64_t i, const char *why)
  * and any failure stops the boot. Replay runs without the op budget
  * (decision 198); the cell and stack limits stay. */
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
-/* Row 212 PR 1b: after a checkpoint boot at N, entries 1..N are read only
+/* Row 212 (checkpoint boot): after a checkpoint boot at N, entries 1..N are read only
  * to move the cursor and to count their jobs into g_job_sum (so the row 213
  * reserve is the one a from-zero replay of the same log keeps); they are
  * not run. Entries after N run exactly as below. skip = 0: replay from zero. */
@@ -1836,7 +1835,7 @@ static int replay_log(void)
 #endif
 {
 #if defined(COLD_LITE_LOG)
-    /* PR 1c: replay starts at the log base: entries 1..B are dropped, their
+    /* Running log: replay starts at the log base: entries 1..B are dropped, their
      * row 213 job sum comes from the base, and entry B+1 is the first LOG
      * object at or after the base offset. */
     uint64_t n = g_base.len, i, cur = g_base.off;
@@ -1861,7 +1860,7 @@ static int replay_log(void)
         noun job, subject, product;
         int jumped;
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
-        /* Q8: a live job sits in PERSIST (lite_host_cue_bytes), so the state
+        /* Row 317 question 8: a live job sits in PERSIST (lite_host_cue_bytes), so the state
          * it leaves may hold it deeper than noun_copy_checked's 256 frames
          * walk: only the new cells are copied. Its replay decodes into
          * SCRATCH, and the copy of such a state fails. Then the entry runs
@@ -1979,7 +1978,7 @@ static void stop_after_trip(void)
 }
 
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
-/* Row 212 PR 1b: boot from a checkpoint (docs/lite-checkpoint-writer.md,
+/* Row 212 (checkpoint boot): boot from a checkpoint (docs/lite-checkpoint-writer.md,
  * Boot). Take the newest header [%lite-ckpt N sid D kernel-blake3] that
  * verifies: N within the log, kernel-blake3 equal to this boot's
  * g_jam_blake3 (BLAKE3-256 of the pill's kernel jam bytes as read), the
@@ -1989,7 +1988,7 @@ static void stop_after_trip(void)
  * and it is copied into persist. Replay then runs only the entries after N.
  * Any failure rejects that header and the next older one is tried. Row 212
  * (3) fallback: if none verifies and the log still starts at entry 1,
- * replay from zero. No rotation exists yet (PR 1c), so the log always
+ * replay from zero. Without the running log (LITE_LOG) the log always
  * starts at entry 1 and the "log rotated: stop" branch cannot arise here.
  * A rejected attempt leaves the booted core and event number as they were;
  * its scratch is reset, but persist cells a failed persist copy already
@@ -2001,7 +2000,7 @@ typedef struct {
     noun tag, old_tag;
     uint64_t below;   /* only headers with N < below */
 #if defined(COLD_LITE_LOG)
-    uint64_t min;     /* PR 1c: only headers with N >= the log base */
+    uint64_t min;     /* running log: only headers with N >= the log base */
 #endif
     int found, shape_ok;
     uint64_t n, sid;
@@ -2094,7 +2093,7 @@ static const char *ckpt_try(const ckpt_find_t *f, uint64_t log_len)
     int in_persist = 0;
     limits = ckpt_cue_limits();
 again:
-    /* Q8: as replay_log, a state deeper than noun_copy_checked walks is
+    /* Row 317 question 8: as replay_log, a state deeper than noun_copy_checked walks is
      * decoded once more into PERSIST, where the live node held it. */
     state = cold_load_limits(f->sid, &limits,
                              in_persist ? HEAP_MODE_PERSIST : HEAP_MODE_SCRATCH);
@@ -2225,7 +2224,7 @@ static uint64_t ckpt_boot(void)
 #endif
 
 #if defined(COLD_LITE_LOG)
-/* PR 1c boot: read the log base, take a checkpoint (1b), replay the tail,
+/* Running-log boot: read the log base, take a checkpoint, replay the tail,
  * then open the recorder ring at the replayed log length. With no valid
  * checkpoint and a rotated log the node is stopped (row 141): nothing is
  * replayed, nothing is appended, every input and /state-hash is refused,
@@ -2452,7 +2451,7 @@ void lite_host_boot(void)
     g_boot_persist_free = heap_persist_free_cells();
 #endif
     {
-        /* Q8: replay decodes each entry under the live admission limits,
+        /* Row 317 question 8: replay decodes each entry under the live admission limits,
          * with the depth of the log entry's wrapper on top (ckpt_jam.h). */
         cue_bounded_limits_t log_limits = lite_limits();
         log_limits.max_depth = LITE_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN;

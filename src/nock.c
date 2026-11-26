@@ -40,7 +40,7 @@ void nock_crash(const char *msg) {
     longjmp(nock_abort, NOCK_ABORT_CRASH);   /* unwind to QUIT / kernel */
 }
 
-/* ── Slam op budget (WP2) ────────────────────────────────────────────────── */
+/* ── Slam op budget ──────────────────────────────────────────────────────── */
 
 static uint64_t g_budget_max;          /* 0 = unlimited */
 static uint64_t g_ops_used;
@@ -314,7 +314,7 @@ static noun jet_mod(noun core, const wilt_t *jets, sky_fn_t sky) {
     return bn_mod(a, b);
 }
 
-/* ── WP3 structural / list / bit jets ─────────────────────────────────────── */
+/* ── Structural / list / bit jets ────────────────────────────────────────── */
 
 /* Low 64 bits of an atom for axes and shift counts; larger → crash. */
 static uint64_t jet_atom_u64(noun a, const char *who)
@@ -377,7 +377,7 @@ static noun jet_rsh(noun core, const wilt_t *jets, sky_fn_t sky) {
     noun a = slot(direct(13), core);
     if (!noun_is_atom(a)) nock_crash("jet rsh: non-atom");
 #if defined(LITE_PLANT_RSH_RAW)
-    /* test plant (L3's defect): the bite's bloq taken as a raw bit count */
+    /* test plant (an earlier jet's bug): the bite's bloq taken as a raw bit count */
     return bn_rsh(a, jet_atom_u64(noun_is_cell(bite) ? slot(direct(2), bite) : bite,
                                   "jet rsh: bad bite"));
 #else
@@ -1139,7 +1139,7 @@ static hot_entry_t hot_state[] = {
     { 6648935, jet_gte, 0, "gte", HOT_ONE },
     { 7760228, jet_div, 0, "div", HOT_ONE },
     { 6582125, jet_mod, 0, "mod", HOT_ONE },
-    /* WP3 structural / list / bit */
+    /* structural / list / bit */
     { 29029, jet_eq, 0, "eq", NULL },
     { 6845292, jet_lsh, 0, "lsh", HOT_TWO },
     { 6845298, jet_rsh, 0, "rsh", HOT_TWO },
@@ -1152,7 +1152,7 @@ static hot_entry_t hot_state[] = {
     { 1953391980, jet_lent, 0, "lent", HOT_TWO },
     { 1886350438, jet_flop, 0, "flop", HOT_TWO },
     { 1684825463, jet_weld, 0, "weld", HOT_TWO },
-    /* L1: honk %fast labels the R1 jam actually takes (deliverable 2) */
+    /* honk %fast labels the kernel jam takes */
     { 1852994932, jet_turn, 0, "turn", HOT_TWO },
     { 1701605229, jet_mole, 0, "mole", HOT_QUA },
     /* Lite /state-hash (row 199): ++jam and ++shax */
@@ -1336,7 +1336,7 @@ static void fast_put_u64(uint64_t n)
 }
 #define uart_put_u64 fast_put_u64
 
-/* T1: a dropped core loses its jet silently, so say so in every build.
+/* A dropped core loses its jet silently, so say so in every build.
  * Printed on the 1st, 2nd, 4th, 8th, ... drop. */
 static void fast_drop(const char *why)
 {
@@ -1350,7 +1350,7 @@ static void fast_drop(const char *why)
     }
 }
 
-/* T3: the cold/hot tables hold battery and chum pointers. Scratch cells are
+/* The cold/hot tables hold battery and chum pointers. Scratch cells are
  * never stored, nor cells made inside a noun_tx (fast_register refuses
  * both); persist cells are trusted only while the persist heap's generation
  * (noun.c: reset, flip, persist-tx abort, init) is the one the tables were
@@ -1436,7 +1436,7 @@ static int fast_hot_for(int e)
         if (p == NULL || !hot_name_is(g_fast_cold[e].chum, hot_state[h].name))
             continue;
 #if defined(LITE_PLANT_LABEL_ONLY)
-        /* test plant: the pre-fix rule, label only (T2's check must fire) */
+        /* test plant: the pre-fix rule, label only (the one-binding check must fire) */
         return h;
 #endif
         cur = g_fast_cold[e].parent;

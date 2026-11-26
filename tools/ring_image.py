@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Row 212 PR 1c: read the lite node's recorder ring image off the device.
+"""Row 212: read the lite node's recorder ring image off the device.
 
 The ring layout is in src/lite_ring.h. This tool reads a ring image (on QEMU the
 semihost file build/ring.img; on the board the ring extent read off the SD card),

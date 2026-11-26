@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * Row 212 PR 1c: the recorder ring (lite_ring.h has the layout). The working
+ * Row 212 (running log and ring): the recorder ring (lite_ring.h has the layout). The working
  * copy is a RAM window of LITE_RING_BYTES at LITE_RING_WINDOW_BASE (memory.h);
  * each change is mirrored to the media:
  *   COLD_MEDIA=rpi4-sd  write-through by whole sectors to the ring extent

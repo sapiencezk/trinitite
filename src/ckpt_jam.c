@@ -1,7 +1,7 @@
-/* Row 317 (3), Q7 (row 212 (4)): the lite checkpoint writer's own jam.
+/* Row 317 (3), question 7 (row 212 (4)): the lite checkpoint writer's own jam.
  *
  * jam.c compiled a second time, with every public name prefixed ckpt_, a
- * CKPT_JAM_MAX_BYTES (4 MiB, Round 3 Q11) output buffer and a
+ * CKPT_JAM_MAX_BYTES (4 MiB, row 317 round 3, question 11) output buffer and a
  * CKPT_JAM_CACHE_ENTRIES backref cache (sizes: ckpt_jam.h). Its statics are this file's own, so the %jam jet, the log
  * writer and every other jam.c caller keep their 128 KiB buffer and
  * 98,304-entry cache, and a flag-off image does not link this file at all
@@ -23,7 +23,7 @@
 #include "admission_envelope.h"
 #include "ckpt_jam.h"
 #include "lite_admission.h"
-/* Q8: ++jam of a checkpoint state as deep as live admission allows. */
+/* Row 317 question 8: ++jam of a checkpoint state as deep as live admission allows. */
 #define JAM_HOON_DEPTH (LITE_CUE_MAX_DEPTH + CKPT_DEPTH_MARGIN)
 #undef JAM_MAX_BYTES
 #define JAM_MAX_BYTES CKPT_JAM_MAX_BYTES

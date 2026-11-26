@@ -9,7 +9,7 @@ its jet and with its own Nock battery (that entry suppressed) -- and the
 products must be equal. tests/jetcheck/build.sh rebuilds jetcheck.jam.gz.
 
   python3 tests/jetcheck/run.py            # expect: PASS
-  python3 tests/jetcheck/run.py --plant-rsh  # rebuild with L3's raw-count rsh; expect: FAIL
+  python3 tests/jetcheck/run.py --plant-rsh  # rebuild with the old raw-count rsh bug; expect: FAIL
   python3 tests/jetcheck/run.py --plant-label-only  # pre-fix label-only rule; expect: FAIL (dup bindings refused and counted, no crash)
   python3 tests/jetcheck/run.py --expect-fail ...
 

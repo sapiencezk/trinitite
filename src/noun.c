@@ -59,7 +59,7 @@ static uint8_t *persist_base(int sel)
  * persist half at <cells> past the bump pointer when the cap is armed, so a
  * short lite log reaches the persist ceiling that a full half reaches only
  * past ~3400 steps. Armed by lite_host_boot before replay, and again by the
- * L1 probe after it cues its plan. */
+ * diagnostic driver after it cues its plan. */
 static uint8_t *persist_cap;
 void heap_persist_cap_arm(void)
 {
@@ -67,7 +67,7 @@ void heap_persist_cap_arm(void)
 }
 
 /* Move the cap out by `cells`: test input cued into persist after the cap
- * was armed (the L1 plan) is not node state, so it must not use H. Unlike
+ * was armed (the diagnostic plan) is not node state, so it must not use H. Unlike
  * re-arming, this keeps what replay already used counted against H, so a
  * write boot after replay gets the same H for replay plus live steps as the
  * next boot gets for replay alone. */
@@ -102,7 +102,7 @@ int heap_get_mode(void)
 }
 
 #if defined(LITE_COMPACT) && defined(LITE_PROBE)
-/* Row 221 tests: the L1 plan is test input, cued into the bottom of scratch
+/* Row 221 tests: the diagnostic plan is test input, cued into the bottom of scratch
  * (a persist flip would drop it), and every reset leaves it there. */
 static uint8_t *scratch_floor;
 void heap_scratch_floor_set(void)

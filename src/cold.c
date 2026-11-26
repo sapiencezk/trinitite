@@ -28,7 +28,7 @@
 #define KIND_SNAP  3u
 
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
-/* Round 3, Q11 B: a checkpoint object (CKPT_JAM_MAX_BYTES) passes through
+/* row 317 round 3, question 11 (B): a checkpoint object (CKPT_JAM_MAX_BYTES) passes through
  * both scratches, so with the checkpoint flag they are 4 MiB each, in the
  * LITE_CKPT_JAM region (memory.h), not in .bss. */
 #define JAM_SCRATCH_MAX ((uint32_t)LITE_CKPT_COLD_SCRATCH_BYTES)
@@ -194,7 +194,7 @@ static int super_checksum_ok(const cold_super_t *s)
 }
 
 #if defined(COLD_LITE_LOG)
-/* Row 212 PR 1c log base, in the superblock's reserved bytes (cold.h).
+/* Row 212, running log: the log base, in the superblock's reserved bytes (cold.h).
  * The superblock checksum covers only its first 64 bytes, so the base has
  * its own check word: the first 8 bytes of BLAKE3 over those 64 bytes and
  * the three base fields (never 0). All 32 bytes zero = no base. */
@@ -580,10 +580,10 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
 }
 
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
-/* Row 317 (3), Q8 (rows 212 (3), 213 (4), decision 131): the host sets the
- * cue limits a LOG entry decodes with on replay (and in the 1b checkpoint
+/* Row 317 (3), question 8 (rows 212 (3), 213 (4), decision 131): the host sets the
+ * cue limits a LOG entry decodes with on replay (and in the checkpoint
  * boot's read of the skipped entries) to its live admission limits, so an
- * entry accepted live replays. Unset (a non-host image), cue_envelope_limits. */
+ * entry accepted live replays. Unset, cue_envelope_limits. */
 static cue_bounded_limits_t g_log_limits;
 static int g_log_limits_set;
 
@@ -596,7 +596,7 @@ void cold_set_log_limits(const cue_bounded_limits_t *limits)
     g_log_limits = *limits;
     g_log_limits_set = 1;
 }
-/* Q8: the heap a LOG entry decodes into; SCRATCH unless the host asks for
+/* Row 317 question 8: the heap a LOG entry decodes into; SCRATCH unless the host asks for
  * PERSIST, where a live job sat when it was admitted. */
 static int g_log_heap_mode = HEAP_MODE_SCRATCH;
 void cold_set_log_heap_mode(int heap_mode) { g_log_heap_mode = heap_mode; }
@@ -690,7 +690,7 @@ noun cold_load(uint64_t hash62)
 #if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 _Static_assert(CKPT_JAM_MAX_BYTES <= JAM_SCRATCH_MAX, "a checkpoint object fits the scratch");
 
-/* Row 317 (3), Q7: the checkpoint's reads cue with the caller's limits (the
+/* Row 317 (3), question 7: the checkpoint's reads cue with the caller's limits (the
  * 128k-cell checkpoint cue bound, row 212 (4)), not the log's cue_envelope_limits.
  * decode_object and cold_load_in with a limits argument; they are kept
  * apart from those two so the flag-off image is unchanged. */
@@ -755,7 +755,7 @@ uint64_t cold_store_ckpt(noun n)
     return hash62_of(h.payload_digest);
 }
 
-/* Row 212 PR 1b (checkpoint boot): one walk of the selected chain in media
+/* Row 212 (checkpoint boot): one walk of the selected chain in media
  * order. Every BLOB whose payload is at most max_len bytes is decoded into
  * SCRATCH and handed to fn (a blob that does not decode is passed over);
  * fn returns nonzero to end the walk early. The caller owns scratch and may
@@ -792,7 +792,7 @@ int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
 #endif
 
 #if defined(COLD_LITE_LOG)
-/* Row 212 PR 1c: the log base and the logical log length (cold.h). One walk
+/* Row 212 (running log and ring): the log base and the logical log length (cold.h). One walk
  * from the base offset counts the entries at or after it. */
 int cold_log_base(cold_log_base_t *out)
 {
