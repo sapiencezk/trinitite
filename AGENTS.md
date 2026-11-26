@@ -36,7 +36,7 @@ src/
   linker.ld, linker-qemu-virt.ld
 tests/                   see README.md "Tests"
 tools/jam.py             Python jam/cue (1499kernel imports it)
-tools/ring_image.py      reads and edits recorder-ring images (tests)
+tools/ring_image.py      reads a recorder-ring image off the device, turns it into a cold image
 tools/with_build_lock.py serialises builds that publish kernel8.img
 docs/HOST-CONTRACT.md    what the host does, its inputs and outputs
 docs/lite-checkpoint-writer.md  the checkpoint, log, ring and compaction design

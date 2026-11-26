@@ -301,10 +301,8 @@ publish-img: $(CONFIG_IMG) publish-elf FORCE
 # The tree's own checks. test-build builds every image configuration
 # 1499kernel builds (qemu-virt and rpi4b) and every test knob; test-qemu boots
 # the qemu-virt diagnostic image (I3_L1_PROBE=1) on the self-contained tests;
-# test-tools runs tools/jam.py's self-tests.
-# The tests that need a 1499kernel checkout (tests/checkpoint_*.py,
-# tests/compaction.py, tests/recorder_ring.py, tests/ring_full_replay.py) run
-# from that checkout; see their docstrings.
+# test-tools runs tools/jam.py's self-tests. The checkpoint boot legs run
+# from 1499kernel (tools/lite_checkpoint_boot.py, part of tools/lite_probe.py).
 TEST_BUILDS = \
 	"PLATFORM=qemu-virt" \
 	"PLATFORM=qemu-virt I3_L1_PROBE=1" \

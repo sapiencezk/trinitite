@@ -72,9 +72,9 @@ make test-build   # the builds only
 make test-qemu    # tests/app_sha256_probe.py, tests/jetcheck/run.py (and its two plants), tests/tip5/run.py
 ```
 
-`tests/checkpoint_*.py`, `tests/compaction.py`, `tests/recorder_ring.py` and
-`tests/ring_full_replay.py` need a 1499kernel checkout (its tools and full
-node) and run from there; each docstring says how.
+The checkpoint, log and ring legs run from 1499kernel: `tools/lite_probe.py`
+runs `tools/lite_checkpoint_boot.py` and `tools/lite_state_hash.py` on this
+tree's images.
 
 ## On a Raspberry Pi 4
 
