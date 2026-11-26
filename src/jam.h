@@ -18,8 +18,6 @@
  *     where a = bn_met(k), b = bit_length(a)
  */
 
-noun jam(noun n);   /* noun  → serialized atom              */
-noun cue(noun a);   /* atom  → deserialized noun            */
 
 /* Checked view of the fixed jam writer. The returned bytes remain valid
  * until the next jam operation and never enter the persistent atom store. */
@@ -27,11 +25,9 @@ int jam_encode_bytes_checked(noun n, const uint8_t **out,
                              uint64_t *out_bytes);
 /* Same writer, but backrefs only the same noun word. Matches host jam of a
  * freshly cued ResourceProgram (structural twins stay distinct). */
-int jam_encode_bytes_identity(noun n, const uint8_t **out, uint64_t *out_bytes);
 /* ++jam's bits (hoon.hoon's backref rule), for the %jam jet. Fails closed
  * (-1) past JAM_MAX_BYTES; the caller then runs the arm as Nock. */
 int jam_hoon_checked(noun n, noun *out);
-uint64_t jam_encode_bytes_selftest(void);
 
 /* One cumulative, fallible budget for an untrusted identity-keyed Jam.  The
  * caller owns the budget and may reuse it across several digest operations in
@@ -42,11 +38,6 @@ typedef struct {
     uint8_t exhausted;
 } jam_admission_budget_t;
 
-void jam_admission_budget_init(jam_admission_budget_t *budget,
-                               uint64_t max_work);
-int jam_encode_bytes_identity_bounded(noun n, const uint8_t **out,
-                                      uint64_t *out_bytes,
-                                      jam_admission_budget_t *budget);
 
 /* The target jam writer has a fixed 128 KiB output buffer.  This checked
  * preflight uses the same cache and encoding choices as jam(), but performs

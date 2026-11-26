@@ -72,15 +72,11 @@ cold_media_status_t cold_media_write(cold_media_phase_t phase,
 cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
                                        uint64_t deadline_tick);
 int cold_media_active(void);
-const cold_media_diag_t *cold_media_last_diag(void);
-void cold_media_reset_session(void);
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 \
-    && defined(I3_LITE_LOG) && (defined(COLD_MEDIA_RPI4_SD) || defined(COLD_MEDIA_FAKE))
-/* Row 212 PR 1c recorder ring (src/i3_ring.c) on sector media: rpi4-sd, and
- * the fake backend for the fault tests (tests/recorder_ring.py fault legs).
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0 && defined(LITE_LOG) && defined(COLD_MEDIA_RPI4_SD)
+/* Row 212, recorder ring (src/lite_ring.c) on sector media (rpi4-sd).
  *
- * Layout. The ring has its own extent, I3_RING_BYTES / 512 sectors from
+ * Layout. The ring has its own extent, LITE_RING_BYTES / 512 sectors from
  * COLD_MEDIA_RING_START_LBA, after the cold extent (descriptor sector plus
  * COLD_MEDIA_EXTENT_SECTORS). The two extents may not overlap (checked
  * here at build time) and the medium must hold the whole ring extent
@@ -88,9 +84,9 @@ void cold_media_reset_session(void);
  * store is unaffected). The on-media layout descriptor does not name the
  * ring extent: that would need a new descriptor version (deferred). Instead
  * the ring formats only an extent that is all zero or holds a whole header of
- * its own for another ring size (src/i3_ring.c); anything else is refused.
- * GAP (Steward's ruling): an all-zero range that belongs to another partition
- * is still formatted. No rpi4-sd image with I3_LITE_LOG on is deployed until
+ * its own for another ring size (src/lite_ring.c); anything else is refused.
+ * GAP (the steward's ruling): an all-zero range that belongs to another partition
+ * is still formatted. No rpi4-sd image with LITE_LOG on is deployed until
  * the layout descriptor names the ring, and the board run uses a card whose
  * ring area was zeroed on purpose (docs/lite-checkpoint-writer.md).
  *
@@ -109,10 +105,10 @@ void cold_media_reset_session(void);
 #ifndef COLD_MEDIA_RING_START_LBA
 #define COLD_MEDIA_RING_START_LBA (COLD_MEDIA_START_LBA + 32768ULL)
 #endif
-#ifndef I3_RING_BYTES
-#define I3_RING_BYTES 67108864ULL
+#ifndef LITE_RING_BYTES
+#define LITE_RING_BYTES 67108864ULL
 #endif
-#define COLD_MEDIA_RING_SECTORS ((uint64_t)(I3_RING_BYTES) / COLD_MEDIA_SECTOR_BYTES)
+#define COLD_MEDIA_RING_SECTORS ((uint64_t)(LITE_RING_BYTES) / COLD_MEDIA_SECTOR_BYTES)
 #define COLD_MEDIA_RING_CHUNK_SECTORS 512u
 #ifndef COLD_MEDIA_RING_LOAD_SECONDS
 #define COLD_MEDIA_RING_LOAD_SECONDS 60u

@@ -8,10 +8,11 @@
 #include "bounded_cue.h"
 #include "cold_media.h"
 #include "runtime_stats.h"
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 #include "ckpt_jam.h"
 #endif
 
+/* The magics are versioned on-media constants, kept byte-identical (1499kernel row 389 Q2 A). */
 #define COLD_MAGIC       0x32444C4F433249ULL /* "I2COLD2\0" LE */
 #define COLD_VERSION     2u
 #define COLD_SUPER_SIZE  128u
@@ -26,11 +27,11 @@
 #define KIND_LOG   2u
 #define KIND_SNAP  3u
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
-/* Round 3, Q11 B: a checkpoint object (CKPT_JAM_MAX_BYTES) passes through
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
+/* row 317 round 3, question 11 (B): a checkpoint object (CKPT_JAM_MAX_BYTES) passes through
  * both scratches, so with the checkpoint flag they are 4 MiB each, in the
- * I3_CKPT_JAM region (memory.h), not in .bss. */
-#define JAM_SCRATCH_MAX ((uint32_t)I3_CKPT_COLD_SCRATCH_BYTES)
+ * LITE_CKPT_JAM region (memory.h), not in .bss. */
+#define JAM_SCRATCH_MAX ((uint32_t)LITE_CKPT_COLD_SCRATCH_BYTES)
 #else
 #define JAM_SCRATCH_MAX (256u * 1024u)
 #endif
@@ -67,23 +68,17 @@ typedef char cold_super_size_check[
 typedef char cold_obj_size_check[
     sizeof(cold_obj_hdr_t) == COLD_OBJ_SIZE ? 1 : -1];
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
-#define jam_scratch ((uint8_t *)(uintptr_t)(I3_CKPT_JAM_BASE + I3_CKPT_JAM_COLD_OFF))
-#define append_scratch ((uint8_t *)(uintptr_t)(I3_CKPT_JAM_BASE + I3_CKPT_JAM_APPEND_OFF))
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
+#define jam_scratch ((uint8_t *)(uintptr_t)(LITE_CKPT_JAM_BASE + LITE_CKPT_JAM_COLD_OFF))
+#define append_scratch ((uint8_t *)(uintptr_t)(LITE_CKPT_JAM_BASE + LITE_CKPT_JAM_APPEND_OFF))
 #else
 static uint8_t jam_scratch[JAM_SCRATCH_MAX];
 /* append_obj() validates the currently selected object before writing. That
  * validation also uses jam_scratch, so preserve the new payload separately. */
 static uint8_t append_scratch[JAM_SCRATCH_MAX];
 #endif
-static cold_result_t g_last_result = COLD_RESULT_EMPTY;
 static uint64_t g_selected_generation;
 static uint64_t g_selected_data_head;
-static struct {
-    cold_write_phase_t phase;
-    int64_t after;
-    int fired;
-} g_fault;
 
 static void cold_read(uint64_t off, void *dst, uint64_t n)
 {
@@ -129,28 +124,15 @@ static cold_media_phase_t media_phase(cold_write_phase_t phase)
 static int cold_write_phase(cold_write_phase_t phase, uint64_t off,
                             const void *src, uint64_t n)
 {
-    uint64_t writable = n;
-    int completed = 1;
-    if (g_fault.phase == phase && g_fault.after >= 0 && !g_fault.fired) {
-        writable = (uint64_t)g_fault.after;
-        if (writable > n)
-            writable = n;
-        g_fault.after -= (int64_t)writable;
-        if (writable != n || g_fault.after == 0) {
-            g_fault.fired = 1;
-            completed = 0;
-        }
-    }
-    if (writable && cold_media_active()
-        && cold_media_write(media_phase(phase), off, src, writable,
+    if (n && cold_media_active()
+        && cold_media_write(media_phase(phase), off, src, n,
                             media_deadline()) != COLD_MEDIA_OK)
         return 0;
     /* The RAM window mirrors an acknowledged submission, never a speculative
-     * write-ahead cache.  A TRI_DEPLOY commit additionally reads and
-     * validates physical media before it can report COMMITTED. */
-    if (writable)
-        cold_write_raw(off, src, writable);
-    return completed;
+     * write-ahead cache. */
+    if (n)
+        cold_write_raw(off, src, n);
+    return 1;
 }
 
 static int bytes_eq(const uint8_t *a, const uint8_t *b, size_t n)
@@ -212,7 +194,7 @@ static int super_checksum_ok(const cold_super_t *s)
 }
 
 #if defined(COLD_LITE_LOG)
-/* Row 212 PR 1c log base, in the superblock's reserved bytes (cold.h).
+/* Row 212, running log: the log base, in the superblock's reserved bytes (cold.h).
  * The superblock checksum covers only its first 64 bytes, so the base has
  * its own check word: the first 8 bytes of BLAKE3 over those 64 bytes and
  * the three base fields (never 0). All 32 bytes zero = no base. */
@@ -421,7 +403,6 @@ static cold_result_t select_super(cold_super_t *out, int *slot_out)
                          (const uint8_t *)&b, sizeof a)) {
             g_selected_generation = 0;
             g_selected_data_head = 0;
-            g_last_result = COLD_RESULT_CORRUPT;
             return COLD_RESULT_CORRUPT;
         }
         int slot = 0;
@@ -437,13 +418,11 @@ static cold_result_t select_super(cold_super_t *out, int *slot_out)
             *slot_out = slot;
         g_selected_generation = selected.generation;
         g_selected_data_head = selected.data_head;
-        g_last_result = COLD_RESULT_VALID;
         return COLD_RESULT_VALID;
     }
     if (media_blank()) {
         g_selected_generation = 0;
         g_selected_data_head = 0;
-        g_last_result = COLD_RESULT_EMPTY;
         return COLD_RESULT_EMPTY;
     }
     cold_super_t raw0, raw1;
@@ -451,10 +430,8 @@ static cold_result_t select_super(cold_super_t *out, int *slot_out)
     cold_read(COLD_SLOT1, &raw1, sizeof raw1);
     if ((raw0.magic == COLD_MAGIC && raw0.version != COLD_VERSION)
         || (raw1.magic == COLD_MAGIC && raw1.version != COLD_VERSION)) {
-        g_last_result = COLD_RESULT_UNSUPPORTED;
         return COLD_RESULT_UNSUPPORTED;
     }
-    g_last_result = COLD_RESULT_CORRUPT;
     return COLD_RESULT_CORRUPT;
 }
 
@@ -487,40 +464,24 @@ int cold_format(void)
                                   media_deadline()) != COLD_MEDIA_OK)) {
         g_selected_generation = 0;
         g_selected_data_head = 0;
-        g_last_result = COLD_RESULT_WRITE_FAULT;
         return -1;
     }
     g_selected_generation = 1;
     g_selected_data_head = COLD_DATA0;
-    g_last_result = COLD_RESULT_VALID;
     return 0;
 }
 
-int cold_init(void)
+void cold_init(void)
 {
     cold_media_status_t media = cold_media_load_window(media_deadline());
     if (media != COLD_MEDIA_OK && media != COLD_MEDIA_DISABLED) {
         g_selected_generation = 0;
         g_selected_data_head = 0;
-        if (media == COLD_MEDIA_ABSENT || media == COLD_MEDIA_REMOVED)
-            g_last_result = COLD_RESULT_ABSENT;
-        else if (media == COLD_MEDIA_LAYOUT
-                 || media == COLD_MEDIA_UNDERSIZED
-                 || media == COLD_MEDIA_UNSUPPORTED)
-            g_last_result = COLD_RESULT_UNSUPPORTED;
-        else
-            g_last_result = COLD_RESULT_CORRUPT;
-        return g_last_result;
+        return;
     }
-    cold_result_t result = select_super(0, 0);
-    if (result == COLD_RESULT_EMPTY) {
-        if (cold_format() != 0)
-            return g_last_result;
-        /* documented all-zero initialization only */
-        g_last_result = COLD_RESULT_EMPTY;
-        return COLD_RESULT_EMPTY;
-    }
-    return result;
+    /* documented all-zero initialization only */
+    if (select_super(0, 0) == COLD_RESULT_EMPTY)
+        (void)cold_format();
 }
 
 static int jam_bytes(noun n, const uint8_t **out, uint64_t *out_len)
@@ -532,7 +493,6 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
                       uint64_t *off_out)
 {
     if (!payload || len == 0 || len > JAM_SCRATCH_MAX) {
-        g_last_result = COLD_RESULT_LENGTH;
         return -1;
     }
     for (uint64_t i = 0; i < len; i++)
@@ -544,7 +504,6 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
     if (select_super(&old, &old_slot) != COLD_RESULT_VALID)
         return -1;
     if (old.generation == UINT64_MAX) {
-        g_last_result = COLD_RESULT_LENGTH;
         return -1;
     }
     uint64_t new_head;
@@ -552,7 +511,6 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
         || !align8_checked(old.data_head + sizeof(cold_obj_hdr_t) + len,
                            &new_head)
         || new_head > COLD_SIZE) {
-        g_last_result = COLD_RESULT_LENGTH;
         return -1;
     }
     uint64_t generation = old.generation + 1;
@@ -569,20 +527,17 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
     uint64_t off = old.data_head;
     if (!cold_write_phase(COLD_WRITE_OBJECT_HEADER, off, &h, sizeof h)
         || !cold_write_phase(COLD_WRITE_PAYLOAD, off + sizeof h, payload, len)) {
-        g_last_result = COLD_RESULT_WRITE_FAULT;
         return -1;
     }
     uint64_t commit = COLD_COMMIT;
     if (!cold_write_phase(COLD_WRITE_OBJECT_COMMIT,
                           off + offsetof(cold_obj_hdr_t, commit),
                           &commit, sizeof commit)) {
-        g_last_result = COLD_RESULT_WRITE_FAULT;
         return -1;
     }
     if (cold_media_active()
         && cold_media_barrier(COLD_MEDIA_PHASE_DATA_BARRIER,
                               media_deadline()) != COLD_MEDIA_OK) {
-        g_last_result = COLD_RESULT_WRITE_FAULT;
         return -1;
     }
     cold_super_t next = old;
@@ -610,28 +565,25 @@ static int append_obj(uint32_t kind, const uint8_t *payload, uint64_t len,
     uint64_t next_slot = old_slot == 0 ? COLD_SLOT1 : COLD_SLOT0;
     if (!cold_write_phase(COLD_WRITE_SUPERBLOCK, next_slot,
                           &next, sizeof next)) {
-        g_last_result = COLD_RESULT_WRITE_FAULT;
         return -1;
     }
     if (cold_media_active()
         && cold_media_barrier(COLD_MEDIA_PHASE_SUPERBLOCK_BARRIER,
                               media_deadline()) != COLD_MEDIA_OK) {
-        g_last_result = COLD_RESULT_WRITE_FAULT;
         return -1;
     }
     g_selected_generation = generation;
     g_selected_data_head = new_head;
-    g_last_result = COLD_RESULT_VALID;
     if (off_out)
         *off_out = off;
     return 0;
 }
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
-/* Row 317 (3), Q8 (rows 212 (3), 213 (4), decision 131): the host sets the
- * cue limits a LOG entry decodes with on replay (and in the 1b checkpoint
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
+/* Row 317 (3), question 8 (rows 212 (3), 213 (4), decision 131): the host sets the
+ * cue limits a LOG entry decodes with on replay (and in the checkpoint
  * boot's read of the skipped entries) to its live admission limits, so an
- * entry accepted live replays. Unset (a non-host image), cue_i2_limits. */
+ * entry accepted live replays. Unset, cue_envelope_limits. */
 static cue_bounded_limits_t g_log_limits;
 static int g_log_limits_set;
 
@@ -644,7 +596,7 @@ void cold_set_log_limits(const cue_bounded_limits_t *limits)
     g_log_limits = *limits;
     g_log_limits_set = 1;
 }
-/* Q8: the heap a LOG entry decodes into; SCRATCH unless the host asks for
+/* Row 317 question 8: the heap a LOG entry decodes into; SCRATCH unless the host asks for
  * PERSIST, where a live job sat when it was admitted. */
 static int g_log_heap_mode = HEAP_MODE_SCRATCH;
 void cold_set_log_heap_mode(int heap_mode) { g_log_heap_mode = heap_mode; }
@@ -656,12 +608,11 @@ static int decode_object(const cold_super_t *s, uint64_t off,
     cold_obj_hdr_t h;
     cold_result_t r = object_validate(s, off, kind, 0, &h);
     if (r != COLD_RESULT_VALID) {
-        g_last_result = r;
         return -1;
     }
     /* object_validate left the verified payload in jam_scratch */
-    cue_bounded_limits_t limits = cue_i2_limits;
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+    cue_bounded_limits_t limits = cue_envelope_limits;
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
     if (kind == KIND_LOG && g_log_limits_set)
         limits = g_log_limits;
 #endif
@@ -669,7 +620,6 @@ static int decode_object(const cold_super_t *s, uint64_t off,
     cue_bounded_status_t cue_status = cue_bounded_bytes(
         jam_scratch, h.len, &limits, heap_mode, out);
     if (cue_status != CUE_BOUNDED_OK) {
-        g_last_result = COLD_RESULT_CUE;
         return -1;
     }
     return 0; /* noun transaction remains active */
@@ -688,197 +638,6 @@ uint64_t cold_store(noun n)
         || object_validate(&s, off, KIND_BLOB, 0, &h) != COLD_RESULT_VALID)
         return 0;
     return hash62_of(h.payload_digest);
-}
-
-static int append_plan(const cold_super_t *old, uint64_t len,
-                       uint64_t *off_out, uint64_t *head_out)
-{
-    uint64_t head;
-    if (!old || !off_out || !head_out || len == 0 || len > JAM_SCRATCH_MAX
-        || old->generation > UINT64_MAX - 2
-        || old->data_head > UINT64_MAX - sizeof(cold_obj_hdr_t) - len
-        || !align8_checked(old->data_head + sizeof(cold_obj_hdr_t) + len,
-                           &head)
-        || head > COLD_SIZE) {
-        g_last_result = COLD_RESULT_LENGTH;
-        return -1;
-    }
-    *off_out = old->data_head;
-    *head_out = head;
-    return 0;
-}
-
-static int append_obj_unselected(const cold_super_t *old, uint32_t kind,
-                                 const uint8_t *payload, uint64_t len,
-                                 uint64_t generation, uint64_t off,
-                                 uint64_t head)
-{
-    if (!old || !payload || len == 0 || len > JAM_SCRATCH_MAX
-        || generation == 0 || off < COLD_DATA0 || head <= off) {
-        g_last_result = COLD_RESULT_LENGTH;
-        return -1;
-    }
-    cold_obj_hdr_t h = {0};
-    h.magic = COLD_OBJ_MAGIC;
-    h.version = COLD_VERSION;
-    h.header_len = sizeof h;
-    h.kind = kind;
-    h.generation = generation;
-    h.len = len;
-    blake3_hash(payload, (size_t)len, h.payload_digest);
-    object_header_digest(&h);
-    if (!cold_write_phase(COLD_WRITE_OBJECT_HEADER, off, &h, sizeof h)
-        || !cold_write_phase(COLD_WRITE_PAYLOAD, off + sizeof h, payload, len)) {
-        g_last_result = COLD_RESULT_WRITE_FAULT;
-        return -1;
-    }
-    uint64_t commit = COLD_COMMIT;
-    if (!cold_write_phase(COLD_WRITE_OBJECT_COMMIT,
-                          off + offsetof(cold_obj_hdr_t, commit),
-                          &commit, sizeof commit)
-        || (cold_media_active()
-            && cold_media_barrier(COLD_MEDIA_PHASE_DATA_BARRIER,
-                                  media_deadline()) != COLD_MEDIA_OK)) {
-        g_last_result = COLD_RESULT_WRITE_FAULT;
-        return -1;
-    }
-    cold_super_t provisional = *old;
-    provisional.generation = generation;
-    provisional.data_head = head;
-    if (object_validate(&provisional, off, kind, generation, 0)
-        != COLD_RESULT_VALID) {
-        g_last_result = COLD_RESULT_PAYLOAD_DIGEST;
-        return -1;
-    }
-    return 0;
-}
-
-/* Read the whole selected chain from active physical media into the RAM
- * mirror, then validate it through the same strict super/object validators
- * used at boot. The deployment is bounded by COLD_SIZE, and this deliberately
- * happens only on activation, never on the ordinary application transaction
- * path. Inactive RAM/semihost media has no physical readback witness. */
-static cold_result_t deployment_media_read_verify(const cold_super_t *expected,
-                                                  uint64_t selected_slot)
-{
-    if (!expected || expected->data_head <= COLD_DATA0
-        || expected->data_head > COLD_SIZE)
-        return COLD_RESULT_OFFSET;
-    if (!cold_media_active())
-        /* RAM/semihost uses the same logical validators, but is volatile. */
-        return COLD_RESULT_VALID;
-    uint64_t deadline = media_deadline();
-    if (cold_media_read(
-            COLD_MEDIA_PHASE_DEPLOY_VERIFY, COLD_DATA0,
-            (void *)(uintptr_t)(COLD_BASE + COLD_DATA0),
-            expected->data_head - COLD_DATA0, deadline) != COLD_MEDIA_OK
-        || cold_media_read(
-            COLD_MEDIA_PHASE_DEPLOY_VERIFY, selected_slot,
-            (void *)(uintptr_t)(COLD_BASE + selected_slot),
-            sizeof(cold_super_t), deadline) != COLD_MEDIA_OK)
-        return COLD_RESULT_WRITE_FAULT;
-    cold_super_t observed;
-    cold_result_t result = super_validate(selected_slot, &observed);
-    if (result != COLD_RESULT_VALID)
-        return result;
-    return bytes_eq((const uint8_t *)&observed, (const uint8_t *)expected,
-                    sizeof observed)
-        ? COLD_RESULT_VALID : COLD_RESULT_SUPERBLOCK;
-}
-
-cold_deploy_result_t cold_store_deployment(noun pill_blob,
-                                           noun supervisor_snapshot,
-                                           uint64_t *pill_hash_out)
-{
-    uint64_t pill_len, snapshot_len;
-    const uint8_t *bytes;
-    cold_super_t old, next;
-    int old_slot;
-    uint64_t pill_off, pill_head, snapshot_off, snapshot_head;
-    uint8_t pill_digest[32];
-
-    /* Plan both object extents before writing a byte. */
-    if (jam_size_checked(pill_blob, JAM_MAX_BYTES, &pill_len) != 0
-        || jam_size_checked(supervisor_snapshot, JAM_MAX_BYTES, &snapshot_len) != 0
-        || select_super(&old, &old_slot) != COLD_RESULT_VALID
-        || append_plan(&old, pill_len, &pill_off, &pill_head) != 0) {
-        return COLD_DEPLOY_REJECTED;
-    }
-    cold_super_t after_pill = old;
-    after_pill.generation = old.generation + 1;
-    after_pill.data_head = pill_head;
-    if (append_plan(&after_pill, snapshot_len, &snapshot_off, &snapshot_head)
-        != 0)
-        return COLD_DEPLOY_REJECTED;
-
-    if (jam_bytes(pill_blob, &bytes, &pill_len) != 0) {
-        g_last_result = COLD_RESULT_LENGTH;
-        return COLD_DEPLOY_REJECTED;
-    }
-    blake3_hash(bytes, (size_t)pill_len, pill_digest);
-    if (append_obj_unselected(&old, KIND_BLOB, bytes, pill_len,
-                              old.generation + 1, pill_off, pill_head) != 0)
-        return cold_media_active() ? COLD_DEPLOY_DURABILITY_UNKNOWN
-                                   : COLD_DEPLOY_REJECTED;
-    /* The blob is read-verified before the snapshot and selection write. */
-    if (object_validate(&after_pill, pill_off, KIND_BLOB,
-                        old.generation + 1, 0) != COLD_RESULT_VALID)
-        return cold_media_active() ? COLD_DEPLOY_DURABILITY_UNKNOWN
-                                   : COLD_DEPLOY_REJECTED;
-
-    if (jam_bytes(supervisor_snapshot, &bytes, &snapshot_len) != 0) {
-        g_last_result = COLD_RESULT_LENGTH;
-        /* The blob append already touched physical media. Preserve the
-         * deployment fence even though this local serialization failure is
-         * unexpected after caller preflight. */
-        return cold_media_active() ? COLD_DEPLOY_DURABILITY_UNKNOWN
-                                   : COLD_DEPLOY_REJECTED;
-    }
-    if (append_obj_unselected(&after_pill, KIND_SNAP, bytes, snapshot_len,
-                              old.generation + 2, snapshot_off,
-                              snapshot_head) != 0)
-        return cold_media_active() ? COLD_DEPLOY_DURABILITY_UNKNOWN
-                                   : COLD_DEPLOY_REJECTED;
-
-    next = after_pill;
-    next.generation = old.generation + 2;
-    next.data_head = snapshot_head;
-    next.snap_generation = old.generation + 2;
-    next.snap_off = snapshot_off;
-    for (size_t i = 0; i < sizeof next.checksum; i++) next.checksum[i] = 0;
-    super_checksum(&next);
-#if defined(COLD_LITE_LOG)
-    super_seal(&next);
-#endif
-    uint64_t next_slot = old_slot == 0 ? COLD_SLOT1 : COLD_SLOT0;
-    if (!cold_write_phase(COLD_WRITE_SUPERBLOCK, next_slot,
-                          &next, sizeof next)
-        || (cold_media_active()
-            && cold_media_barrier(COLD_MEDIA_PHASE_SUPERBLOCK_BARRIER,
-                                  media_deadline()) != COLD_MEDIA_OK)) {
-        g_last_result = COLD_RESULT_WRITE_FAULT;
-        /* Do not guess whether a submitted/partially submitted superblock is
-         * selected. The caller must publish a safe candidate or fail closed;
-         * an aligned append may also have damaged retained data, so neither
-         * the old nor new pair may be assumed bootable. */
-        return COLD_DEPLOY_DURABILITY_UNKNOWN;
-    }
-    cold_result_t physical = deployment_media_read_verify(&next, next_slot);
-    if (physical != COLD_RESULT_VALID) {
-        /* The superblock reached the media path, but a readback cannot prove
-         * that the exact selecting superblock and its complete object chain
-         * are present. Keep the candidate fenced until remount/boot decides
-         * old, new, or no valid pair; never report a RAM-only COMMITTED
-         * result. */
-        g_last_result = physical;
-        return COLD_DEPLOY_DURABILITY_UNKNOWN;
-    }
-    g_selected_generation = next.generation;
-    g_selected_data_head = next.data_head;
-    g_last_result = COLD_RESULT_VALID;
-    if (pill_hash_out)
-        *pill_hash_out = hash62_of(pill_digest);
-    return COLD_DEPLOY_COMMITTED;
 }
 
 uint64_t cold_jam_hash(noun n)
@@ -908,7 +667,6 @@ static noun cold_load_in(uint64_t hash62, int heap_mode)
         cold_obj_hdr_t h;
         cold_result_t r = object_validate(&s, off, 0, 0, &h);
         if (r != COLD_RESULT_VALID) {
-            g_last_result = r;
             return NOUN_ZERO;
         }
         if (h.kind == KIND_BLOB && hash62_of(h.payload_digest) == hash62) {
@@ -921,7 +679,6 @@ static noun cold_load_in(uint64_t hash62, int heap_mode)
         if (!align8_checked(off + sizeof h + h.len, &off))
             break;
     }
-    g_last_result = COLD_RESULT_ABSENT;
     return NOUN_ZERO;
 }
 
@@ -930,11 +687,11 @@ noun cold_load(uint64_t hash62)
     return cold_load_in(hash62, HEAP_MODE_PERSIST);
 }
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
 _Static_assert(CKPT_JAM_MAX_BYTES <= JAM_SCRATCH_MAX, "a checkpoint object fits the scratch");
 
-/* Row 317 (3), Q7: the checkpoint's reads cue with the caller's limits (the
- * 128k-cell checkpoint cue bound, row 212 (4)), not the log's cue_i2_limits.
+/* Row 317 (3), question 7: the checkpoint's reads cue with the caller's limits (the
+ * 128k-cell checkpoint cue bound, row 212 (4)), not the log's cue_envelope_limits.
  * decode_object and cold_load_in with a limits argument; they are kept
  * apart from those two so the flag-off image is unchanged. */
 static int decode_object_limits(const cold_super_t *s, uint64_t off, uint32_t kind,
@@ -944,11 +701,9 @@ static int decode_object_limits(const cold_super_t *s, uint64_t off, uint32_t ki
     cold_obj_hdr_t h;
     cold_result_t r = object_validate(s, off, kind, 0, &h);
     if (r != COLD_RESULT_VALID) {
-        g_last_result = r;
         return -1;
     }
     if (cue_bounded_bytes(jam_scratch, h.len, limits, heap_mode, out) != CUE_BOUNDED_OK) {
-        g_last_result = COLD_RESULT_CUE;
         return -1;
     }
     return 0; /* noun transaction remains active */
@@ -969,7 +724,6 @@ noun cold_load_limits(uint64_t hash62, const cue_bounded_limits_t *limits, int h
         cold_obj_hdr_t h;
         cold_result_t r = object_validate(&s, off, 0, 0, &h);
         if (r != COLD_RESULT_VALID) {
-            g_last_result = r;
             return NOUN_ZERO;
         }
         if (h.kind == KIND_BLOB && hash62_of(h.payload_digest) == hash62) {
@@ -982,7 +736,6 @@ noun cold_load_limits(uint64_t hash62, const cue_bounded_limits_t *limits, int h
         if (!align8_checked(off + sizeof h + h.len, &off))
             break;
     }
-    g_last_result = COLD_RESULT_ABSENT;
     return NOUN_ZERO;
 }
 
@@ -1002,12 +755,12 @@ uint64_t cold_store_ckpt(noun n)
     return hash62_of(h.payload_digest);
 }
 
-/* Row 212 PR 1b (checkpoint boot): one walk of the selected chain in media
+/* Row 212 (checkpoint boot): one walk of the selected chain in media
  * order. Every BLOB whose payload is at most max_len bytes is decoded into
  * SCRATCH and handed to fn (a blob that does not decode is passed over);
  * fn returns nonzero to end the walk early. The caller owns scratch and may
  * reset it inside fn. Returns 0 when the walk ended (at data_head or by fn),
- * -1 when the superblock or an object does not validate (g_last_result set).
+ * -1 when the superblock or an object does not validate.
  * Reads only; writes nothing to media. */
 int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
 {
@@ -1020,7 +773,6 @@ int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
         uint64_t next;
         cold_result_t r = object_validate(&s, off, 0, 0, &h);
         if (r != COLD_RESULT_VALID) {
-            g_last_result = r;
             return -1;
         }
         if (!align8_checked(off + sizeof h + h.len, &next))
@@ -1040,7 +792,7 @@ int cold_blob_scan(uint64_t max_len, int (*fn)(void *ctx, noun blob), void *ctx)
 #endif
 
 #if defined(COLD_LITE_LOG)
-/* Row 212 PR 1c: the log base and the logical log length (cold.h). One walk
+/* Row 212 (running log and ring): the log base and the logical log length (cold.h). One walk
  * from the base offset counts the entries at or after it. */
 int cold_log_base(cold_log_base_t *out)
 {
@@ -1061,7 +813,6 @@ int cold_log_base(cold_log_base_t *out)
         cold_obj_hdr_t h;
         cold_result_t r = object_validate(&s, off, 0, 0, &h);
         if (r != COLD_RESULT_VALID) {
-            g_last_result = r;
             return -1;
         }
         if (h.kind == KIND_LOG)
@@ -1130,34 +881,6 @@ uint64_t cold_log_len(void)
     return select_super(&s, 0) == COLD_RESULT_VALID ? s.log_count : 0;
 }
 
-noun cold_log_at(uint64_t index)
-{
-    cold_super_t s;
-    if (select_super(&s, 0) != COLD_RESULT_VALID || index >= s.log_count)
-        return NOUN_ZERO;
-    uint64_t off = COLD_DATA0;
-    uint64_t seen = 0;
-    while (off < s.data_head) {
-        cold_obj_hdr_t h;
-        cold_result_t r = object_validate(&s, off, 0, 0, &h);
-        if (r != COLD_RESULT_VALID) {
-            g_last_result = r;
-            return NOUN_ZERO;
-        }
-        if (h.kind == KIND_LOG && seen++ == index) {
-            noun out;
-            if (decode_object(&s, off, KIND_LOG,
-                              HEAP_MODE_PERSIST, &out) != 0)
-                return NOUN_ZERO;
-            noun_tx_commit();
-            return out;
-        }
-        if (!align8_checked(off + sizeof h + h.len, &off))
-            break;
-    }
-    return NOUN_ZERO;
-}
-
 /* Sequential log read for boot replay. *cursor starts at 0 and is a media
  * offset into the data region, owned by the caller and kept in RAM only for
  * one boot (nothing outlives it, nothing is written to media). A call with
@@ -1168,10 +891,8 @@ noun cold_log_at(uint64_t index)
  * validates the objects from max(*cursor, COLD_DATA0) in media order, skips
  * the non-LOG objects, decodes the first LOG object into SCRATCH (the caller
  * resets scratch after the step), and advances *cursor to that object's
- * aligned end. NOUN_ZERO at data_head or on any validate/cue error, with
- * g_last_result set as cold_log_at does. cold_log_at rescans from
- * COLD_DATA0 and re-selects the superblock (another full walk) per entry;
- * this reads the log in O(bytes) per boot.
+ * aligned end. NOUN_ZERO at data_head or on any validate/cue error. It
+ * reads the log in O(bytes) per boot, one walk in media order.
  * Replay-only (one caller, replay_log). Cache rule: the cache is trusted
  * only while the globals match it. An append that fails after its
  * superblock already reached the media returns -1 without updating
@@ -1199,14 +920,13 @@ noun cold_log_next(uint64_t *cursor)
         uint64_t next;
         cold_result_t r = object_validate(s, off, 0, 0, &h);
         if (r != COLD_RESULT_VALID) {
-            g_last_result = r;
             return NOUN_ZERO;
         }
         if (!align8_checked(off + sizeof h + h.len, &next))
             break;
         if (h.kind == KIND_LOG) {
             noun out;
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
             if (decode_object(s, off, KIND_LOG, g_log_heap_mode, &out) != 0)
 #else
             if (decode_object(s, off, KIND_LOG,
@@ -1222,286 +942,7 @@ noun cold_log_next(uint64_t *cursor)
     return NOUN_ZERO;
 }
 
-int cold_snap_save(noun root)
-{
-    const uint8_t *bytes;
-    uint64_t len;
-    uint64_t jam_start = runtime_counter_now();
-    if (jam_bytes(root, &bytes, &len) != 0) {
-        g_last_result = COLD_RESULT_LENGTH;
-        return -1;
-    }
-    uint64_t jam_end = runtime_counter_now();
-    runtime_stats_record(RT_PHASE_CHECKPOINT_JAM,
-                         jam_end >= jam_start ? jam_end - jam_start : 0);
-    runtime_stats_set(RT_COUNT_CHECKPOINT_BYTES, len);
-    uint64_t append_start = runtime_counter_now();
-    int result = append_obj(KIND_SNAP, bytes, len, 0);
-    uint64_t append_end = runtime_counter_now();
-    runtime_stats_record(
-        RT_PHASE_CHECKPOINT_COLD_APPEND,
-        append_end >= append_start ? append_end - append_start : 0);
-    if (result == 0) {
-        runtime_stats_set(
-            RT_COUNT_CHECKPOINT_GENERATION, g_selected_generation);
-        runtime_stats_set(RT_COUNT_COLD_DATA_HEAD, g_selected_data_head);
-    }
-    return result;
-}
-
-int cold_snap_decode(noun *out)
-{
-    cold_super_t s;
-    if (!out || select_super(&s, 0) != COLD_RESULT_VALID)
-        return -1;
-    if (s.snap_off == 0) {
-        g_last_result = COLD_RESULT_ABSENT;
-        return -1;
-    }
-    if (decode_object(&s, s.snap_off, KIND_SNAP,
-                      HEAP_MODE_SCRATCH, out) != 0)
-        return -1;
-    g_last_result = COLD_RESULT_VALID;
-    return 0;
-}
-
-noun cold_snap_load(void)
-{
-    noun out;
-    if (cold_snap_decode(&out) != 0)
-        return NOUN_ZERO;
-    noun_tx_commit();
-    return out;
-}
-
-cold_result_t cold_probe(void)
-{
-    return select_super(0, 0);
-}
-
-cold_result_t cold_last_result(void)
-{
-    return g_last_result;
-}
-
-uint64_t cold_selected_generation(void)
-{
-    return g_selected_generation;
-}
-
 uint64_t cold_data_head(void)
 {
     return g_selected_data_head;
-}
-
-void cold_fault_set(cold_write_phase_t phase, int64_t after_bytes)
-{
-    g_fault.phase = phase;
-    g_fault.after = after_bytes;
-    g_fault.fired = 0;
-}
-
-void cold_fault_clear(void)
-{
-    g_fault.phase = COLD_WRITE_NONE;
-    g_fault.after = -1;
-    g_fault.fired = 0;
-}
-
-const char *cold_result_name(cold_result_t result)
-{
-    switch (result) {
-    case COLD_RESULT_VALID: return "valid";
-    case COLD_RESULT_EMPTY: return "empty";
-    case COLD_RESULT_ABSENT: return "absent";
-    case COLD_RESULT_CORRUPT: return "corrupt";
-    case COLD_RESULT_UNSUPPORTED: return "unsupported";
-    case COLD_RESULT_SUPERBLOCK: return "superblock";
-    case COLD_RESULT_OFFSET: return "offset";
-    case COLD_RESULT_ALIGNMENT: return "alignment";
-    case COLD_RESULT_HEADER: return "header";
-    case COLD_RESULT_KIND: return "kind";
-    case COLD_RESULT_LENGTH: return "length";
-    case COLD_RESULT_HEADER_DIGEST: return "header-digest";
-    case COLD_RESULT_PAYLOAD_DIGEST: return "payload-digest";
-    case COLD_RESULT_GENERATION: return "generation";
-    case COLD_RESULT_COMMIT: return "commit";
-    case COLD_RESULT_CUE: return "cue";
-    case COLD_RESULT_SHAPE: return "shape";
-    case COLD_RESULT_IDENTITY: return "identity";
-    case COLD_RESULT_ALLOC: return "alloc";
-    case COLD_RESULT_WRITE_FAULT: return "write-fault";
-    default: return "unknown";
-    }
-}
-
-static int selftest_load(uint64_t expected)
-{
-    heap_scratch_reset();
-    noun got = cold_snap_load();
-    int ok = noun_is_direct(got) && direct_val(got) == expected;
-    heap_set_mode(HEAP_MODE_PERSIST);
-    heap_scratch_reset();
-    return ok;
-}
-
-uint64_t cold_m2_selftest(void)
-{
-    uint64_t failures = 0;
-    cold_super_t s, bad_s;
-    cold_obj_hdr_t h, bad_h;
-    int slot;
-    uint64_t slot_off;
-
-    cold_fault_clear();
-    cold_format();
-    if (cold_snap_save(direct(42)) != 0
-        || select_super(&s, &slot) != COLD_RESULT_VALID
-        || s.snap_off == 0) {
-        cold_format();
-        return UINT64_MAX;
-    }
-    slot_off = slot ? COLD_SLOT1 : COLD_SLOT0;
-    cold_read(s.snap_off, &h, sizeof h);
-
-    bad_s = s;
-    bad_s.checksum[0] ^= 1;
-    cold_write_raw(slot_off, &bad_s, sizeof bad_s);
-    if (super_validate(slot_off, 0) != COLD_RESULT_SUPERBLOCK)
-        failures |= 1ULL << 0;
-    cold_write_raw(slot_off, &s, sizeof s);
-
-    bad_s = s;
-    bad_s.snap_off++;
-    super_checksum(&bad_s);
-    cold_write_raw(slot_off, &bad_s, sizeof bad_s);
-    if (super_validate(slot_off, 0) != COLD_RESULT_ALIGNMENT)
-        failures |= 1ULL << 1;
-    cold_write_raw(slot_off, &s, sizeof s);
-
-    bad_s = s;
-    bad_s.snap_off = COLD_SIZE;
-    super_checksum(&bad_s);
-    cold_write_raw(slot_off, &bad_s, sizeof bad_s);
-    if (super_validate(slot_off, 0) != COLD_RESULT_OFFSET)
-        failures |= 1ULL << 2;
-    cold_write_raw(slot_off, &s, sizeof s);
-
-    bad_h = h;
-    bad_h.kind = KIND_BLOB;
-    object_header_digest(&bad_h);
-    cold_write_raw(s.snap_off, &bad_h, sizeof bad_h);
-    if (super_validate(slot_off, 0) != COLD_RESULT_KIND)
-        failures |= 1ULL << 3;
-    cold_write_raw(s.snap_off, &h, sizeof h);
-
-    bad_h = h;
-    bad_h.len = JAM_SCRATCH_MAX + 1;
-    object_header_digest(&bad_h);
-    cold_write_raw(s.snap_off, &bad_h, sizeof bad_h);
-    if (super_validate(slot_off, 0) != COLD_RESULT_LENGTH)
-        failures |= 1ULL << 4;
-    cold_write_raw(s.snap_off, &h, sizeof h);
-
-    bad_h = h;
-    bad_h.payload_digest[0] ^= 1;
-    object_header_digest(&bad_h);
-    cold_write_raw(s.snap_off, &bad_h, sizeof bad_h);
-    if (super_validate(slot_off, 0) != COLD_RESULT_PAYLOAD_DIGEST)
-        failures |= 1ULL << 5;
-    cold_write_raw(s.snap_off, &h, sizeof h);
-
-    bad_h = h;
-    bad_h.header_digest[0] ^= 1;
-    cold_write_raw(s.snap_off, &bad_h, sizeof bad_h);
-    if (super_validate(slot_off, 0) != COLD_RESULT_HEADER_DIGEST)
-        failures |= 1ULL << 6;
-    cold_write_raw(s.snap_off, &h, sizeof h);
-
-    bad_h = h;
-    bad_h.generation++;
-    object_header_digest(&bad_h);
-    cold_write_raw(s.snap_off, &bad_h, sizeof bad_h);
-    if (super_validate(slot_off, 0) != COLD_RESULT_GENERATION)
-        failures |= 1ULL << 7;
-    cold_write_raw(s.snap_off, &h, sizeof h);
-
-    bad_h = h;
-    bad_h.commit = 0;
-    cold_write_raw(s.snap_off, &bad_h, sizeof bad_h);
-    if (super_validate(slot_off, 0) != COLD_RESULT_COMMIT)
-        failures |= 1ULL << 8;
-    cold_write_raw(s.snap_off, &h, sizeof h);
-
-    bad_h = h;
-    bad_h.magic ^= 1;
-    object_header_digest(&bad_h);
-    cold_write_raw(s.snap_off, &bad_h, sizeof bad_h);
-    if (super_validate(slot_off, 0) != COLD_RESULT_HEADER)
-        failures |= 1ULL << 9;
-    cold_write_raw(s.snap_off, &h, sizeof h);
-
-    bad_s = s;
-    bad_s.commit = 0;
-    super_checksum(&bad_s);
-    cold_write_raw(slot_off, &bad_s, sizeof bad_s);
-    if (super_validate(slot_off, 0) != COLD_RESULT_SUPERBLOCK)
-        failures |= 1ULL << 10;
-    cold_write_raw(slot_off, &s, sizeof s);
-
-    /* Nonblank corrupt and unsupported media must not be auto-formatted. */
-    cold_format();
-    cold_read(COLD_SLOT0, &s, sizeof s);
-    s.checksum[0] ^= 1;
-    cold_write_raw(COLD_SLOT0, &s, sizeof s);
-    if (cold_init() != COLD_RESULT_CORRUPT
-        || ((cold_super_t *)(uintptr_t)(COLD_BASE + COLD_SLOT0))->magic
-            != COLD_MAGIC)
-        failures |= 1ULL << 11;
-
-    cold_format();
-    cold_read(COLD_SLOT0, &s, sizeof s);
-    s.version = COLD_VERSION + 1;
-    cold_write_raw(COLD_SLOT0, &s, sizeof s);
-    if (cold_init() != COLD_RESULT_UNSUPPORTED
-        || ((cold_super_t *)(uintptr_t)(COLD_BASE + COLD_SLOT0))->version
-            != COLD_VERSION + 1)
-        failures |= 1ULL << 12;
-
-    /* Every byte cut in every write phase selects old or fully committed new. */
-    static const struct {
-        cold_write_phase_t phase;
-        uint64_t size;
-    } phases[] = {
-        { COLD_WRITE_OBJECT_HEADER, COLD_OBJ_SIZE },
-        { COLD_WRITE_PAYLOAD, 2 },
-        { COLD_WRITE_OBJECT_COMMIT, 8 },
-        { COLD_WRITE_SUPERBLOCK, COLD_SUPER_SIZE }
-    };
-    for (size_t p = 0; p < sizeof phases / sizeof phases[0]; p++) {
-        for (uint64_t cut = 0; cut <= phases[p].size; cut++) {
-            cold_format();
-            if (cold_snap_save(direct(42)) != 0) {
-                failures |= 1ULL << (16 + p);
-                continue;
-            }
-            cold_fault_set(phases[p].phase, (int64_t)cut);
-            if (cold_snap_save(direct(43)) == 0)
-                failures |= 1ULL << (20 + p);
-            cold_fault_clear();
-            if (cold_probe() != COLD_RESULT_VALID) {
-                failures |= 1ULL << (24 + p);
-                continue;
-            }
-            uint64_t generation = cold_selected_generation();
-            if ((generation == 2 && !selftest_load(42))
-                || (generation == 3 && !selftest_load(43))
-                || (generation != 2 && generation != 3))
-                failures |= 1ULL << (28 + p);
-        }
-    }
-
-    cold_fault_clear();
-    cold_format();
-    return failures;
 }

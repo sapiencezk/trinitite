@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Jet-vs-Hoon equivalence test for the I3 lite node (%fast jets).
+"""Jet-vs-Hoon equivalence test for the lite node (%fast jets).
 
-Builds the I3_HOST + I3_L1_PROBE image, boots tests/jetcheck/jetcheck.jam
+Builds the LITE_HOST + LITE_PROBE image, boots tests/jetcheck/jetcheck.jam
 under QEMU and runs one `poke-jetcheck` step: the %go poke constructs the @rs
 door's add/sub/mul/div/lth cores before the integer ones, then every %fast
 entry registered in that poke is slammed on the vectors below twice -- with
@@ -9,7 +9,7 @@ its jet and with its own Nock battery (that entry suppressed) -- and the
 products must be equal. tests/jetcheck/build.sh rebuilds jetcheck.jam.gz.
 
   python3 tests/jetcheck/run.py            # expect: PASS
-  python3 tests/jetcheck/run.py --plant-rsh  # rebuild with L3's raw-count rsh; expect: FAIL
+  python3 tests/jetcheck/run.py --plant-rsh  # rebuild with the old raw-count rsh bug; expect: FAIL
   python3 tests/jetcheck/run.py --plant-label-only  # pre-fix label-only rule; expect: FAIL (dup bindings refused and counted, no crash)
   python3 tests/jetcheck/run.py --expect-fail ...
 
@@ -120,7 +120,7 @@ def unlist(n):
 
 
 # Two arms cannot run as plain Hoon on the lite node at all: ++shax
-# recurses deeper than the 1,024-frame evaluator stack (I3_SLAM_MAX_STACK,
+# recurses deeper than the 1,024-frame evaluator stack (LITE_SLAM_MAX_STACK,
 # budget reason 4), and Tip5's ++permutation as Hoon rebuilds its round
 # constants per element and needs more cells than the 32 MiB scratch holds
 # (reason 3). For them alone, a Hoon side stopped for that reason is checked
@@ -167,7 +167,7 @@ def reference_checks(rows):
     wrong)."""
     settled = wrong = 0
     for label, (ref, reason) in REFERENCE.items():
-        lines = [l for l in rows if l.startswith("I3L1 jetcheck name=")
+        lines = [l for l in rows if l.startswith("LITE1 jetcheck name=")
                  and f" label={label} " in l]
         for line, sample in zip(lines, VECTORS[label]):
             if "verdict=inconclusive" not in line or f" hoon=budget:{reason}" not in line:
@@ -178,7 +178,7 @@ def reference_checks(rows):
             except AssertionError:
                 want = None                     # the arm would crash
             ok = not jet.startswith(("crash", "budget")) and parse_noun(jet) == want
-            print(f"I3L1 jetcheck_reference label={label} sample={str(sample)[:60]} "
+            print(f"LITE1 jetcheck_reference label={label} sample={str(sample)[:60]} "
                   f"verdict={'match' if ok else 'mismatch'}")
             settled += ok
             wrong += not ok
@@ -186,11 +186,11 @@ def reference_checks(rows):
 
 
 def build(plant, label_only=False):
-    args = ["make", "-C", str(ROOT), "PLATFORM=qemu-virt", "I3_HOST=1", "I3_L1_PROBE=1"]
+    args = ["make", "-C", str(ROOT), "PLATFORM=qemu-virt", "LITE_HOST=1", "LITE_PROBE=1"]
     if plant:
-        args.append("I3_PLANT_RSH_RAW=1")
+        args.append("LITE_PLANT_RSH_RAW=1")
     if label_only:
-        args.append("I3_PLANT_LABEL_ONLY=1")
+        args.append("LITE_PLANT_LABEL_ONLY=1")
     pill = ROOT / "pill.bin"
     prev = pill.read_bytes() if pill.exists() else None
     pill.write_bytes(bytes(16))
@@ -229,7 +229,7 @@ def main():
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out = b""
         deadline = time.monotonic() + 900
-        while b"I3L1 terminal=" not in out and time.monotonic() < deadline:
+        while b"LITE1 terminal=" not in out and time.monotonic() < deadline:
             chunk = p.stdout.read1(65536)
             if not chunk:
                 break
@@ -239,18 +239,18 @@ def main():
     text = out.decode("utf-8", "replace").replace("\r", "")
     if a.log:
         a.log.write_text(text)
-    rows = [l for l in text.splitlines() if l.startswith("I3L1 jetcheck")]
+    rows = [l for l in text.splitlines() if l.startswith("LITE1 jetcheck")]
     for l in rows:
         print(l)
-    summ = [l for l in rows if l.startswith("I3L1 jetcheck_summary")]
+    summ = [l for l in rows if l.startswith("LITE1 jetcheck_summary")]
     checked = {re.search(r"label=(\S+)", l).group(1) for l in rows
-               if l.startswith("I3L1 jetcheck name=")}
+               if l.startswith("LITE1 jetcheck name=")}
     unvec = {re.search(r"label=(\S+)", l).group(1) for l in rows
-             if l.startswith("I3L1 jetcheck_unvectored")}
+             if l.startswith("LITE1 jetcheck_unvectored")}
     problems = []
     if not summ:
         problems.append("no jetcheck_summary (terminal=%s)" % re.findall(r"terminal=(\S+)", text))
-    dups = sorted(set(re.findall(r"I3H fast_dup label=(\S+)", text)))
+    dups = sorted(set(re.findall(r"LITEH fast_dup label=(\S+)", text)))
     if dups:
         problems.append("duplicate hot label bound: " + " ".join(dups))
     else:

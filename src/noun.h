@@ -82,24 +82,15 @@ int   heap_get_mode(void);
 void  heap_scratch_reset(void);    /* bump scratch ptr to HEAP_SCRATCH_BASE */
 uint64_t heap_scratch_mark(void);  /* byte offset for a nested scratch owner */
 int   heap_scratch_rewind(uint64_t mark);
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
 void  heap_persist_cap_arm(void);  /* test knob: cap persist growth from here */
 void  heap_persist_cap_extend(uint64_t cells); /* test knob: exempt test input */
 #endif
-void  heap_persist_reset(void);    /* bump current persist semispace to its base */
-void  heap_persist_flip(void);     /* switch to other semispace (empty); for compact */
 /* Transactional candidate semispace.  A failed pre-promotion copy restores
  * both selector and bump pointer, leaving live roots readable. */
-void  heap_persist_begin_tx(void);
-void  heap_persist_commit_tx(void);
-void  heap_persist_abort_tx(void);
 uint64_t heap_persist_selector(void);
 uint64_t heap_persist_generation(void);   /* see noun.c */
 int   heap_ptr_in_scratch(noun n);       /* cell allocated in the scratch heap */
-/* Activation guard: I2 publish enables this around the final effect pass.
- * Any accidental heap allocation is a deterministic host-integrity failure. */
-void  heap_noalloc_begin(void);
-void  heap_noalloc_end(void);
 
 /* Loader/decode transaction. Only one is active on the single scheduler
  * core. Abort restores the selected cell bump pointer and all atom-store
@@ -110,14 +101,8 @@ void  noun_tx_abort(void);
 int   noun_tx_active(void);
 uint64_t heap_cells_used(int mode);
 uint64_t heap_persist_free_cells(void); /* cells left in the live persist half */
-#if defined(M46_LIVE_REPLACEMENT)
-/* Same-boot allocation high-water marks include aborted candidate work. */
-uint64_t noun_m46_heap_peak_bytes(int mode);
-uint64_t noun_m46_atom_peak_bytes(void);
-uint64_t noun_m46_atom_index_peak(void);
-#endif
 uint64_t atom_store_bytes_used(void);
-/* Row 221 (row 212 (c)), only with I3_COMPACT (memory.h). */
+/* Row 221 (row 212 (c)), only with LITE_COMPACT (memory.h). */
 typedef struct {
     uint64_t bytes_before, idx_before, bytes_after, idx_after, kept, dropped, mismatch;
     uint64_t slide_ticks, index_ticks, kept_digest, after_digest;
@@ -135,34 +120,18 @@ void heap_scratch_floor_set(void);
 void atom_store_pin(void);
 uint64_t atom_store_pin_bytes(void);
 int atom_store_rehash_ok(uint64_t hash62);
-int atom_store_compact(int (*live)(uint64_t), void (*mid)(void), atom_compact_t *st);
-uint64_t atom_store_capacity_bytes(void);
+int atom_store_compact(int (*live)(uint64_t), atom_compact_t *st);
 uint64_t atom_store_index_occupancy(void);
-uint64_t atom_store_index_capacity(void);
-uint64_t atom_store_probe_hwm(void);
 uint64_t noun_copy_map_hwm(void);
 uint64_t noun_copy_map_capacity(void);
 void noun_copy_map_hwm_reset(void);
-/* Test-only evidence for a forced partial-copy rollback. */
-void noun_test_copy_mutations_reset(void);
-uint64_t noun_test_copy_mutations(void);
-#if defined(M38_D8_NATIVE)
-void noun_test_atom_fail_after(int64_t atoms);
-#endif
 
 noun  alloc_cell(noun head, noun tail);
 int   alloc_cell_checked(noun head, noun tail, noun *out);
 void  cell_inc(noun n);   /* increment refcount */
-void  cell_dec(noun n);   /* decrement; frees cell (and recursively children) when 0 */
 
 /* Deep-copy cells into the *current* heap mode (atoms shared via store). */
-noun  noun_copy(noun n);
 int   noun_copy_checked(noun n, noun *out);
-/* Deterministic test hook: fail a checked deep copy after N new cells.
- * Negative disables injection. */
-void  noun_test_copy_fail_after(int64_t cells);
-/* Copy into PERSIST region (saves/restores mode). */
-noun  noun_persist(noun n);
 
 /* Nock equality: structural, O(1) for atoms via word compare */
 int   noun_eq(noun a, noun b);
@@ -192,11 +161,3 @@ size_t cord_to_cstr(noun n, char *buf, size_t bufsz);
  * Returns a pointer to the atom_t, or NULL if not found.
  */
 atom_t *atom_store_get(uint64_t hash62);
-
-/* Load a jammed atom from PILL_BASE (placed by QEMU's -device loader).
-   Reads PILL format v2 header: sets noun_pill_shape (0=Arvo, 1=Shrine).
-   Returns 0 (C null) if no pill is present; otherwise a valid tagged noun.
-   CUE the result to decode. */
-extern int noun_pill_shape;
-extern uint32_t noun_pill_version;  /* PILL v2 bytes 9-12 LE; 0 if unversioned */
-noun  pill_load(void);

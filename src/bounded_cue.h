@@ -30,7 +30,7 @@ typedef struct {
     uint64_t max_work;
 } cue_bounded_limits_t;
 
-extern const cue_bounded_limits_t cue_i2_limits;
+extern const cue_bounded_limits_t cue_envelope_limits;
 
 /*
  * Decode one canonical jam byte string into the selected cell heap.

@@ -5,14 +5,13 @@
  * Nock 4K evaluator + jets + slam budget.
  *
  * nock(subject, formula)            → product  (crashes on error)
- * nock_ex(subject, formula, j, sky) → product  (full API)
  * slot(axis, subject)               → noun     (Nock / operator)
  *
- * Jet pack (C hot_state, pure — no MMIO): arithmetic + WP3 structural/list/bit
+ * Jet pack (C hot_state, pure — no MMIO): arithmetic + structural/list/bit
  *   %dec %add %sub %mul %lth %gth %lte %gte %div %mod
  *   %eq %lsh %rsh %con %dis %mix %cap %mas %peg %lent %flop %weld
- *   L1 %fast: %turn %mole
- * KERNEL path (nock_eval op9): C only. SKA nock_op9_continue: Forth then C.
+ *   %fast only: %turn %mole
+ * Op 9 dispatches to C jets only.
  * honk %fast clues register the first battery per hot label; op 9 axis 2
  * matches that battery. %wild is unchanged and still wins when present.
  */
@@ -21,7 +20,7 @@
 /* Returns the scry result or crashes.  NULL = crash on any op 12.         */
 typedef noun (*sky_fn_t)(noun path);
 
-/* ── Sock: noun template for jet matching (%wild / SKA) ─────────────────── */
+/* ── Sock: noun template for jet matching (%wild) ───────────────────────── */
 /*
  * cape: & (NOUN_YES = 0) → positions in `data` must match subject exactly
  *        | (NOUN_NO  = 1) → wildcard, any noun matches
@@ -66,66 +65,36 @@ noun     nock_trace_get(void);
 void     nock_trace_set(noun trace);
 noun     nock_mook(noun trace);
 
-/* ── Slam op budget (WP2) ────────────────────────────────────────────────── */
+/* ── Slam op budget ──────────────────────────────────────────────────────── */
 /*
- * Deterministic op counter checked on every nock_eval / SKA eval entry.
+ * Deterministic op counter checked on every nock_eval entry.
  * max_ops == 0 → unlimited (REPL / unit tests default).
  * On fire: longjmp(nock_abort, NOCK_ABORT_BUDGET) — no product returned.
- * Optional wall: every 256 ops call wall_check if set (kernel deadline).
  */
 void     nock_budget_set(uint64_t max_ops);   /* also resets ops_used */
 void     nock_budget_set_limits(uint64_t max_ops, uint64_t max_cells);
 void     nock_budget_finish(void);
-uint64_t nock_budget_get(void);               /* current max (0 = off) */
 uint64_t nock_ops_used(void);
 uint64_t nock_cells_used(void);
-/* Reason: 1=op budget, 2=wall deadline, 3=cell budget, 4=evaluator stack. */
+/* Reason: 1=op budget, 3=cell budget, 4=evaluator stack. */
 uint64_t nock_budget_abort_reason(void);
 uint64_t nock_eval_stack_peak(void);
 void     nock_eval_stack_set_limit(uint64_t limit);
-void     nock_wall_check_set(int (*fn)(void)); /* 1 → budget abort */
-/* Tick one op; may longjmp. Public so SKA eval paths share the same budget. */
+/* Tick one op; may longjmp. */
 void     nock_budget_tick(void);
-#if defined(M38_D8_WAVE_B_B0)
-void     nock_b0_metrics_reset(void);
-#endif
-#ifdef M8_EVIDENCE
-uint64_t nock_cell_budget_selftest(void);
-#endif
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 noun nock(noun subject, noun formula);
-noun nock_ex(noun subject, noun formula, const wilt_t *jets, sky_fn_t sky);
 noun slot(noun axis, noun subject);
-
-/*
- * nock_op9_continue: complete an op-9 invocation starting from an already-
- * evaluated core.  Checks the active %wild registrations; if a jet matches,
- * dispatches directly.  Otherwise slots the arm at `ax` from `core` and
- * evaluates (core, arm) via TCO.
- *
- * Used by eval_nomm in ska.c so that NOMM_9 nodes benefit from jet dispatch
- * without having to re-evaluate the core formula through nock_eval.
- */
-noun nock_op9_continue(noun core, noun ax,
-                       const wilt_t *jets, sky_fn_t sky);
 
 /* ── Jet lookup and sock matching ────────────────────────────────────────── */
 /*
  * hot_lookup: look up a jet by its label cord.  Returns NULL if not found.
- * Used by the SKA cook pass to pre-wire jet pointers at NOMM_DS2 sites.
  */
 jet_fn_t hot_lookup(noun label);
 
-/*
- * hot_reverse_label: given a jet function pointer, return its label cord.
- * Returns 0 if not found.  Used by ska_print_stats (Stage 9d) to print
- * the name of a C hot_state jet at a jetted call site.
- */
-uint64_t hot_reverse_label(jet_fn_t fn);
 
 int      hot_entry_count(void);
-uint64_t hot_entry_label(int i);
 const char *hot_entry_name(int i);
 /* hot_name_is: is atom `label` the cord `name` (any width)? */
 int      hot_name_is(noun label, const char *name);
@@ -138,7 +107,7 @@ void     hot_hits_reset(void);
 int      nock_tip5_digest(noun n, uint8_t out[40]);
 
 void     fast_reset(void);
-void     nock_host_roots(void (*f)(noun, int)); /* row 221, I3_COMPACT only */
+void     nock_host_roots(void (*f)(noun, int)); /* row 221, LITE_COMPACT only */
 uint64_t fast_clue_count(void);
 int      fast_reg_count(void);
 int      fast_cold_count(void);
@@ -150,7 +119,7 @@ int      fast_first_clue_ok(void);
 noun     fast_first_clue(void);
 int      fast_chum_count(void);
 noun     fast_chum_at(int i);
-#if defined(I3_L1_PROBE)
+#if defined(LITE_PROBE)
 noun     fast_core_lookup(noun label);
 int      fast_core_count(void);
 const char *fast_core_name(int i);

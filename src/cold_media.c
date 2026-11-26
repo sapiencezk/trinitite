@@ -5,6 +5,7 @@
 #include "memory.h"
 #include "runtime_stats.h"
 
+/* The descriptor magic is a versioned on-media constant, kept byte-identical (1499kernel row 389 Q2 A). */
 #define COLD_MEDIA_DESC_MAGIC 0x31444D433249ULL /* "I2CMD1\0\0" LE */
 
 typedef struct __attribute__((packed)) {
@@ -23,26 +24,7 @@ typedef struct __attribute__((packed)) {
 typedef char cold_media_descriptor_size_check[
     sizeof(cold_media_descriptor_t) == COLD_MEDIA_SECTOR_BYTES ? 1 : -1];
 
-#if defined(COLD_MEDIA_FAKE)
-cold_media_status_t cold_media_fake_probe(uint64_t *, int *, uint64_t);
-cold_media_status_t cold_media_fake_sector_read(
-    uint64_t, uint8_t *, uint64_t);
-cold_media_status_t cold_media_fake_sector_write(
-    uint64_t, const uint8_t *, uint64_t, int *);
-cold_media_status_t cold_media_fake_barrier(uint64_t);
-void cold_media_fake_backend_reset(void);
-#if defined(COLD_MEDIA_RING)
-/* The fake ring extent (cold_media_fake.c): sector s of the ring. */
-cold_media_status_t cold_media_fake_ring_read(uint64_t, uint8_t *);
-cold_media_status_t cold_media_fake_ring_write(uint64_t, const uint8_t *, int *);
-cold_media_status_t cold_media_fake_ring_barrier(void);
-#endif
-#define backend_probe cold_media_fake_probe
-#define backend_read cold_media_fake_sector_read
-#define backend_write cold_media_fake_sector_write
-#define backend_barrier cold_media_fake_barrier
-#define backend_reset cold_media_fake_backend_reset
-#elif defined(COLD_MEDIA_RPI4_SD)
+#if   defined(COLD_MEDIA_RPI4_SD)
 cold_media_status_t rpi4_sd_probe(uint64_t *, int *, uint64_t);
 cold_media_status_t rpi4_sd_sector_read(uint64_t, uint8_t *, uint64_t);
 cold_media_status_t rpi4_sd_sector_write(
@@ -85,9 +67,6 @@ static cold_media_status_t backend_barrier(uint64_t deadline)
     (void)deadline;
     return COLD_MEDIA_DISABLED;
 }
-static void backend_reset(void)
-{
-}
 #endif
 
 static cold_media_diag_t g_diag;
@@ -109,8 +88,6 @@ static void diag_set(cold_media_phase_t phase, cold_media_status_t status,
     g_diag.physical_lba = lba;
     g_diag.completed_sectors = completed;
     g_diag.mutation_submitted = submitted;
-    runtime_stats_set(RT_COUNT_MEDIA_PHASE, (uint64_t)phase);
-    runtime_stats_set(RT_COUNT_MEDIA_STATUS, (uint64_t)(int64_t)status);
 }
 
 static int bytes_zero(const uint8_t *bytes, uint64_t len)
@@ -251,7 +228,6 @@ cold_media_status_t cold_media_read(cold_media_phase_t phase,
     uint64_t done = 0;
     uint64_t sectors = 0;
     uint64_t last_lba = 0;
-    uint64_t start = runtime_counter_now();
     while (done < len) {
         uint64_t lba, within, available;
         if (deadline_expired(deadline)) {
@@ -274,10 +250,6 @@ cold_media_status_t cold_media_read(cold_media_phase_t phase,
     g_owner = 0;
     if (status != COLD_MEDIA_OK)
         g_reset_required = 1;
-    uint64_t end = runtime_counter_now();
-    runtime_stats_record(
-        RT_PHASE_MEDIA_READ, end >= start ? end - start : 0);
-    runtime_stats_count(RT_COUNT_MEDIA_BYTES_READ, done);
     diag_set(phase, status, logical_off, last_lba, sectors, 0);
     return status;
 }
@@ -312,7 +284,6 @@ cold_media_status_t cold_media_write(cold_media_phase_t phase,
     uint64_t sectors = 0;
     uint64_t submitted_total = 0;
     uint64_t last_lba = 0;
-    uint64_t start = runtime_counter_now();
     while (done < len) {
         uint64_t lba, within, available;
         if (deadline_expired(deadline)) {
@@ -345,10 +316,6 @@ cold_media_status_t cold_media_write(cold_media_phase_t phase,
         sectors++;
     }
     g_owner = 0;
-    uint64_t end = runtime_counter_now();
-    runtime_stats_record(
-        RT_PHASE_MEDIA_WRITE, end >= start ? end - start : 0);
-    runtime_stats_count(RT_COUNT_MEDIA_BYTES_WRITTEN, done);
     diag_set(phase, status, logical_off, last_lba, sectors, submitted_total);
     return status;
 }
@@ -372,14 +339,10 @@ cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
         return COLD_MEDIA_TIMEOUT;
     }
     g_owner = 1;
-    uint64_t start = runtime_counter_now();
     status = backend_barrier(deadline);
-    uint64_t end = runtime_counter_now();
     g_owner = 0;
     if (status != COLD_MEDIA_OK)
         g_reset_required = 1;
-    runtime_stats_record(
-        RT_PHASE_MEDIA_BARRIER, end >= start ? end - start : 0);
     diag_set(phase, status, 0, 0, 0, 0);
     return status;
 }
@@ -391,12 +354,9 @@ cold_media_status_t cold_media_load_window(uint64_t deadline)
     cold_media_status_t status = initialize(deadline);
     if (status != COLD_MEDIA_OK)
         return status;
-    uint64_t start = runtime_counter_now();
     status = cold_media_read(
         COLD_MEDIA_PHASE_BOOT_LOAD, 0,
         (void *)(uintptr_t)COLD_BASE, COLD_SIZE, deadline);
-    uint64_t end = runtime_counter_now();
-    runtime_stats_record_boot_load(end >= start ? end - start : 0);
     if (status == COLD_MEDIA_OK)
         g_window_loaded = 1;
     return status;
@@ -407,28 +367,8 @@ int cold_media_active(void)
     return g_active;
 }
 
-const cold_media_diag_t *cold_media_last_diag(void)
-{
-    return &g_diag;
-}
-
-void cold_media_reset_session(void)
-{
-    backend_reset();
-    g_initialized = 0;
-    g_active = 0;
-    g_window_loaded = 0;
-    g_read_only = 0;
-    g_owner = 0;
-    g_reset_required = 0;
 #if defined(COLD_MEDIA_RING)
-    g_ring_reset_required = 0;
-#endif
-    diag_set(COLD_MEDIA_PHASE_NONE, COLD_MEDIA_DISABLED, 0, 0, 0, 0);
-}
-
-#if defined(COLD_MEDIA_RING)
-/* Row 212 PR 1c recorder ring extent (cold_media.h). The ring shares the
+/* Row 212, recorder ring: the ring extent (cold_media.h). The ring shares the
  * backend and the owner lock with the cold store but keeps its own
  * reset-required flag: a ring fault never sets g_reset_required, so later
  * cold I/O is not refused because of it (row 212 (2): a ring failure never
@@ -469,7 +409,7 @@ cold_media_status_t cold_media_ring_load(uint8_t *window, uint64_t bytes)
     cold_media_status_t status = ring_begin(0);
     if (status != COLD_MEDIA_OK)
         return status;
-    if (bytes != (uint64_t)(I3_RING_BYTES)
+    if (bytes != (uint64_t)(LITE_RING_BYTES)
         || ring_range(0, COLD_MEDIA_RING_SECTORS) != COLD_MEDIA_OK)
         return COLD_MEDIA_UNDERSIZED;
     uint64_t total = ring_deadline(COLD_MEDIA_RING_LOAD_SECONDS), chunk = 0;
@@ -481,12 +421,8 @@ cold_media_status_t cold_media_ring_load(uint8_t *window, uint64_t bytes)
             status = COLD_MEDIA_TIMEOUT;
             break;
         }
-#if defined(COLD_MEDIA_FAKE)
-        status = cold_media_fake_ring_read(s, window + s * COLD_MEDIA_SECTOR_BYTES);
-#else
         status = backend_read(COLD_MEDIA_RING_START_LBA + s,
                               window + s * COLD_MEDIA_SECTOR_BYTES, chunk);
-#endif
         if (status != COLD_MEDIA_OK)
             break;
     }
@@ -518,15 +454,9 @@ cold_media_status_t cold_media_ring_write(const uint8_t *window, uint64_t off,
             status = COLD_MEDIA_TIMEOUT;
             break;
         }
-#if defined(COLD_MEDIA_FAKE)
-        status = cold_media_fake_ring_write(s,
-                                            window + s * COLD_MEDIA_SECTOR_BYTES,
-                                            &submitted);
-#else
         status = backend_write(COLD_MEDIA_RING_START_LBA + s,
                                window + s * COLD_MEDIA_SECTOR_BYTES,
                                chunk, &submitted);
-#endif
         if (status != COLD_MEDIA_OK) {
             if (submitted)
                 status = COLD_MEDIA_WRITE_UNKNOWN;
@@ -545,11 +475,7 @@ cold_media_status_t cold_media_ring_barrier(void)
     if (status != COLD_MEDIA_OK)
         return status;
     g_owner = 1;
-#if defined(COLD_MEDIA_FAKE)
-    status = cold_media_fake_ring_barrier();
-#else
     status = backend_barrier(ring_deadline(5));
-#endif
     g_owner = 0;
     if (status != COLD_MEDIA_OK)
         g_ring_reset_required = 1;

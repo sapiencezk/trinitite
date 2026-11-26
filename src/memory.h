@@ -13,55 +13,17 @@
 
 /*
  * C .bss (linker.ld): absolute window, NOT adjacent to the image.
- * Must not overlap Forth or the legacy cue high-RAM table. 32 MB is
- * reserved; linker.ld rejects every build whose .bss crosses BSS_TOP.
+ * Must not overlap the cue high-RAM table. 32 MB is reserved; linker.ld
+ * rejects every build whose .bss crosses BSS_TOP.
  */
 #define BSS_BASE            PLATFORM_BSS_BASE
 #define BSS_SIZE            0x02000000  /* 32 MB reserve */
 #define BSS_TOP             (BSS_BASE + BSS_SIZE)
 
-/* Core 0 C stack. The boot path fills this fixed region before entering C;
- * QEMU evidence scans it and the scheduler checks the base guard. */
+/* Core 0 C stack. The boot path (boot.s) fills this fixed region with a
+ * known pattern before entering C. */
 #define CORE0_STACK_BASE    PLATFORM_CORE0_STACK_BASE
 #define CORE0_STACK_TOP     PLATFORM_CORE0_STACK_TOP
-#define CORE0_STACK_SIZE    (CORE0_STACK_TOP - CORE0_STACK_BASE)
-#define CORE0_STACK_PATTERN 0xA55AC33CA55AC33CULL
-
-/*
- * Forth region: dictionary grows up, stacks grow down.
- * Starts at 1 MB so the kernel image (loaded at 0x80000) can grow past
- * the old 0x90000 boundary without stomping the dictionary / TIB.
- * Ends at ARENA_BASE (0x490000).
- */
-#define FORTH_BASE          PLATFORM_FORTH_BASE
-#define FORTH_SIZE          0x00390000  /* → 0x00490000 = ARENA_BASE */
-#define FORTH_TOP           (FORTH_BASE + FORTH_SIZE)
-
-#if BSS_BASE < FORTH_TOP
-#error "BSS_BASE overlaps Forth region"
-#endif
-#if CORE0_STACK_TOP > FORTH_BASE
-#error "core 0 stack overlaps kernel image"
-#endif
-#if FORTH_TOP > PLATFORM_ARENA_BASE
-#error "Forth region overlaps ARENA_BASE"
-#endif
-
-/* Forth stacks at top of region, growing down */
-#define RSTACK_TOP          (FORTH_TOP)
-#define RSTACK_SIZE         0x00010000  /* 64KB return stack */
-#define DSTACK_TOP          (RSTACK_TOP - RSTACK_SIZE)
-#define DSTACK_SIZE         0x00010000  /* 64KB data stack */
-#define DSTACK_GUARD        (DSTACK_TOP - DSTACK_SIZE)
-
-/* Dictionary grows up from FORTH_BASE */
-#define DICT_BASE           FORTH_BASE
-#define DICT_TOP            DSTACK_GUARD  /* must not cross this */
-
-/* Noun event arena: bump allocator, reset after each +poke */
-#define ARENA_BASE          PLATFORM_ARENA_BASE
-#define ARENA_SIZE          0x02000000  /* 32MB */
-#define ARENA_TOP           (ARENA_BASE + ARENA_SIZE)
 
 /*
  * Noun cell heap (split bump):
@@ -69,7 +31,7 @@
  *   SCRATCH  HEAP_SCRATCH_BASE .. HEAP_TOP  — per-slam Nock product; reset
  *                                            after each event (host ArenaHost)
  * Production: HEAP_TOP ≤ ATOM_INDEX_BASE (silent overrun stomped atom index).
- * I3_UNJETTED relocates scratch to high qemu RAM; persist still precedes
+ * LITE_UNJETTED relocates scratch to high qemu RAM; persist still precedes
  * the atom index.
  */
 #define HEAP_BASE           PLATFORM_HEAP_BASE
@@ -84,14 +46,14 @@
 #define HEAP_PERSIST_HALF   (HEAP_PERSIST_SIZE / 2)
 #define HEAP_SCRATCH_BASE   HEAP_PERSIST_TOP
 #define HEAP_SCRATCH_SIZE   (HEAP_TOP - HEAP_SCRATCH_BASE)  /* 32MB */
-#if defined(I3_UNJETTED)
+#if defined(LITE_UNJETTED)
 #if !defined(TRINITITE_PLATFORM_QEMU_VIRT)
-#error I3_UNJETTED requires PLATFORM=qemu-virt
+#error LITE_UNJETTED requires PLATFORM=qemu-virt
 #endif
 /*
- * Diagnostic image only (I3_UNJETTED requires qemu-virt). Production
+ * Diagnostic image only (LITE_UNJETTED requires qemu-virt). Production
  * persist stays put; scratch moves to high RAM past pill (0x50000000)
- * and the I3 plan blob (0x51000000). In-place 32MB scratch holds only
+ * and the plan blob (0x51000000). In-place 32MB scratch holds only
  * 1.398M 24-byte cells and crashed (`scratch exhausted`) before the
  * 2.048M diagnostic budget of the time (16x the 128,000-cell production
  * cap before 1499kernel row 385). 64MB holds 2.796M cells.
@@ -116,17 +78,10 @@
 #define ATOM_DATA_SIZE      0x00400000  /* 4MB — atom struct storage */
 #define ATOM_DATA_TOP       (ATOM_DATA_BASE + ATOM_DATA_SIZE)
 
-/*
- * Stack canary value — written to DSTACK_GUARD on boot.
- * Checked in error handler. If overwritten, stack has overflowed
- * into the dictionary.
- */
-#define STACK_CANARY        0xDEADF0C4
-
 /* Layout: heap → atom index → atom data → … → MMIO. No silent overlap.
- * I3_UNJETTED relocates scratch to high qemu RAM; persist still ends at
+ * LITE_UNJETTED relocates scratch to high qemu RAM; persist still ends at
  * HEAP_PERSIST_TOP, which stays ≤ ATOM_INDEX_BASE. */
-#if !defined(I3_UNJETTED)
+#if !defined(LITE_UNJETTED)
 #if HEAP_TOP > ATOM_INDEX_BASE
 #error "noun heap overlaps atom index (HEAP_TOP > ATOM_INDEX_BASE)"
 #endif
@@ -146,120 +101,114 @@
 #endif
 
 /*
- * Row 212 PR 1c: the recorder ring's RAM window (src/i3_ring.c), only with
- * I3_CHECKPOINT_EVERY > 0 and I3_LITE_LOG. It starts at DRAM + 0x30000000,
- * above every region below it (heap incl. the I3_UNJETTED scratch, atom
+ * Row 212 (running log and ring): the recorder ring's RAM window (src/lite_ring.c), only with
+ * LITE_CHECKPOINT_EVERY > 0 and LITE_LOG. It starts at DRAM + 0x30000000,
+ * above every region below it (heap incl. the LITE_UNJETTED scratch, atom
  * store, cold window, pill scratch, and the pill, plan and app slots, which
  * end by PILL_BASE + 0x10000000), and must end below MMIO.
  */
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 && defined(I3_LITE_LOG)
-#ifndef I3_RING_BYTES
-#define I3_RING_BYTES 67108864ULL
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0 && defined(LITE_LOG)
+#ifndef LITE_RING_BYTES
+#define LITE_RING_BYTES 67108864ULL
 #endif
-#define I3_RING_WINDOW_BASE (PLATFORM_DRAM_BASE + 0x30000000ULL)
-#define I3_RING_WINDOW_TOP  (I3_RING_WINDOW_BASE + (I3_RING_BYTES))
-#if HEAP_TOP > I3_RING_WINDOW_BASE
+#define LITE_RING_WINDOW_BASE (PLATFORM_DRAM_BASE + 0x30000000ULL)
+#define LITE_RING_WINDOW_TOP  (LITE_RING_WINDOW_BASE + (LITE_RING_BYTES))
+#if HEAP_TOP > LITE_RING_WINDOW_BASE
 #error "noun heap overlaps the ring window"
 #endif
-#if ATOM_DATA_TOP > I3_RING_WINDOW_BASE
+#if ATOM_DATA_TOP > LITE_RING_WINDOW_BASE
 #error "atom store overlaps the ring window"
 #endif
-#if (PLATFORM_COLD_BASE + 0x00800000ULL) > I3_RING_WINDOW_BASE
+#if (PLATFORM_COLD_BASE + 0x00800000ULL) > LITE_RING_WINDOW_BASE
 #error "cold window overlaps the ring window"
 #endif
-#if (PLATFORM_PILL_BASE + 0x10000000ULL) > I3_RING_WINDOW_BASE
+#if (PLATFORM_PILL_BASE + 0x10000000ULL) > LITE_RING_WINDOW_BASE
 #error "pill, plan and app slots overlap the ring window"
 #endif
-#if I3_RING_WINDOW_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
+#if LITE_RING_WINDOW_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
 #error "ring window overlaps MMIO"
 #endif
 #endif
 
 /*
- * Row 221 (row 212 (c)): the code region. Only with I3_CHECKPOINT_EVERY > 0
- * and I3_LITE_LOG (the row 212 flags, off by default). At boot the host cues
+ * Row 221 (row 212 (c)): the code region. Only with LITE_CHECKPOINT_EVERY > 0
+ * and LITE_LOG (the row 212 flags, off by default). At boot the host cues
  * the pill's kernel and runs the kick into this fixed region once, with the
  * poke and peek formulas. Nothing writes to it after that, and no persist
  * flip or reset touches it. If the build overflows it, boot halts with
- * `I3H terminal=code-region`; it never spills into a persist half.
+ * `LITEH terminal=code-region`; it never spills into a persist half.
  */
-#if defined(I3_HOST) && defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 && defined(I3_LITE_LOG)
-#define I3_COMPACT 1
-#define I3_CODE_BASE (PLATFORM_DRAM_BASE + 0x0D000000ULL)
-#define I3_CODE_SIZE 0x00C00000ULL /* 12 MiB */
-#define I3_CODE_TOP  (I3_CODE_BASE + I3_CODE_SIZE)
-#if I3_CODE_BASE < (PLATFORM_CUE_RUB_SCRATCH + 0x00020000ULL)
-#error "code region overlaps the cue rub scratch"
-#endif
-#if I3_CODE_BASE < (PLATFORM_CUE_CACHE_BASE + 0x01800000ULL)
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0 && defined(LITE_LOG)
+#define LITE_COMPACT 1
+#define LITE_CODE_BASE (PLATFORM_DRAM_BASE + 0x0D000000ULL)
+#define LITE_CODE_SIZE 0x00C00000ULL /* 12 MiB */
+#define LITE_CODE_TOP  (LITE_CODE_BASE + LITE_CODE_SIZE)
+#if LITE_CODE_BASE < (PLATFORM_CUE_CACHE_BASE + 0x01800000ULL)
 #error "code region overlaps the cue cache"
 #endif
-#if I3_CODE_BASE < BSS_TOP
+#if LITE_CODE_BASE < BSS_TOP
 #error "code region overlaps .bss"
 #endif
-#if I3_CODE_TOP > PLATFORM_PILL_BASE
+#if LITE_CODE_TOP > PLATFORM_PILL_BASE
 #error "code region overlaps the pill, plan and app slots"
 #endif
-#if I3_CODE_TOP > I3_RING_WINDOW_BASE
+#if LITE_CODE_TOP > LITE_RING_WINDOW_BASE
 #error "code region overlaps the ring window"
 #endif
-#if I3_CODE_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
+#if LITE_CODE_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
 #error "code region overlaps MMIO"
 #endif
-#if I3_CODE_TOP > 0x100000000ULL
+#if LITE_CODE_TOP > 0x100000000ULL
 #error "code region must sit below 4 GiB (32-bit cell pointers)"
 #endif
 #endif
 
 /*
- * Row 317 (3), Q7, sized in Round 3 (Q11 B, ckpt_jam.h): the checkpoint
- * region. With I3_CHECKPOINT_EVERY > 0 only. Between the code region (or
+ * Row 317 (3), question 7, sized in row 317 round 3 (question 11 (B), ckpt_jam.h): the checkpoint
+ * region. With LITE_CHECKPOINT_EVERY > 0 only. Between the code region (or
  * .bss and the cue scratch) and the pill:
  *   +0x0000000  ckpt jam backref cache, 2^19 entries      12 MiB
  *   +0x0C00000  ckpt jam mug memo, 2^18 entries             4 MiB
  *   +0x1000000  ckpt jam buffer (CKPT_JAM_MAX_BYTES + cur)  5 MiB slot
  *   +0x1500000  cold.c object scratch (jam_scratch)         4 MiB
  *   +0x1900000  cold.c append scratch                       4 MiB
- * Not zeroed at boot: i3_host_boot calls ckpt_jam_reset before first use;
+ * Not zeroed at boot: lite_host_boot calls ckpt_jam_reset before first use;
  * the buffer and the scratches are written before they are read.
  */
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0
-#define I3_CKPT_JAM_BASE (PLATFORM_DRAM_BASE + 0x0E000000ULL)
-#define I3_CKPT_JAM_SIZE 0x01D00000ULL /* 29 MiB */
-#define I3_CKPT_JAM_TOP  (I3_CKPT_JAM_BASE + I3_CKPT_JAM_SIZE)
-#define I3_CKPT_JAM_MEMO_OFF 0x00C00000ULL
-#define I3_CKPT_JAM_BUF_OFF  0x01000000ULL
-#define I3_CKPT_JAM_COLD_OFF 0x01500000ULL
-#define I3_CKPT_JAM_APPEND_OFF 0x01900000ULL
-#define I3_CKPT_COLD_SCRATCH_BYTES 0x00400000ULL
-#if I3_CKPT_JAM_APPEND_OFF + I3_CKPT_COLD_SCRATCH_BYTES > I3_CKPT_JAM_SIZE
+#if defined(LITE_CHECKPOINT_EVERY) && LITE_CHECKPOINT_EVERY > 0
+#define LITE_CKPT_JAM_BASE (PLATFORM_DRAM_BASE + 0x0E000000ULL)
+#define LITE_CKPT_JAM_SIZE 0x01D00000ULL /* 29 MiB */
+#define LITE_CKPT_JAM_TOP  (LITE_CKPT_JAM_BASE + LITE_CKPT_JAM_SIZE)
+#define LITE_CKPT_JAM_MEMO_OFF 0x00C00000ULL
+#define LITE_CKPT_JAM_BUF_OFF  0x01000000ULL
+#define LITE_CKPT_JAM_COLD_OFF 0x01500000ULL
+#define LITE_CKPT_JAM_APPEND_OFF 0x01900000ULL
+#define LITE_CKPT_COLD_SCRATCH_BYTES 0x00400000ULL
+#if LITE_CKPT_JAM_APPEND_OFF + LITE_CKPT_COLD_SCRATCH_BYTES > LITE_CKPT_JAM_SIZE
 #error "checkpoint region slots exceed the region"
 #endif
-#if I3_CKPT_JAM_COLD_OFF + I3_CKPT_COLD_SCRATCH_BYTES > I3_CKPT_JAM_APPEND_OFF
+#if LITE_CKPT_JAM_COLD_OFF + LITE_CKPT_COLD_SCRATCH_BYTES > LITE_CKPT_JAM_APPEND_OFF
 #error "cold object scratch overlaps the append scratch"
 #endif
-#if I3_CKPT_JAM_BASE < BSS_TOP
+#if LITE_CKPT_JAM_BASE < BSS_TOP
 #error "checkpoint jam region overlaps .bss"
 #endif
-#if I3_CKPT_JAM_BASE < (PLATFORM_CUE_CACHE_BASE + 0x01800000ULL)
+#if LITE_CKPT_JAM_BASE < (PLATFORM_CUE_CACHE_BASE + 0x01800000ULL)
 #error "checkpoint jam region overlaps the cue cache"
 #endif
-#if I3_CKPT_JAM_BASE < (PLATFORM_CUE_RUB_SCRATCH + 0x00020000ULL)
-#error "checkpoint jam region overlaps the cue rub scratch"
-#endif
-#if defined(I3_CODE_TOP) && I3_CKPT_JAM_BASE < I3_CODE_TOP
+#if defined(LITE_CODE_TOP) && LITE_CKPT_JAM_BASE < LITE_CODE_TOP
 #error "checkpoint jam region overlaps the code region"
 #endif
-#if I3_CKPT_JAM_TOP > PLATFORM_PILL_BASE
+#if LITE_CKPT_JAM_TOP > PLATFORM_PILL_BASE
 #error "checkpoint jam region overlaps the pill, plan and app slots"
 #endif
-#if I3_CKPT_JAM_TOP > 0x100000000ULL
+#if LITE_CKPT_JAM_TOP > 0x100000000ULL
 #error "checkpoint jam region must sit below 4 GiB"
 #endif
-#if defined(I3_RING_WINDOW_BASE) && I3_CKPT_JAM_TOP > I3_RING_WINDOW_BASE && I3_CKPT_JAM_BASE < I3_RING_WINDOW_TOP
+#if defined(LITE_RING_WINDOW_BASE) && LITE_CKPT_JAM_TOP > LITE_RING_WINDOW_BASE && LITE_CKPT_JAM_BASE < LITE_RING_WINDOW_TOP
 #error "checkpoint jam region overlaps the ring window"
 #endif
-#if I3_CKPT_JAM_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
+#if LITE_CKPT_JAM_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
 #error "checkpoint jam region overlaps MMIO"
 #endif
 #endif
@@ -268,7 +217,7 @@
  * 1499kernel row 328 (d): the Tip5 walk's tables (nock.c, the
  * hash-hashable-noun jet): a memo of 2^19 slots (key, generation and pool
  * index) over a pool of 2^18 digests, and the walk's task and result
- * stacks. I3_HOST only; other builds keep small tables in .bss. Not zeroed
+ * stacks. LITE_HOST only; other builds keep small tables in .bss. Not zeroed
  * at boot: the slot table is cleared before its first use.
  *   +0x0000000  memo keys, 2^19 x 8                          4 MiB
  *   +0x0400000  memo tags, 2^19 x 8                          4 MiB
@@ -276,66 +225,30 @@
  *   +0x1200000  task stack, 2^16 x 8 (+ 2^16 kinds)        576 KiB
  *   +0x1300000  result stack, 2^16 x 4                     256 KiB
  */
-#if defined(I3_HOST)
-#define I3_TIP5_BASE (PLATFORM_DRAM_BASE + 0x28000000ULL)
-#define I3_TIP5_SIZE 0x01400000ULL /* 20 MiB */
-#define I3_TIP5_TOP  (I3_TIP5_BASE + I3_TIP5_SIZE)
-#if I3_TIP5_BASE < HEAP_TOP
+#define LITE_TIP5_BASE (PLATFORM_DRAM_BASE + 0x28000000ULL)
+#define LITE_TIP5_SIZE 0x01400000ULL /* 20 MiB */
+#define LITE_TIP5_TOP  (LITE_TIP5_BASE + LITE_TIP5_SIZE)
+#if LITE_TIP5_BASE < HEAP_TOP
 #error "tip5 region overlaps the noun heap"
 #endif
-#if I3_TIP5_BASE < (PLATFORM_PILL_BASE + 0x10000000ULL)
+#if LITE_TIP5_BASE < (PLATFORM_PILL_BASE + 0x10000000ULL)
 #error "tip5 region overlaps the pill, plan and app slots"
 #endif
-#if defined(I3_RING_WINDOW_BASE) && I3_TIP5_TOP > I3_RING_WINDOW_BASE && I3_TIP5_BASE < I3_RING_WINDOW_TOP
+#if defined(LITE_RING_WINDOW_BASE) && LITE_TIP5_TOP > LITE_RING_WINDOW_BASE && LITE_TIP5_BASE < LITE_RING_WINDOW_TOP
 #error "tip5 region overlaps the ring window"
 #endif
-#if I3_TIP5_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
+#if LITE_TIP5_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
 #error "tip5 region overlaps MMIO"
-#endif
 #endif
 
 /*
- * PILL_BASE carries either:
- *   - isolated legacy I1 PILL v2: u64 len, shape, version/pad, jam at +16; or
- *   - I2 PILL2: 256-byte integrity/RuntimeIdentity header, then bounded jam.
- * Exact I2 layout: 1499kernel/docs/I2-M2-CONTRACT.md.
+ * PILL_BASE carries the pill: u64 jam length, shape byte (2 = NockApp),
+ * 7 bytes, then the kernel jam at +16 (lite_host.c, read_pill). The plan and
+ * the application bundle follow it (lite_host.h).
  *
  * 256 MB: safely above all allocators and below MMIO (0x3F000000).
  */
 #define PILL_BASE  PLATFORM_PILL_BASE
-
-/*
- * Scratch for pill_load jam limbs. MUST NOT live in .bss under FORTH_BASE
- * (a 1MB static array there overlays the dictionary/stacks and brick the VM
- * if anything touches past the first few KB).  Place between cold store and
- * PILL_BASE.
- */
-#define PILL_SCRATCH_BASE  PLATFORM_PILL_SCRATCH_BASE
-#define PILL_SCRATCH_SIZE  0x00100000   /* 1 MB */
-#if (PILL_SCRATCH_BASE + PILL_SCRATCH_SIZE) > PILL_BASE
-#error "pill scratch overlaps PILL_BASE"
-#endif
-
-/*
- * UART receive buffer: below TIB (0xFF000). I2 uses it only after a strict
- * 56-byte incremental frame header admits an exact payload length. I1 keeps
- * the isolated legacy uart_recv_noun path.
- */
-#define UART_RXBUF_BASE  PLATFORM_UART_RXBUF_BASE
-#define UART_RXBUF_SIZE  0x00007000
-#if (UART_RXBUF_BASE + UART_RXBUF_SIZE) > (PLATFORM_DRAM_BASE + 0x000FF000ULL)
-#error "UART_RXBUF overlaps TIB"
-#endif
-
-/*
- * Phase 4 — secondary core C stacks (between atom store and PILL).
- * Grow down from TOP. Core 0 keeps the boot stack below 0x80000.
- */
-#define NCORES              PLATFORM_NCORES
-#define CORE_STACK_SIZE     0x4000      /* 16 KB each */
-#define CORE1_STACK_TOP     PLATFORM_CORE1_STACK_TOP
-#define CORE2_STACK_TOP     PLATFORM_CORE2_STACK_TOP
-#define CORE3_STACK_TOP     PLATFORM_CORE3_STACK_TOP
 
 /*
  * Phase 5 — cold store (content-addressed jam blobs) at fixed PA.

@@ -1,19 +1,11 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "noun.h"
-#include "i2_admission_metrics.h"
-#include "m38_resource_wave_b_qualification.h"
-#if defined(M38_D8_WAVE_B_B0)
-#include "m38_resource_b0_observability.h"
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-#include "m38_resource_b3_observability.h"
-#endif
 #include "memory.h"
 #include "blake3.h"
 #include "uart.h"
 #include "nock.h"
-#include "i2_admission_envelope.h"
+#include "admission_envelope.h"
 
 /*
  * Split cell heap (see memory.h):
@@ -26,44 +18,18 @@ static uint8_t *persist_ptr;
 static uint8_t *scratch_ptr;
 static int      heap_mode;     /* HEAP_MODE_PERSIST | HEAP_MODE_SCRATCH */
 static int      persist_sel;   /* 0 or 1 — active semispace */
-static uint8_t *persist_tx_saved_ptr;
-static int      persist_tx_saved_sel;
-static int      persist_tx_active;
-static int      heap_noalloc;
-static uint64_t heap_noalloc_faults;
 static int      noun_tx_live;
 static int      noun_tx_mode;
 static uint8_t *noun_tx_cell_mark;
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
 /* Row 221 code region (memory.h). code_build: persist allocations go to the
  * code region (boot only). code_end: its bump once the build is done. */
 static int      code_build;
 static int      code_overflow;
 static uint8_t *code_saved_ptr;
-static uint8_t *code_end = (uint8_t *)(uintptr_t)I3_CODE_BASE;
-#endif
-#if defined(M46_LIVE_REPLACEMENT)
-static uint64_t m46_heap_peak[2], m46_atom_peak, m46_atom_index_peak;
-static void m46_note_heap_peak(void)
-{
-    uint64_t bytes = heap_cells_used(heap_mode) * sizeof(cell_t);
-    if (bytes > m46_heap_peak[heap_mode]) m46_heap_peak[heap_mode] = bytes;
-}
-uint64_t noun_m46_heap_peak_bytes(int mode)
-{
-    return mode == HEAP_MODE_SCRATCH || mode == HEAP_MODE_PERSIST ? m46_heap_peak[mode] : 0;
-}
-uint64_t noun_m46_atom_peak_bytes(void) { return m46_atom_peak; }
-uint64_t noun_m46_atom_index_peak(void) { return m46_atom_index_peak; }
+static uint8_t *code_end = (uint8_t *)(uintptr_t)LITE_CODE_BASE;
 #endif
 
-#if defined(M38_D8_WAVE_B_B3)
-static uint64_t g_b3_persistent_cells_hwm;
-static uint64_t g_b3_scratch_cells_hwm;
-static uint64_t g_b3_atom_bytes_hwm;
-static uint64_t g_b3_atom_index_occupancy_hwm;
-static uint64_t g_b3_atom_index_probe_depth_hwm;
-#endif
 
 void noun_heap_init(void);   /* forward — also inits atom store */
 
@@ -88,20 +54,20 @@ static uint8_t *persist_base(int sel)
     return (uint8_t *)(uintptr_t)(HEAP_BASE + (uint64_t)sel * HEAP_PERSIST_HALF);
 }
 
-#if defined(I3_PERSIST_HEADROOM_CELLS)
-/* Test knob (I3_PERSIST_HEADROOM_CELLS=<cells>, off by default): cap the live
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
+/* Test knob (LITE_PERSIST_HEADROOM_CELLS=<cells>, off by default): cap the live
  * persist half at <cells> past the bump pointer when the cap is armed, so a
  * short lite log reaches the persist ceiling that a full half reaches only
- * past ~3400 steps. Armed by i3_host_boot before replay, and again by the
- * L1 probe after it cues its plan. */
+ * past ~3400 steps. Armed by lite_host_boot before replay, and again by the
+ * diagnostic driver after it cues its plan. */
 static uint8_t *persist_cap;
 void heap_persist_cap_arm(void)
 {
-    persist_cap = persist_ptr + (uint64_t)(I3_PERSIST_HEADROOM_CELLS) * sizeof(cell_t);
+    persist_cap = persist_ptr + (uint64_t)(LITE_PERSIST_HEADROOM_CELLS) * sizeof(cell_t);
 }
 
 /* Move the cap out by `cells`: test input cued into persist after the cap
- * was armed (the L1 plan) is not node state, so it must not use H. Unlike
+ * was armed (the diagnostic plan) is not node state, so it must not use H. Unlike
  * re-arming, this keeps what replay already used counted against H, so a
  * write boot after replay gets the same H for replay plus live steps as the
  * next boot gets for replay alone. */
@@ -114,11 +80,11 @@ void heap_persist_cap_extend(uint64_t cells)
 
 static uint8_t *persist_limit(int sel)
 {
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
     if (code_build)
-        return (uint8_t *)(uintptr_t)I3_CODE_TOP;
+        return (uint8_t *)(uintptr_t)LITE_CODE_TOP;
 #endif
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     if (persist_cap && sel == persist_sel && persist_cap < persist_base(sel) + HEAP_PERSIST_HALF)
         return persist_cap;
 #endif
@@ -135,8 +101,8 @@ int heap_get_mode(void)
     return heap_mode;
 }
 
-#if defined(I3_COMPACT) && defined(I3_L1_PROBE)
-/* Row 221 tests: the L1 plan is test input, cued into the bottom of scratch
+#if defined(LITE_COMPACT) && defined(LITE_PROBE)
+/* Row 221 tests: the diagnostic plan is test input, cued into the bottom of scratch
  * (a persist flip would drop it), and every reset leaves it there. */
 static uint8_t *scratch_floor;
 void heap_scratch_floor_set(void)
@@ -147,7 +113,7 @@ void heap_scratch_floor_set(void)
 
 void heap_scratch_reset(void)
 {
-#if defined(I3_COMPACT) && defined(I3_L1_PROBE)
+#if defined(LITE_COMPACT) && defined(LITE_PROBE)
     if (scratch_floor) {
         scratch_ptr = scratch_floor;
         return;
@@ -169,53 +135,12 @@ int heap_scratch_rewind(uint64_t mark)
     return 1;
 }
 
-void heap_persist_reset(void)
-{
-    g_heap_generation++;
-    persist_ptr = persist_base(persist_sel);
-}
-
-void heap_persist_flip(void)
-{
-    /* Allocate into the other half; leave the old half readable until next flip */
-    g_heap_generation++;
-    persist_sel ^= 1;
-    persist_ptr  = persist_base(persist_sel);
-}
-
-void heap_persist_begin_tx(void)
-{
-    persist_tx_saved_ptr = persist_ptr;
-    persist_tx_saved_sel = persist_sel;
-    persist_tx_active = 1;
-    heap_persist_flip();
-}
-
-void heap_persist_commit_tx(void)
-{
-    persist_tx_active = 0;
-}
-
-void heap_persist_abort_tx(void)
-{
-    if (!persist_tx_active)
-        return;
-    g_heap_generation++;
-    persist_ptr = persist_tx_saved_ptr;
-    persist_sel = persist_tx_saved_sel;
-    persist_tx_active = 0;
-}
-
 uint64_t heap_persist_selector(void)
 {
     return (uint64_t)persist_sel;
 }
 
 static void *heap_alloc(size_t bytes) {
-    if (heap_noalloc) {
-        heap_noalloc_faults++;
-        nock_crash("post-promote allocation");
-    }
     bytes = (bytes + 7) & ~(size_t)7;
     if (bytes == 0)
         bytes = 8;
@@ -231,7 +156,7 @@ static void *heap_alloc(size_t bytes) {
         p   = persist_ptr;
         top = persist_limit(persist_sel);
         if (p > top || (size_t)(top - p) < bytes) {
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
             if (code_build)
                 code_overflow = 1;
 #endif
@@ -239,24 +164,11 @@ static void *heap_alloc(size_t bytes) {
         }
         persist_ptr = p + bytes;
     }
-#if defined(M38_D8_WAVE_B_B3)
-    uint64_t used = heap_cells_used(heap_mode);
-    if (heap_mode == HEAP_MODE_SCRATCH) {
-        if (used > g_b3_scratch_cells_hwm) g_b3_scratch_cells_hwm = used;
-    } else if (used > g_b3_persistent_cells_hwm) {
-        g_b3_persistent_cells_hwm = used;
-    }
-#endif
-#if defined(M46_LIVE_REPLACEMENT)
-    m46_note_heap_peak();
-#endif
     return p;
 }
 
 static void *heap_alloc_checked(size_t bytes)
 {
-    if (heap_noalloc)
-        return 0;
     bytes = (bytes + 7) & ~(size_t)7;
     if (bytes == 0)
         bytes = 8;
@@ -272,7 +184,7 @@ static void *heap_alloc_checked(size_t bytes)
         p = persist_ptr;
         top = persist_limit(persist_sel);
         if (p > top || (size_t)(top - p) < bytes) {
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
             if (code_build)
                 code_overflow = 1;
 #endif
@@ -280,28 +192,7 @@ static void *heap_alloc_checked(size_t bytes)
         }
         persist_ptr = p + bytes;
     }
-#if defined(M38_D8_WAVE_B_B3)
-    uint64_t used = heap_cells_used(heap_mode);
-    if (heap_mode == HEAP_MODE_SCRATCH) {
-        if (used > g_b3_scratch_cells_hwm) g_b3_scratch_cells_hwm = used;
-    } else if (used > g_b3_persistent_cells_hwm) {
-        g_b3_persistent_cells_hwm = used;
-    }
-#endif
-#if defined(M46_LIVE_REPLACEMENT)
-    m46_note_heap_peak();
-#endif
     return p;
-}
-
-void heap_noalloc_begin(void)
-{
-    heap_noalloc = 1;
-}
-
-void heap_noalloc_end(void)
-{
-    heap_noalloc = 0;
 }
 
 /* ── Cells ──────────────────────────────────────────────────────────────────── */
@@ -334,177 +225,46 @@ int alloc_cell_checked(noun head, noun tail, noun *out)
 
 void cell_inc(noun n) {
     if (!noun_is_cell(n)) return;
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
     /* Row 221 (3): nothing writes the code region after the boot build. The
-     * refcount is unused on the I3 host, so its cells keep the counts they
+     * refcount is unused on the lite host, so its cells keep the counts they
      * had when the build ended. */
-    if (!code_build && cell_ptr(n) >= (uint32_t)I3_CODE_BASE
-        && cell_ptr(n) < (uint32_t)I3_CODE_TOP)
+    if (!code_build && cell_ptr(n) >= (uint32_t)LITE_CODE_BASE
+        && cell_ptr(n) < (uint32_t)LITE_CODE_TOP)
         return;
 #endif
     cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
     c->refcount++;
 }
 
-void cell_dec(noun n) {
-    if (!noun_is_cell(n)) return;
-    cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
-    if (--c->refcount == 0) {
-        cell_dec(c->head);
-        cell_dec(c->tail);
-    }
-}
-
 /* ── Deep copy (cells → current heap mode; atoms shared) ─────────────────── */
 /*
  * Open-addressed map old cell_ptr → new noun. Linear scan was O(n²) and made
- * persist_reclaim of a ~7k-cell I2 gate too slow for QEMU smoke.
+ * a copy of a few thousand cells too slow for QEMU.
  */
-#define COPY_MAP_MAX  I2_COPY_MAP_ENTRIES
+#define COPY_MAP_MAX  ENVELOPE_COPY_MAP_ENTRIES
 #define COPY_DEPTH_MAX 256u
 static uint32_t g_copy_key[COPY_MAP_MAX];
 static noun     g_copy_val[COPY_MAP_MAX];
 static uint8_t  g_copy_used[COPY_MAP_MAX];
-static int64_t  g_copy_fail_after = -1;
-#if defined(M38_D8_NATIVE)
-static int64_t  g_atom_fail_after = -1;
-#endif
 static uint64_t g_copy_entries;
 static uint64_t g_copy_entries_hwm;
-static uint64_t g_copy_mutations;
-#if defined(M38_D8_WAVE_B_B0)
-static M38B0CopyDomain g_b0_copy_domain;
-static uint64_t g_b0_copy_cells[4];
-static uint64_t g_b0_copy_passes;
-static uint64_t g_b0_copy_clear_bytes;
-static uint64_t g_b0_copy_peak_entries;
-static uint64_t g_b0_copy_peak_probe_depth;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-static M38B3CopyDomain g_b3_copy_domain;
-static uint64_t g_b3_copy_cells[4];
-static uint64_t g_b3_copy_passes;
-static uint64_t g_b3_copy_clear_bytes;
-static uint64_t g_b3_copy_peak_entries;
-static uint64_t g_b3_copy_peak_probe_depth;
-#endif
 
 static void copy_entry_inserted(void)
 {
     g_copy_entries++;
     if (g_copy_entries > g_copy_entries_hwm)
         g_copy_entries_hwm = g_copy_entries;
-    i2_admission_metrics_max(
-        &g_i2_admission_metrics.copy_cache_entries_hwm,
-        g_copy_entries);
-#if defined(M38_D8_WAVE_B_B0)
-    if (g_copy_entries > g_b0_copy_peak_entries)
-        g_b0_copy_peak_entries = g_copy_entries;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    if (g_copy_entries > g_b3_copy_peak_entries)
-        g_b3_copy_peak_entries = g_copy_entries;
-#endif
 }
 
-static void copy_probe(uint32_t probe)
-{
-    i2_admission_metrics_max(
-        &g_i2_admission_metrics.copy_probe_hwm,
-        (uint64_t)probe + 1u);
-#if defined(M38_D8_WAVE_B_B0)
-    if ((uint64_t)probe + 1u > g_b0_copy_peak_probe_depth)
-        g_b0_copy_peak_probe_depth = (uint64_t)probe + 1u;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    if ((uint64_t)probe + 1u > g_b3_copy_peak_probe_depth)
-        g_b3_copy_peak_probe_depth = (uint64_t)probe + 1u;
-#endif
-}
 
 static void copy_map_clear(void)
 {
     for (uint32_t i = 0; i < COPY_MAP_MAX; i++)
         g_copy_used[i] = 0;
     g_copy_entries = 0;
-    g_i2_admission_metrics.copy_passes++;
-    g_i2_admission_metrics.copy_clear_count++;
-    g_i2_admission_metrics.copy_clear_bytes += sizeof g_copy_used;
-#if defined(M38_D8_WAVE_B_B0)
-    g_b0_copy_passes++;
-    g_b0_copy_clear_bytes += sizeof g_copy_used;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    g_b3_copy_passes++;
-    g_b3_copy_clear_bytes += sizeof g_copy_used;
-#endif
 }
 
-#if defined(M38_D8_WAVE_B_B0)
-static void b0_copy_cell_allocated(void)
-{
-    if (g_b0_copy_domain <= M38_B0_COPY_STAGED)
-        g_b0_copy_cells[g_b0_copy_domain]++;
-}
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-static void b3_copy_cell_allocated(void)
-{
-    if (g_b3_copy_domain <= M38_B3_COPY_STAGED)
-        g_b3_copy_cells[g_b3_copy_domain]++;
-}
-#endif
-
-static noun noun_copy_rec(noun n)
-{
-    if (!noun_is_cell(n))
-        return n;   /* direct / indirect atoms — store-stable */
-    uint32_t op = cell_ptr(n);
-    uint32_t h  = op * 2654435761u;
-    /* Lookup existing mapping first */
-    for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
-        copy_probe(k);
-        uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
-        if (!g_copy_used[i])
-            break;
-        if (g_copy_key[i] == op)
-            return g_copy_val[i];
-    }
-    /* Miss: copy children, then insert (children may fill map) */
-    cell_t *c = (cell_t *)(uintptr_t)op;
-    noun nh  = noun_copy_rec(c->head);
-    noun nt  = noun_copy_rec(c->tail);
-    noun neu = alloc_cell(nh, nt);
-#if defined(M38_D8_WAVE_B_B0)
-    b0_copy_cell_allocated();
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    b3_copy_cell_allocated();
-#endif
-    for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
-        copy_probe(k);
-        uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
-        if (!g_copy_used[i]) {
-            if (g_copy_entries >= I2_COPY_MAP_ADMITTED)
-                break;
-            g_copy_key[i]  = op;
-            g_copy_val[i]  = neu;
-            g_copy_used[i] = 1;
-            copy_entry_inserted();
-            return neu;
-        }
-        if (g_copy_key[i] == op)
-            return g_copy_val[i];
-    }
-    nock_crash_meme("copy map full");
-    return NOUN_ZERO;
-}
-
-noun noun_copy(noun n)
-{
-    copy_map_clear();
-    return noun_copy_rec(n);
-}
 
 /* A cell already in the live persist half is the noun we keep. Copying
  * it again would duplicate the kernel on every poke. Scratch cells, and
@@ -514,13 +274,13 @@ static int cell_in_live_persist(uint32_t ptr)
     uintptr_t p = (uintptr_t)ptr;
     uintptr_t base = (uintptr_t)persist_base(persist_sel);
     uintptr_t bump = (uintptr_t)persist_ptr;
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
     /* Row 221 (3): the copier keeps code-region cells as they are, the
      * same way it keeps cells already in the live half. */
-    if (p >= (uintptr_t)I3_CODE_BASE && p < (uintptr_t)code_end)
+    if (p >= (uintptr_t)LITE_CODE_BASE && p < (uintptr_t)code_end)
         return 1;
     if (code_build)
-        return p >= (uintptr_t)I3_CODE_BASE && p < bump;
+        return p >= (uintptr_t)LITE_CODE_BASE && p < bump;
 #endif
     return p >= base && p < bump;
 }
@@ -542,7 +302,6 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
     uint32_t op = cell_ptr(n);
     uint32_t h = op * 2654435761u;
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
-        copy_probe(k);
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
         if (!g_copy_used[i])
             break;
@@ -556,24 +315,12 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
     if (!noun_copy_checked_rec(c->head, &nh, depth + 1)
         || !noun_copy_checked_rec(c->tail, &nt, depth + 1))
         return 0;
-    if (g_copy_fail_after == 0)
-        return 0;
-    if (g_copy_fail_after > 0)
-        g_copy_fail_after--;
     if (!alloc_cell_checked(nh, nt, &neu))
         return 0;
-#if defined(M38_D8_WAVE_B_B0)
-    b0_copy_cell_allocated();
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    b3_copy_cell_allocated();
-#endif
-    g_copy_mutations++;
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
-        copy_probe(k);
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
         if (!g_copy_used[i]) {
-            if (g_copy_entries >= I2_COPY_MAP_ADMITTED)
+            if (g_copy_entries >= ENVELOPE_COPY_MAP_ADMITTED)
                 break;
             g_copy_key[i] = op;
             g_copy_val[i] = neu;
@@ -599,109 +346,9 @@ int noun_copy_checked(noun n, noun *out)
 uint64_t noun_copy_map_hwm(void) { return g_copy_entries_hwm; }
 uint64_t noun_copy_map_capacity(void) { return COPY_MAP_MAX; }
 void noun_copy_map_hwm_reset(void) { g_copy_entries_hwm = 0; }
-void noun_test_copy_mutations_reset(void) { g_copy_mutations = 0; }
-uint64_t noun_test_copy_mutations(void) { return g_copy_mutations; }
 
-void noun_test_copy_fail_after(int64_t cells)
-{
-    g_copy_fail_after = cells;
-}
 
-#if defined(M38_D8_WAVE_B_B0)
-void noun_b0_copy_metrics_reset(void)
-{
-    g_b0_copy_domain = M38_B0_COPY_NONE;
-    for (uint32_t i = 0; i < 4; i++) g_b0_copy_cells[i] = 0;
-    g_b0_copy_passes = 0;
-    g_b0_copy_clear_bytes = 0;
-    g_b0_copy_peak_entries = 0;
-    g_b0_copy_peak_probe_depth = 0;
-}
 
-void noun_b0_copy_domain_set(M38B0CopyDomain domain)
-{
-    g_b0_copy_domain = domain <= M38_B0_COPY_STAGED ? domain : M38_B0_COPY_NONE;
-}
-
-uint64_t noun_b0_copy_cells(M38B0CopyDomain domain)
-{
-    return domain <= M38_B0_COPY_STAGED ? g_b0_copy_cells[domain] : 0;
-}
-
-uint64_t noun_b0_copy_passes(void) { return g_b0_copy_passes; }
-uint64_t noun_b0_copy_clear_bytes(void) { return g_b0_copy_clear_bytes; }
-uint64_t noun_b0_copy_peak_entries(void) { return g_b0_copy_peak_entries; }
-uint64_t noun_b0_copy_peak_probe_depth(void) { return g_b0_copy_peak_probe_depth; }
-#endif
-
-#if defined(M38_D8_WAVE_B_B3)
-void noun_b3_metrics_reset(void)
-{
-    g_b3_copy_domain = M38_B3_COPY_NONE;
-    for (uint32_t i = 0; i < 4; i++) g_b3_copy_cells[i] = 0;
-    g_b3_copy_passes = 0;
-    g_b3_copy_clear_bytes = 0;
-    g_b3_copy_peak_entries = 0;
-    g_b3_copy_peak_probe_depth = 0;
-    g_b3_persistent_cells_hwm = heap_cells_used(HEAP_MODE_PERSIST);
-    g_b3_scratch_cells_hwm = heap_cells_used(HEAP_MODE_SCRATCH);
-    g_b3_atom_bytes_hwm = atom_store_bytes_used();
-    g_b3_atom_index_occupancy_hwm = atom_store_index_occupancy();
-    g_b3_atom_index_probe_depth_hwm = atom_store_probe_hwm();
-}
-
-void noun_b3_metrics_begin_row(void)
-{
-    g_b3_copy_domain = M38_B3_COPY_NONE;
-    for (uint32_t i = 0; i < 4; i++) g_b3_copy_cells[i] = 0;
-    g_b3_copy_passes = 0;
-    g_b3_copy_clear_bytes = 0;
-    g_b3_copy_peak_entries = 0;
-    g_b3_copy_peak_probe_depth = 0;
-}
-
-void noun_b3_copy_domain_set(M38B3CopyDomain domain)
-{
-    g_b3_copy_domain = domain <= M38_B3_COPY_STAGED ? domain : M38_B3_COPY_NONE;
-}
-
-void noun_b3_metrics_read(M38B3Metrics *out)
-{
-    if (!out) return;
-    out->persistent_cells_current = heap_cells_used(HEAP_MODE_PERSIST);
-    out->scratch_cells_current = heap_cells_used(HEAP_MODE_SCRATCH);
-    out->persistent_cells_hwm = g_b3_persistent_cells_hwm;
-    out->scratch_cells_hwm = g_b3_scratch_cells_hwm;
-    out->atom_bytes_current = atom_store_bytes_used();
-    out->atom_bytes_hwm = g_b3_atom_bytes_hwm;
-    out->atom_index_occupancy_current = atom_store_index_occupancy();
-    out->atom_index_occupancy_hwm = g_b3_atom_index_occupancy_hwm;
-    out->atom_index_probe_depth_hwm = g_b3_atom_index_probe_depth_hwm;
-    out->copied_session_a_cells = g_b3_copy_cells[M38_B3_COPY_SESSION_A];
-    out->copied_session_b_cells = g_b3_copy_cells[M38_B3_COPY_SESSION_B];
-    out->copied_staged_cells = g_b3_copy_cells[M38_B3_COPY_STAGED];
-    out->copy_map_passes = g_b3_copy_passes;
-    out->copy_map_clear_bytes = g_b3_copy_clear_bytes;
-    out->copy_map_peak_entries = g_b3_copy_peak_entries;
-    out->copy_map_peak_probe_depth = g_b3_copy_peak_probe_depth;
-}
-#endif
-
-#if defined(M38_D8_NATIVE)
-void noun_test_atom_fail_after(int64_t atoms)
-{
-    g_atom_fail_after = atoms;
-}
-#endif
-
-noun noun_persist(noun n)
-{
-    int old = heap_mode;
-    heap_mode = HEAP_MODE_PERSIST;
-    noun p = noun_copy(n);
-    heap_mode = old;
-    return p;
-}
 
 /* ── Atom store ──────────────────────────────────────────────────────────────
  *
@@ -728,25 +375,11 @@ static uint32_t atom_tx_slot_count;
 static uint64_t atom_index_occupancy;
 static uint64_t atom_probe_hwm;
 
-#if defined(M38_D8_WAVE_B_B3)
-static void b3_note_atom_hwm(void)
-{
-    uint64_t bytes = atom_store_bytes_used();
-    if (bytes > g_b3_atom_bytes_hwm) g_b3_atom_bytes_hwm = bytes;
-    if (atom_index_occupancy > g_b3_atom_index_occupancy_hwm)
-        g_b3_atom_index_occupancy_hwm = atom_index_occupancy;
-    if (atom_probe_hwm > g_b3_atom_index_probe_depth_hwm)
-        g_b3_atom_index_probe_depth_hwm = atom_probe_hwm;
-}
-#endif
 
 static void atom_note_probes(uint64_t probes)
 {
     if (probes > atom_probe_hwm) {
         atom_probe_hwm = probes;
-#if defined(M38_D8_WAVE_B_B3)
-        b3_note_atom_hwm();
-#endif
     }
 }
 
@@ -783,8 +416,6 @@ atom_t *atom_store_get(uint64_t hash62) {
 
 static atom_t *atom_store_alloc_checked(uint64_t size_limbs)
 {
-    if (heap_noalloc)
-        return 0;
     size_t bytes = ((sizeof(atom_t) + size_limbs * sizeof(uint64_t)) + 7)
                  & ~(size_t)7;
     if (bytes == 0)
@@ -794,13 +425,6 @@ static atom_t *atom_store_alloc_checked(uint64_t size_limbs)
     if (p > top || (size_t)(top - p) < bytes)
         return 0;
     atom_data_ptr = p + bytes;
-#if defined(M46_LIVE_REPLACEMENT)
-    uint64_t used = atom_store_bytes_used();
-    if (used > m46_atom_peak) m46_atom_peak = used;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    b3_note_atom_hwm();
-#endif
     return (atom_t *)p;
 }
 
@@ -861,12 +485,6 @@ int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
         *out = (noun)limbs[0];   /* direct(v) == v */
         return 1;
     }
-#if defined(M38_D8_NATIVE)
-    if (g_atom_fail_after == 0)
-        return 0;
-    if (g_atom_fail_after > 0)
-        g_atom_fail_after--;
-#endif
 
     /* Compute canonical byte length (trim trailing zero bytes of last limb) */
     size_t byte_len = (size - 1) * 8 + last_limb_bytes(limbs[size - 1]);
@@ -925,12 +543,6 @@ int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
     idx[empty].hash62 = hash62;
     idx[empty].ptr = a;
     atom_index_occupancy++;
-#if defined(M46_LIVE_REPLACEMENT)
-    if (atom_index_occupancy > m46_atom_index_peak) m46_atom_index_peak = atom_index_occupancy;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    b3_note_atom_hwm();
-#endif
     if (noun_tx_live) {
         if (atom_tx_slot_count >= ATOM_INDEX_SLOTS) {
             idx[empty].hash62 = 0;
@@ -1044,24 +656,9 @@ uint64_t atom_store_bytes_used(void)
     return (uint64_t)(atom_data_ptr - (uint8_t *)(uintptr_t)ATOM_DATA_BASE);
 }
 
-uint64_t atom_store_capacity_bytes(void)
-{
-    return ATOM_DATA_SIZE;
-}
-
 uint64_t atom_store_index_occupancy(void)
 {
     return atom_index_occupancy;
-}
-
-uint64_t atom_store_index_capacity(void)
-{
-    return ATOM_INDEX_SLOTS;
-}
-
-uint64_t atom_store_probe_hwm(void)
-{
-    return atom_probe_hwm;
 }
 
 /* ── cord_from_bytes ─────────────────────────────────────────────────────────
@@ -1133,12 +730,8 @@ void noun_heap_init(void) {
     g_heap_generation++;
     persist_sel = 0;
     persist_ptr = persist_base(0);
-    persist_tx_active = 0;
-    heap_noalloc = 0;
-    heap_noalloc_faults = 0;
     noun_tx_live = 0;
     atom_tx_slot_count = 0;
-    g_copy_mutations = 0;
     scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
     heap_mode   = HEAP_MODE_PERSIST;  /* pill load / cold boot into persist */
     atom_store_init();
@@ -1164,110 +757,7 @@ int noun_eq(noun a, noun b) {
     return 0;
 }
 
-/* ── pill_load ───────────────────────────────────────────────────────────── */
-
-/*
- * PILL format v2:
- *   bytes  0-7:   uint64_t (LE) = byte count of jam data
- *   byte   8:     kernel shape  (0=Arvo, 1=Shrine)
- *   bytes  9-12:  uint32_t (LE) version (0 = unversioned)
- *   bytes 13-15:  reserved
- *   bytes  16+:   raw jam bytes (16-byte aligned)
- *
- * Static scratch avoids stack overflow for large pills (~1MB limit).
- */
-#define PILL_MAX_BYTES  PILL_SCRATCH_SIZE
-#define PILL_MAX_LIMBS  (PILL_MAX_BYTES / 8U)
-
-int noun_pill_shape = 0;       /* 0=Arvo, 1=Shrine; set by pill_load */
-uint32_t noun_pill_version = 0;
-
-/* Embedded pill: linked into .rodata via src/pill_embed.s (.incbin pill.bin). */
-extern uint8_t _pill_embed_start[];
-extern uint8_t _pill_embed_end[];
-
-noun pill_load(void) {
-    /*
-     * Priority 1: loader at PILL_BASE (QEMU -device loader, or the Pi
-     * firmware initramfs). Priority 2: embedded pill.bin (M12 only).
-     *
-     * I3_HOST never falls back to .rodata: the jam is at PILL_BASE.
-     *
-     * Do NOT put large scratch in .bss (overlays FORTH_BASE ~0x90000).
-     * Small pills: stack buffer. Large: high RAM at PILL_SCRATCH_BASE.
-     */
-    volatile uint8_t *q = (volatile uint8_t *)(uintptr_t)PILL_BASE;
-    uint64_t nbytes = 0;
-    int i;
-    for (i = 0; i < 8; i++)
-        nbytes |= (uint64_t)q[i] << (i * 8);
-
-    const volatile uint8_t *base;
-#if defined(I3_HOST)
-    if (nbytes == 0)
-        return 0;
-    base = q;
-#else
-    if (nbytes > 0) {
-        base = q;
-    } else {
-        base = (const volatile uint8_t *)_pill_embed_start;
-        if ((const uint8_t *)base >= _pill_embed_end)
-            return 0;
-        nbytes = 0;
-        for (i = 0; i < 8; i++)
-            nbytes |= (uint64_t)base[i] << (i * 8);
-    }
-#endif
-
-    if (nbytes == 0)
-        return 0;
-    if (nbytes > PILL_MAX_BYTES) {
-        uart_puts("pill: nbytes too large\r\n");
-        return 0;
-    }
-
-    noun_pill_shape = (int)base[8];
-    noun_pill_version = (uint32_t)base[9]
-                      | ((uint32_t)base[10] << 8)
-                      | ((uint32_t)base[11] << 16)
-                      | ((uint32_t)base[12] << 24);
-
-    uint64_t nlimbs = (nbytes + 7) / 8;
-    if (nlimbs == 0)
-        nlimbs = 1;
-    if (nlimbs > PILL_MAX_LIMBS)
-        nlimbs = PILL_MAX_LIMBS;
-
-    uint64_t limbs_local[64];
-    uint64_t *limbs;
-    if (nlimbs <= 64) {
-        limbs = limbs_local;
-    } else {
-        limbs = (uint64_t *)(uintptr_t)PILL_SCRATCH_BASE;
-    }
-
-    {
-        uint8_t *dst = (uint8_t *)limbs;
-        uint64_t copy = nbytes;
-        uint64_t j;
-        if (copy > nlimbs * 8)
-            copy = nlimbs * 8;
-        for (j = 0; j < copy; j++)
-            dst[j] = base[16 + j];
-        for (j = copy; j < nlimbs * 8; j++)
-            dst[j] = 0;
-    }
-
-    {
-        uint64_t sig = nlimbs;
-        while (sig > 1 && limbs[sig - 1] == 0)
-            sig--;
-        return make_atom(limbs, sig);
-    }
-}
-
-#if defined(I3_COMPACT)
+#if defined(LITE_COMPACT)
 /* ── Row 221 (row 212 (c)): code region, persist flip, atom store rebuild ── */
 
 /* Boot only: persist allocations go to the code region until heap_code_end.
@@ -1276,7 +766,7 @@ noun pill_load(void) {
 void heap_code_begin(void)
 {
     code_saved_ptr = persist_ptr;
-    persist_ptr = (uint8_t *)(uintptr_t)I3_CODE_BASE;
+    persist_ptr = (uint8_t *)(uintptr_t)LITE_CODE_BASE;
     code_overflow = 0;
     code_build = 1;
 }
@@ -1293,12 +783,12 @@ int heap_code_overflowed(void) { return code_overflow; }
 uint64_t heap_code_bytes(void)
 {
     uint8_t *end = code_build ? persist_ptr : code_end;
-    return (uint64_t)(end - (uint8_t *)(uintptr_t)I3_CODE_BASE);
+    return (uint64_t)(end - (uint8_t *)(uintptr_t)LITE_CODE_BASE);
 }
 
 int heap_in_code(uint32_t ptr)
 {
-    return (uintptr_t)ptr >= (uintptr_t)I3_CODE_BASE && (uintptr_t)ptr < (uintptr_t)code_end;
+    return (uintptr_t)ptr >= (uintptr_t)LITE_CODE_BASE && (uintptr_t)ptr < (uintptr_t)code_end;
 }
 
 int heap_in_live_persist(uint32_t ptr)
@@ -1310,12 +800,12 @@ int heap_in_live_persist(uint32_t ptr)
 /* Row 221 (5): a transaction on the other persist half. Begin moves the
  * bump to the other half's base; abort puts the old half and bump back, so
  * the node keeps running on the old half; commit keeps the new half. Under
- * the I3_PERSIST_HEADROOM_CELLS test knob the cap is lifted for the copy and
+ * the LITE_PERSIST_HEADROOM_CELLS test knob the cap is lifted for the copy and
  * re-armed after the commit at the new bump (H cells of headroom again). */
 static uint8_t *cmp_saved_ptr;
 static int      cmp_saved_sel;
 static int      cmp_active;
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
 static uint8_t *cmp_saved_cap;
 #endif
 
@@ -1323,7 +813,7 @@ void heap_compact_begin(void)
 {
     cmp_saved_ptr = persist_ptr;
     cmp_saved_sel = persist_sel;
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     cmp_saved_cap = persist_cap;
     persist_cap = 0;
 #endif
@@ -1337,7 +827,7 @@ void heap_compact_commit(void)
     if (!cmp_active)
         return;
     cmp_active = 0;
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     if (cmp_saved_cap)
         heap_persist_cap_arm();
 #endif
@@ -1349,7 +839,7 @@ void heap_compact_abort(void)
         return;
     persist_ptr = cmp_saved_ptr;
     persist_sel = cmp_saved_sel;
-#if defined(I3_PERSIST_HEADROOM_CELLS)
+#if defined(LITE_PERSIST_HEADROOM_CELLS)
     persist_cap = cmp_saved_cap;
 #endif
     cmp_active = 0;
@@ -1411,18 +901,17 @@ int atom_store_rehash_ok(uint64_t hash62)
 
 /* Row 221 (6): keep every record in the boot prefix or answered live by
  * `live`, slide each kept record down in allocation order, then rebuild the
- * 65,536-slot index in place. No second copy of the store. `mid`, if set, is
- * called once halfway through the slide (test knob). Returns 0, touching
+ * 65,536-slot index in place. No second copy of the store. Returns 0, touching
  * nothing, when the index and the records disagree. */
-int atom_store_compact(int (*live)(uint64_t), void (*mid)(void), atom_compact_t *st)
+int atom_store_compact(int (*live)(uint64_t), atom_compact_t *st)
 {
     atom_index_entry_t *idx = (atom_index_entry_t *)ATOM_INDEX_BASE;
     uint8_t *src = (uint8_t *)(uintptr_t)ATOM_DATA_BASE, *dst = src, *pin = atom_pin;
-    uint64_t t0, t1, k = 0, d = 0, n = 0, half, dg = 0xCBF29CE484222325ULL;
+    uint64_t t0, t1, k = 0, d = 0, n = 0, dg = 0xCBF29CE484222325ULL;
     st->bytes_before = atom_store_bytes_used();
     st->idx_before = atom_index_occupancy;
     st->mismatch = 0;
-    if (noun_tx_live || heap_noalloc || !pin)
+    if (noun_tx_live || !pin)
         return 0;
     while (src < atom_data_ptr) {
         atom_t *a = (atom_t *)src;
@@ -1433,15 +922,12 @@ int atom_store_compact(int (*live)(uint64_t), void (*mid)(void), atom_compact_t 
     }
     if (st->mismatch)
         return 0;
-    half = n / 2;
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t0));
     src = (uint8_t *)(uintptr_t)ATOM_DATA_BASE;
     n = 0;
     while (src < atom_data_ptr) {
         atom_t *a = (atom_t *)src;
         uint64_t b = atom_rec_bytes(a);
-        if (mid && n == half)
-            mid();
         if (src < pin || live(atom_rec_hash62(a))) {
             dg = rec_digest(dg, src, b);
             if (dst != src) {

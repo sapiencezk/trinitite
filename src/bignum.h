@@ -37,34 +37,8 @@ noun bn_normalize(uint64_t *limbs, uint64_t size);
  */
 noun bn_inc(noun a);
 
-/* Maximum limbs for stack-allocated scratch buffers (64 × 64-bit = 4096 bits,
-   handles decimal strings up to ~1232 digits — well beyond BN_DECIMAL_MAX). */
+/* Maximum limbs for stack-allocated scratch buffers (64 × 64-bit = 4096 bits). */
 #define BN_MAX_LIMBS 64
-
-/* ── Decimal I/O ──────────────────────────────────────────────────────────── */
-
-/* Maximum decimal digits bn_to_decimal will ever produce. */
-#define BN_DECIMAL_MAX 512
-
-/*
- * bn_to_decimal: write decimal representation of atom `a` into `buf`.
- * Returns number of bytes written (no NUL terminator), or 0 on error.
- * `buf` must be at least BN_DECIMAL_MAX bytes.
- */
-int  bn_to_decimal(noun a, char *buf, int buflen);
-
-/*
- * bn_to_decimal_fill: write decimal digits into the global bn_decimal_buf[].
- * Returns length.  Convenience wrapper for Forth N. word.
- */
-extern char bn_decimal_buf[BN_DECIMAL_MAX];
-int  bn_to_decimal_fill(noun a);
-
-/*
- * bn_from_decimal: parse `len` ASCII decimal digits into a noun atom.
- * No sign, no prefix, no whitespace.  Returns NOUN_ZERO on empty input.
- */
-noun bn_from_decimal(const char *buf, int len);
 
 /* ── Arithmetic ───────────────────────────────────────────────────────────── */
 
@@ -82,8 +56,6 @@ int  bn_cmp(noun a, noun b);
  *   Equivalent to Hoon (met 0 a).  Returns a raw uint64_t, not a noun. */
 uint64_t bn_met(noun a);
 
-/* bn_bex: 2^k as a canonical atom noun.  Crashes if k >= BN_MAX_LIMBS*64. */
-noun bn_bex(uint64_t k);
 
 /* bn_lsh / bn_rsh: left / right shift atom a by k bits.
  *   bn_lsh crashes if the result exceeds BN_MAX_LIMBS limbs.
