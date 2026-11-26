@@ -300,7 +300,8 @@ publish-img: $(CONFIG_IMG) publish-elf FORCE
 
 # The tree's own checks. test-build builds every image configuration
 # 1499kernel builds (qemu-virt and rpi4b) and every test knob; test-qemu boots
-# the qemu-virt diagnostic image (I3_L1_PROBE=1) on the self-contained tests.
+# the qemu-virt diagnostic image (I3_L1_PROBE=1) on the self-contained tests;
+# test-tools runs tools/jam.py's self-tests.
 # The tests that need a 1499kernel checkout (tests/checkpoint_*.py,
 # tests/compaction.py, tests/recorder_ring.py, tests/ring_full_replay.py) run
 # from that checkout; see their docstrings.
@@ -321,7 +322,7 @@ TEST_BUILDS = \
 	"PLATFORM=rpi4b COLD_MEDIA=rpi4-sd" \
 	"PLATFORM=rpi4b COLD_MEDIA=rpi4-sd I3_LITE_LOG=1"
 
-test: test-build test-qemu
+test: test-build test-qemu test-tools
 
 test-build:
 	@for cfg in $(TEST_BUILDS); do \
@@ -337,6 +338,9 @@ test-qemu:
 	python3 tests/jetcheck/run.py --plant-label-only --expect-fail
 	python3 tests/tip5/run.py
 
+test-tools:
+	python3 tools/jam.py test
+
 clean:
 	python3 tools/with_build_lock.py $(MAKE) locked-clean
 locked-clean:
@@ -344,4 +348,4 @@ locked-clean:
 	rm -rf .build
 FORCE:
 .PHONY: all $(TARGET).elf $(TARGET).img locked-all locked-elf publish-elf publish-img \
-	test test-build test-qemu clean locked-clean FORCE
+	test test-build test-qemu test-tools clean locked-clean FORCE
