@@ -5,7 +5,7 @@
  * Minimal setjmp/longjmp for bare-metal AArch64 (-mgeneral-regs-only).
  *
  * jmp_buf layout (13 × 8 = 104 bytes):
- *   [0..9]   x19–x28  (callee-saved, includes Forth VM regs x24–x27)
+ *   [0..9]   x19–x28  (callee-saved)
  *   [10]     x29      (frame pointer)
  *   [11]     x30      (link register — return address)
  *   [12]     sp

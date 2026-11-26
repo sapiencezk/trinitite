@@ -172,82 +172,6 @@ noun bn_sub(noun a, noun b) {
     return bn_normalize(lr, sa);
 }
 
-/* ── Decimal I/O ──────────────────────────────────────────────────────────── */
-
-/* Divide scratch[0..sz-1] by 10 in-place; return remainder (0–9). */
-static uint64_t bn_div10_inplace(uint64_t *limbs, uint64_t sz) {
-    uint64_t rem = 0;
-    for (int64_t i = (int64_t)sz - 1; i >= 0; i--) {
-        __uint128_t cur = ((__uint128_t)rem << 64) | limbs[i];
-        limbs[i] = (uint64_t)(cur / 10);
-        rem      = (uint64_t)(cur % 10);
-    }
-    return rem;
-}
-
-int bn_to_decimal(noun a, char *buf, int buflen) {
-    uint64_t scratch[BN_MAX_LIMBS];
-    uint64_t sz = atom_limbs(a, scratch);
-
-    /* Special case: zero */
-    if (sz == 1 && scratch[0] == 0) {
-        if (buflen < 1) return 0;
-        buf[0] = '0';
-        return 1;
-    }
-
-    /* Collect digits in reverse order. */
-    char tmp[BN_DECIMAL_MAX];
-    int pos = 0;
-    while (sz > 1 || scratch[0] != 0) {
-        uint64_t rem = bn_div10_inplace(scratch, sz);
-        while (sz > 1 && scratch[sz - 1] == 0) sz--;
-        if (pos < BN_DECIMAL_MAX) tmp[pos++] = (char)('0' + rem);
-    }
-
-    if (pos > buflen) return 0;
-    for (int i = 0; i < pos; i++) buf[i] = tmp[pos - 1 - i];
-    return pos;
-}
-
-/* Global buffer used by the Forth N. word (not reentrant). */
-char bn_decimal_buf[BN_DECIMAL_MAX];
-
-int bn_to_decimal_fill(noun a) {
-    return bn_to_decimal(a, bn_decimal_buf, BN_DECIMAL_MAX);
-}
-
-/* Multiply limbs[0..sz-1] by 10 and add digit d (0–9).
-   Writes result into out[0..sz] (at most sz+1 limbs). Returns new size. */
-static uint64_t do_mul10_add(const uint64_t *limbs, uint64_t sz,
-                              uint8_t d, uint64_t *out) {
-    uint64_t carry = d;
-    for (uint64_t i = 0; i < sz; i++) {
-        __uint128_t prod = (__uint128_t)limbs[i] * 10 + carry;
-        out[i] = (uint64_t)prod;
-        carry  = (uint64_t)(prod >> 64);
-    }
-    if (carry) { out[sz] = carry; return sz + 1; }
-    return sz;
-}
-
-noun bn_from_decimal(const char *buf, int len) {
-    if (len <= 0) return NOUN_ZERO;
-
-    uint64_t scratch[BN_MAX_LIMBS + 1];
-    scratch[0] = 0;
-    uint64_t sz = 1;
-
-    for (int i = 0; i < len; i++) {
-        uint8_t d = (uint8_t)(buf[i] - '0');
-        uint64_t tmp[BN_MAX_LIMBS + 1];
-        sz = do_mul10_add(scratch, sz, d, tmp);
-        if (sz > BN_MAX_LIMBS) sz = BN_MAX_LIMBS;
-        for (uint64_t j = 0; j < sz; j++) scratch[j] = tmp[j];
-    }
-    return bn_normalize(scratch, sz);
-}
-
 /* ── bn_met ───────────────────────────────────────────────────────────────── */
 
 uint64_t bn_met(noun a) {
@@ -263,16 +187,6 @@ uint64_t bn_met(noun a) {
 }
 
 /* ── bn_bex ───────────────────────────────────────────────────────────────── */
-
-noun bn_bex(uint64_t k) {
-    uint64_t word_idx = k / 64;
-    uint64_t bit_idx  = k % 64;
-    if (word_idx >= BN_MAX_LIMBS) nock_crash("bn_bex: exponent too large");
-    uint64_t scratch[BN_MAX_LIMBS];
-    for (uint64_t i = 0; i < word_idx + 1; i++) scratch[i] = 0;
-    scratch[word_idx] = 1ULL << bit_idx;
-    return bn_normalize(scratch, word_idx + 1);
-}
 
 /* ── bn_lsh ───────────────────────────────────────────────────────────────── */
 

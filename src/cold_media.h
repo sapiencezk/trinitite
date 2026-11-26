@@ -72,8 +72,6 @@ cold_media_status_t cold_media_write(cold_media_phase_t phase,
 cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
                                        uint64_t deadline_tick);
 int cold_media_active(void);
-const cold_media_diag_t *cold_media_last_diag(void);
-void cold_media_reset_session(void);
 
 #if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 \
     && defined(I3_LITE_LOG) && (defined(COLD_MEDIA_RPI4_SD) || defined(COLD_MEDIA_FAKE))

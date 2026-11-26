@@ -7,10 +7,6 @@
 #include "tip5.h"
 #include "uart.h"
 #include "setjmp.h"
-#include "forth.h"
-#if defined(M38_D8_WAVE_B_B0)
-#include "m38_resource_b0_observability.h"
-#endif
 
 /* ── Crash recovery point ────────────────────────────────────────────────── */
 
@@ -51,7 +47,6 @@ static uint64_t g_ops_used;
 static uint64_t g_cell_budget_max;     /* 0 = unlimited */
 static uint64_t g_cells_used;
 static uint64_t g_budget_abort_reason;
-static int (*g_wall_check)(void);
 static uint64_t g_eval_stack_current;
 static uint64_t g_eval_stack_peak;
 #define NOCK_EVALUATOR_STACK_LIMIT 1024ULL
@@ -83,21 +78,6 @@ void nock_budget_finish(void)
     g_eval_stack_limit = NOCK_EVALUATOR_STACK_LIMIT;
 }
 
-#if defined(M38_D8_WAVE_B_B0)
-void nock_b0_metrics_reset(void)
-{
-    g_ops_used = 0;
-    g_cells_used = 0;
-    g_budget_abort_reason = 0;
-    g_eval_stack_current = 0;
-    g_eval_stack_peak = 0;
-}
-#endif
-
-uint64_t nock_budget_get(void)
-{
-    return g_budget_max;
-}
 
 uint64_t nock_ops_used(void)
 {
@@ -126,11 +106,6 @@ void nock_eval_stack_set_limit(uint64_t limit)
     g_eval_stack_limit = limit == 0 ? NOCK_EVALUATOR_STACK_LIMIT : limit;
 }
 
-void nock_wall_check_set(int (*fn)(void))
-{
-    g_wall_check = fn;
-}
-
 void nock_budget_tick(void)
 {
     /* Allow exactly max_ops entries: abort when the next would exceed. */
@@ -139,11 +114,6 @@ void nock_budget_tick(void)
         longjmp(nock_abort, NOCK_ABORT_BUDGET);
     }
     g_ops_used++;
-    /* Cooperative wall deadline: poll every 256 ops when armed */
-    if (g_wall_check && (g_ops_used & 0xFFu) == 0 && g_wall_check()) {
-        g_budget_abort_reason = 2;
-        longjmp(nock_abort, NOCK_ABORT_BUDGET);
-    }
 }
 
 static noun nock_alloc_cell(noun head, noun tail)
@@ -156,72 +126,6 @@ static noun nock_alloc_cell(noun head, noun tail)
     return alloc_cell(head, tail);
 }
 
-#ifdef M8_EVIDENCE
-uint64_t nock_cell_budget_selftest(void)
-{
-    volatile uint64_t failures = 0;
-    jmp_buf saved;
-    __builtin_memcpy(saved, nock_abort, sizeof saved);
-    heap_scratch_reset();
-    if (!noun_tx_begin(HEAP_MODE_SCRATCH))
-        return UINT64_MAX;
-    noun constant = alloc_cell(direct(1), direct(0));
-    noun one_cell = alloc_cell(constant, constant);
-    noun two_cells = alloc_cell(one_cell, constant);
-
-    nock_budget_set_limits(64, 1);
-    noun exact = nock(NOUN_ZERO, one_cell);
-    if (!noun_is_cell(exact) || nock_cells_used() != 1)
-        failures |= 1u;
-    nock_budget_finish();
-
-    int jumped = setjmp(nock_abort);
-    if (jumped == 0) {
-        nock_budget_set_limits(64, 1);
-        (void)nock(NOUN_ZERO, two_cells);
-        failures |= 2u;
-    } else if (jumped != NOCK_ABORT_BUDGET
-               || nock_budget_abort_reason() != 3
-               || nock_cells_used() != 1) {
-        failures |= 4u;
-    }
-    nock_budget_finish();
-
-    /* Exercise the admitted selector-3 edge itself, not only a toy N/N+1
-     * formula: exactly 20,000 wrapper allocations succeed and allocation
-     * 20,001 aborts before touching the heap. */
-    jumped = setjmp(nock_abort);
-    if (jumped == 0) {
-        noun cells = NOUN_ZERO;
-        nock_budget_set_limits(0, 20000);
-        for (uint64_t i = 0; i < 20000; i++)
-            cells = nock_alloc_cell(direct(i & 1u), cells);
-        if (!noun_is_cell(cells) || nock_cells_used() != 20000)
-            failures |= 8u;
-    } else {
-        failures |= 16u;
-    }
-    nock_budget_finish();
-
-    jumped = setjmp(nock_abort);
-    if (jumped == 0) {
-        nock_budget_set_limits(0, 20000);
-        for (uint64_t i = 0; i <= 20000; i++)
-            (void)nock_alloc_cell(NOUN_ZERO, NOUN_ZERO);
-        failures |= 32u;
-    } else if (jumped != NOCK_ABORT_BUDGET
-               || nock_budget_abort_reason() != 3
-               || nock_cells_used() != 20000) {
-        failures |= 64u;
-    }
-    nock_budget_finish();
-    __builtin_memcpy(nock_abort, saved, sizeof saved);
-    noun_tx_abort();
-    heap_set_mode(HEAP_MODE_PERSIST);
-    heap_scratch_reset();
-    return failures;
-}
-#endif
 
 /* ── Noun printer (%slog, %xray) ─────────────────────────────────────────── */
 
@@ -263,7 +167,6 @@ static void noun_print(noun n, int depth) {
 #define HINT_MEAN  0x6E61656DULL   /* %mean */
 #define HINT_MEMO  0x6F6D656DULL   /* %memo */
 #define HINT_BOUT  0x74756F62ULL   /* %bout */
-#define HINT_TAME  0x656D6174ULL   /* %tame = 't'+'a'<<8+'m'<<16+'e'<<24 */
 #define HINT_HAND  0x646E6168ULL   /* %hand */
 #define HINT_HUNK  0x6B6E7568ULL   /* %hunk */
 #define HINT_LOSE  0x65736F6CULL   /* %lose */
@@ -794,7 +697,6 @@ static int t5_rounds_ok(noun core)
 #define T5_VISIT 0
 #define T5_PAIR 1
 #define T5_ONE 2   /* hash-noun-varlen's dyck pass: emit a 1 */
-#if defined(I3_TIP5_BASE)
 #define T5_SLOT_BITS 19u
 #define T5_POOL_MAX (1u << 18)
 #define T5_STACK_MAX (1u << 16)
@@ -808,19 +710,6 @@ _Static_assert((1ULL << T5_SLOT_BITS) * 8 <= 0x0400000ULL, "tip5 keys fit");
 _Static_assert(T5_POOL_MAX * 40ULL <= 0x1200000ULL - 0x0800000ULL, "tip5 pool fits");
 _Static_assert(T5_STACK_MAX * 8ULL <= 0x0080000ULL, "tip5 task stack fits");
 _Static_assert(0x1300000ULL + T5_STACK_MAX * 4ULL <= I3_TIP5_SIZE, "tip5 region holds the stacks");
-#else
-/* Builds without I3_HOST run no 1499kernel ++digest: small tables (about
- * 10 KiB of .bss); a larger walk runs the arm as Nock. */
-#define T5_SLOT_BITS 8u
-#define T5_POOL_MAX (1u << 7)
-#define T5_STACK_MAX (1u << 8)
-static uint64_t t5_key[1u << T5_SLOT_BITS];
-static uint64_t t5_tag[1u << T5_SLOT_BITS];
-static uint64_t t5_pool[T5_POOL_MAX][TIP5_DIGEST];
-static noun t5_task[T5_STACK_MAX];
-static uint8_t t5_kind[T5_STACK_MAX];
-static uint32_t t5_done[T5_STACK_MAX];
-#endif
 #define T5_SLOTS (1u << T5_SLOT_BITS)
 #define T5_VARLEN_MAX (1u << 20)   /* nodes per hash-noun-varlen pass */
 
@@ -1199,9 +1088,7 @@ static noun jet_tip5_digest_to_atom(noun core, const wilt_t *jets, sky_fn_t sky)
  * Cord values: each char contributes 8 bits, LSB = first character.
  *   e.g. %dec = 'd' + 'e'<<8 + 'c'<<16 = 100 + 101*256 + 99*65536 = 6514020
  *
- * Dispatch priority (KERNEL / pure nock_eval op9): C hot_state only.
- * SKA nock_op9_continue: Forth dictionary (find_by_cord) first, then C.
- * Prefer C jets for production KERNEL path; Forth may shadow in REPL/SKA.
+ * Dispatch (nock_eval op 9): C hot_state only.
  */
 /*
  * %fast binding is by label *and* parent path, as NockVM's hot state
@@ -1311,14 +1198,6 @@ jet_fn_t hot_lookup(noun label) {
     return NULL;
 }
 
-uint64_t hot_reverse_label(jet_fn_t fn) {
-    for (int i = 0; hot_state[i].fn != NULL; i++) {
-        if (hot_state[i].fn == fn)
-            return hot_state[i].label_cord;
-    }
-    return 0;
-}
-
 static void hot_hit(jet_fn_t fn)
 {
     for (int i = 0; hot_state[i].fn != NULL; i++) {
@@ -1335,11 +1214,6 @@ int hot_entry_count(void)
     while (hot_state[n].fn != NULL)
         n++;
     return n;
-}
-
-uint64_t hot_entry_label(int i)
-{
-    return hot_state[i].label_cord;
 }
 
 const char *hot_entry_name(int i)
@@ -1453,7 +1327,6 @@ int fast_cold_count(void) { return g_fast_cold_n; }
 uint64_t fast_invalidations(void) { return g_fast_invalidations; }
 uint64_t fast_dups(void) { return g_fast_dups; }
 
-#if defined(I3_HOST)
 static void fast_put_u64(uint64_t n)
 {
     char b[20];
@@ -1462,14 +1335,12 @@ static void fast_put_u64(uint64_t n)
     while (k) uart_putc(b[--k]);
 }
 #define uart_put_u64 fast_put_u64
-#endif
 
 /* T1: a dropped core loses its jet silently, so say so in every build.
  * Printed on the 1st, 2nd, 4th, 8th, ... drop. */
 static void fast_drop(const char *why)
 {
     g_fast_cold_dropped++;
-#if defined(I3_HOST)
     if ((g_fast_cold_dropped & (g_fast_cold_dropped - 1)) == 0) {
         uart_puts("I3H fast_cold_dropped n=");
         uart_put_u64(g_fast_cold_dropped);
@@ -1477,9 +1348,6 @@ static void fast_drop(const char *why)
         uart_puts(why);
         uart_puts("\r\n");
     }
-#else
-    (void)why;
-#endif
 }
 
 /* T3: the cold/hot tables hold battery and chum pointers. Scratch cells are
@@ -1734,7 +1602,6 @@ static void fast_register(noun core, noun clue)
          * unjetted, and the refusal is counted (reason=dup). */
         if (g_fast_reg[i].hot == h) {
             g_fast_dups++;
-#if defined(I3_HOST)
             if ((g_fast_dups & (g_fast_dups - 1)) == 0) {
                 uart_puts("I3H fast_dup label=");
                 uart_puts(hot_state[h].name);
@@ -1742,7 +1609,6 @@ static void fast_register(noun core, noun clue)
                 uart_put_u64(g_fast_dups);
                 uart_puts("\r\n");
             }
-#endif
             fast_drop("dup");
             return;
         }
@@ -2029,26 +1895,6 @@ noun slot(noun axis, noun subject) {
 
 /* ── Nock eval ───────────────────────────────────────────────────────────── */
 
-/* ── %tame helper (noinline to isolate register allocation from nock_eval) ── */
-
-static void __attribute__((noinline)) tame_compile(noun clue) {
-    cell_t *tc = (cell_t *)(uintptr_t)cell_ptr(clue);
-    noun label = tc->head;
-    noun src   = tc->tail;
-    char buf[512];
-    size_t len = cord_to_cstr(src, buf, sizeof(buf) - 1);
-    if (len > 0) {
-        dict_entry_t *before = dict_get_latest();
-        forth_eval_string(buf, len);
-        dict_entry_t *after = dict_get_latest();
-        if (after == before)
-            nock_crash("%tame: source did not define a new word");
-        if (!noun_is_direct(label) ||
-            dict_entry_name(after) != direct_val(label))
-            nock_crash("%tame: compiled word name does not match label");
-    }
-}
-
 /*
  * Internal evaluator body.  Recursive calls go through the guarded wrapper
  * below so that `jets` and `sky` are threaded through the entire computation.
@@ -2281,31 +2127,14 @@ loop:
         noun b      = hc->head;     /* hint tag */
         noun c      = hc->tail;     /* clue formula */
 
-#if defined(M38_D5_NATIVE)
-        /* M38-B diagnostic scopes use a long, opaque cord tag.  Hints are
-         * semantically inert here; only the legacy direct tags below have
-         * native side effects.  Accepting an indirect tag preserves the
-         * frozen formula while keeping this evaluator total at the boundary. */
-        uint64_t tag = noun_is_direct(b) ? direct_val(b) : UINT64_MAX;
-#else
         if (!noun_is_direct(b))
             nock_crash("op11 hint tag not direct");
         uint64_t tag = direct_val(b);
-#endif
 
         /* Evaluate clue (for side effects and/or %wild registration) */
         noun clue = nock_eval(subject, c, jets, sky);
 
         switch (tag) {
-
-        case HINT_TAME:
-            /* clue = [label source-cord]: compile Forth source into dictionary.
-             * The compiled word's name must match the label cord; crash if not.
-             * A non-cell clue is a malformed %tame hint → crash. */
-            if (!noun_is_cell(clue))
-                nock_crash("%tame: clue must be [label source-cord] cell");
-            tame_compile(clue);
-            break;
 
         case HINT_WILD:
             /* Parse $wilt clue into wild_buf; scope registrations into d */
@@ -2385,44 +2214,6 @@ static noun __attribute__((noinline)) nock_eval(noun subject, noun formula,
 
 noun nock(noun subject, noun formula) {
     return nock_eval(subject, formula, NULL, NULL);
-}
-
-noun nock_ex(noun subject, noun formula, const wilt_t *jets, sky_fn_t sky) {
-    return nock_eval(subject, formula, jets, sky);
-}
-
-noun nock_op9_continue(noun core, noun ax,
-                       const wilt_t *jets, sky_fn_t sky) {
-    /* jet check — same logic as op 9 in nock_eval */
-    if (jets != NULL) {
-        for (int i = 0; i < jets->len; i++) {
-            if (sock_match(jets->e[i].sock.cape,
-                           jets->e[i].sock.data, core)) {
-                noun label = jets->e[i].label;
-                /* Forth dict first: supports jets compiled via %tame */
-                if (noun_is_direct(label)) {
-                    dict_entry_t *fe = find_by_cord(label);
-                    if (fe != NULL)
-                        return forth_call_jet(fe, core);
-                }
-                jet_fn_t fn = hot_lookup(label);
-                if (fn != NULL) {
-                    hot_hit(fn);
-                    return fn(core, jets, sky);
-                }
-            }
-        }
-    }
-    if (noun_is_direct(ax) && direct_val(ax) == 2) {
-        jet_fn_t fn = fast_match(core);
-        if (fn != NULL) {
-            hot_hit(fn);
-            return fn(core, jets, sky);
-        }
-    }
-    /* no jet — evaluate arm as Nock formula */
-    noun arm = slot(ax, core);
-    return nock_eval(core, arm, jets, sky);
 }
 
 /* ── +mook: trace → tang (nockvm jets/nock.rs mook, flop = false) ────────── */

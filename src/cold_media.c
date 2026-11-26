@@ -85,9 +85,6 @@ static cold_media_status_t backend_barrier(uint64_t deadline)
     (void)deadline;
     return COLD_MEDIA_DISABLED;
 }
-static void backend_reset(void)
-{
-}
 #endif
 
 static cold_media_diag_t g_diag;
@@ -109,8 +106,6 @@ static void diag_set(cold_media_phase_t phase, cold_media_status_t status,
     g_diag.physical_lba = lba;
     g_diag.completed_sectors = completed;
     g_diag.mutation_submitted = submitted;
-    runtime_stats_set(RT_COUNT_MEDIA_PHASE, (uint64_t)phase);
-    runtime_stats_set(RT_COUNT_MEDIA_STATUS, (uint64_t)(int64_t)status);
 }
 
 static int bytes_zero(const uint8_t *bytes, uint64_t len)
@@ -251,7 +246,6 @@ cold_media_status_t cold_media_read(cold_media_phase_t phase,
     uint64_t done = 0;
     uint64_t sectors = 0;
     uint64_t last_lba = 0;
-    uint64_t start = runtime_counter_now();
     while (done < len) {
         uint64_t lba, within, available;
         if (deadline_expired(deadline)) {
@@ -274,10 +268,6 @@ cold_media_status_t cold_media_read(cold_media_phase_t phase,
     g_owner = 0;
     if (status != COLD_MEDIA_OK)
         g_reset_required = 1;
-    uint64_t end = runtime_counter_now();
-    runtime_stats_record(
-        RT_PHASE_MEDIA_READ, end >= start ? end - start : 0);
-    runtime_stats_count(RT_COUNT_MEDIA_BYTES_READ, done);
     diag_set(phase, status, logical_off, last_lba, sectors, 0);
     return status;
 }
@@ -312,7 +302,6 @@ cold_media_status_t cold_media_write(cold_media_phase_t phase,
     uint64_t sectors = 0;
     uint64_t submitted_total = 0;
     uint64_t last_lba = 0;
-    uint64_t start = runtime_counter_now();
     while (done < len) {
         uint64_t lba, within, available;
         if (deadline_expired(deadline)) {
@@ -345,10 +334,6 @@ cold_media_status_t cold_media_write(cold_media_phase_t phase,
         sectors++;
     }
     g_owner = 0;
-    uint64_t end = runtime_counter_now();
-    runtime_stats_record(
-        RT_PHASE_MEDIA_WRITE, end >= start ? end - start : 0);
-    runtime_stats_count(RT_COUNT_MEDIA_BYTES_WRITTEN, done);
     diag_set(phase, status, logical_off, last_lba, sectors, submitted_total);
     return status;
 }
@@ -372,14 +357,10 @@ cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
         return COLD_MEDIA_TIMEOUT;
     }
     g_owner = 1;
-    uint64_t start = runtime_counter_now();
     status = backend_barrier(deadline);
-    uint64_t end = runtime_counter_now();
     g_owner = 0;
     if (status != COLD_MEDIA_OK)
         g_reset_required = 1;
-    runtime_stats_record(
-        RT_PHASE_MEDIA_BARRIER, end >= start ? end - start : 0);
     diag_set(phase, status, 0, 0, 0, 0);
     return status;
 }
@@ -391,12 +372,9 @@ cold_media_status_t cold_media_load_window(uint64_t deadline)
     cold_media_status_t status = initialize(deadline);
     if (status != COLD_MEDIA_OK)
         return status;
-    uint64_t start = runtime_counter_now();
     status = cold_media_read(
         COLD_MEDIA_PHASE_BOOT_LOAD, 0,
         (void *)(uintptr_t)COLD_BASE, COLD_SIZE, deadline);
-    uint64_t end = runtime_counter_now();
-    runtime_stats_record_boot_load(end >= start ? end - start : 0);
     if (status == COLD_MEDIA_OK)
         g_window_loaded = 1;
     return status;
@@ -405,26 +383,6 @@ cold_media_status_t cold_media_load_window(uint64_t deadline)
 int cold_media_active(void)
 {
     return g_active;
-}
-
-const cold_media_diag_t *cold_media_last_diag(void)
-{
-    return &g_diag;
-}
-
-void cold_media_reset_session(void)
-{
-    backend_reset();
-    g_initialized = 0;
-    g_active = 0;
-    g_window_loaded = 0;
-    g_read_only = 0;
-    g_owner = 0;
-    g_reset_required = 0;
-#if defined(COLD_MEDIA_RING)
-    g_ring_reset_required = 0;
-#endif
-    diag_set(COLD_MEDIA_PHASE_NONE, COLD_MEDIA_DISABLED, 0, 0, 0, 0);
 }
 
 #if defined(COLD_MEDIA_RING)

@@ -13,55 +13,17 @@
 
 /*
  * C .bss (linker.ld): absolute window, NOT adjacent to the image.
- * Must not overlap Forth or the legacy cue high-RAM table. 32 MB is
- * reserved; linker.ld rejects every build whose .bss crosses BSS_TOP.
+ * Must not overlap the cue high-RAM table. 32 MB is reserved; linker.ld
+ * rejects every build whose .bss crosses BSS_TOP.
  */
 #define BSS_BASE            PLATFORM_BSS_BASE
 #define BSS_SIZE            0x02000000  /* 32 MB reserve */
 #define BSS_TOP             (BSS_BASE + BSS_SIZE)
 
-/* Core 0 C stack. The boot path fills this fixed region before entering C;
- * QEMU evidence scans it and the scheduler checks the base guard. */
+/* Core 0 C stack. The boot path (boot.s) fills this fixed region with a
+ * known pattern before entering C. */
 #define CORE0_STACK_BASE    PLATFORM_CORE0_STACK_BASE
 #define CORE0_STACK_TOP     PLATFORM_CORE0_STACK_TOP
-#define CORE0_STACK_SIZE    (CORE0_STACK_TOP - CORE0_STACK_BASE)
-#define CORE0_STACK_PATTERN 0xA55AC33CA55AC33CULL
-
-/*
- * Forth region: dictionary grows up, stacks grow down.
- * Starts at 1 MB so the kernel image (loaded at 0x80000) can grow past
- * the old 0x90000 boundary without stomping the dictionary / TIB.
- * Ends at ARENA_BASE (0x490000).
- */
-#define FORTH_BASE          PLATFORM_FORTH_BASE
-#define FORTH_SIZE          0x00390000  /* → 0x00490000 = ARENA_BASE */
-#define FORTH_TOP           (FORTH_BASE + FORTH_SIZE)
-
-#if BSS_BASE < FORTH_TOP
-#error "BSS_BASE overlaps Forth region"
-#endif
-#if CORE0_STACK_TOP > FORTH_BASE
-#error "core 0 stack overlaps kernel image"
-#endif
-#if FORTH_TOP > PLATFORM_ARENA_BASE
-#error "Forth region overlaps ARENA_BASE"
-#endif
-
-/* Forth stacks at top of region, growing down */
-#define RSTACK_TOP          (FORTH_TOP)
-#define RSTACK_SIZE         0x00010000  /* 64KB return stack */
-#define DSTACK_TOP          (RSTACK_TOP - RSTACK_SIZE)
-#define DSTACK_SIZE         0x00010000  /* 64KB data stack */
-#define DSTACK_GUARD        (DSTACK_TOP - DSTACK_SIZE)
-
-/* Dictionary grows up from FORTH_BASE */
-#define DICT_BASE           FORTH_BASE
-#define DICT_TOP            DSTACK_GUARD  /* must not cross this */
-
-/* Noun event arena: bump allocator, reset after each +poke */
-#define ARENA_BASE          PLATFORM_ARENA_BASE
-#define ARENA_SIZE          0x02000000  /* 32MB */
-#define ARENA_TOP           (ARENA_BASE + ARENA_SIZE)
 
 /*
  * Noun cell heap (split bump):
@@ -115,13 +77,6 @@
 #define ATOM_DATA_BASE      PLATFORM_ATOM_DATA_BASE
 #define ATOM_DATA_SIZE      0x00400000  /* 4MB — atom struct storage */
 #define ATOM_DATA_TOP       (ATOM_DATA_BASE + ATOM_DATA_SIZE)
-
-/*
- * Stack canary value — written to DSTACK_GUARD on boot.
- * Checked in error handler. If overwritten, stack has overflowed
- * into the dictionary.
- */
-#define STACK_CANARY        0xDEADF0C4
 
 /* Layout: heap → atom index → atom data → … → MMIO. No silent overlap.
  * I3_UNJETTED relocates scratch to high qemu RAM; persist still ends at
@@ -183,14 +138,11 @@
  * flip or reset touches it. If the build overflows it, boot halts with
  * `I3H terminal=code-region`; it never spills into a persist half.
  */
-#if defined(I3_HOST) && defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 && defined(I3_LITE_LOG)
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 && defined(I3_LITE_LOG)
 #define I3_COMPACT 1
 #define I3_CODE_BASE (PLATFORM_DRAM_BASE + 0x0D000000ULL)
 #define I3_CODE_SIZE 0x00C00000ULL /* 12 MiB */
 #define I3_CODE_TOP  (I3_CODE_BASE + I3_CODE_SIZE)
-#if I3_CODE_BASE < (PLATFORM_CUE_RUB_SCRATCH + 0x00020000ULL)
-#error "code region overlaps the cue rub scratch"
-#endif
 #if I3_CODE_BASE < (PLATFORM_CUE_CACHE_BASE + 0x01800000ULL)
 #error "code region overlaps the cue cache"
 #endif
@@ -244,9 +196,6 @@
 #if I3_CKPT_JAM_BASE < (PLATFORM_CUE_CACHE_BASE + 0x01800000ULL)
 #error "checkpoint jam region overlaps the cue cache"
 #endif
-#if I3_CKPT_JAM_BASE < (PLATFORM_CUE_RUB_SCRATCH + 0x00020000ULL)
-#error "checkpoint jam region overlaps the cue rub scratch"
-#endif
 #if defined(I3_CODE_TOP) && I3_CKPT_JAM_BASE < I3_CODE_TOP
 #error "checkpoint jam region overlaps the code region"
 #endif
@@ -276,7 +225,6 @@
  *   +0x1200000  task stack, 2^16 x 8 (+ 2^16 kinds)        576 KiB
  *   +0x1300000  result stack, 2^16 x 4                     256 KiB
  */
-#if defined(I3_HOST)
 #define I3_TIP5_BASE (PLATFORM_DRAM_BASE + 0x28000000ULL)
 #define I3_TIP5_SIZE 0x01400000ULL /* 20 MiB */
 #define I3_TIP5_TOP  (I3_TIP5_BASE + I3_TIP5_SIZE)
@@ -292,7 +240,6 @@
 #if I3_TIP5_TOP > (PLATFORM_DRAM_BASE + 0x3F000000ULL)
 #error "tip5 region overlaps MMIO"
 #endif
-#endif
 
 /*
  * PILL_BASE carries either:
@@ -303,39 +250,6 @@
  * 256 MB: safely above all allocators and below MMIO (0x3F000000).
  */
 #define PILL_BASE  PLATFORM_PILL_BASE
-
-/*
- * Scratch for pill_load jam limbs. MUST NOT live in .bss under FORTH_BASE
- * (a 1MB static array there overlays the dictionary/stacks and brick the VM
- * if anything touches past the first few KB).  Place between cold store and
- * PILL_BASE.
- */
-#define PILL_SCRATCH_BASE  PLATFORM_PILL_SCRATCH_BASE
-#define PILL_SCRATCH_SIZE  0x00100000   /* 1 MB */
-#if (PILL_SCRATCH_BASE + PILL_SCRATCH_SIZE) > PILL_BASE
-#error "pill scratch overlaps PILL_BASE"
-#endif
-
-/*
- * UART receive buffer: below TIB (0xFF000). I2 uses it only after a strict
- * 56-byte incremental frame header admits an exact payload length. I1 keeps
- * the isolated legacy uart_recv_noun path.
- */
-#define UART_RXBUF_BASE  PLATFORM_UART_RXBUF_BASE
-#define UART_RXBUF_SIZE  0x00007000
-#if (UART_RXBUF_BASE + UART_RXBUF_SIZE) > (PLATFORM_DRAM_BASE + 0x000FF000ULL)
-#error "UART_RXBUF overlaps TIB"
-#endif
-
-/*
- * Phase 4 — secondary core C stacks (between atom store and PILL).
- * Grow down from TOP. Core 0 keeps the boot stack below 0x80000.
- */
-#define NCORES              PLATFORM_NCORES
-#define CORE_STACK_SIZE     0x4000      /* 16 KB each */
-#define CORE1_STACK_TOP     PLATFORM_CORE1_STACK_TOP
-#define CORE2_STACK_TOP     PLATFORM_CORE2_STACK_TOP
-#define CORE3_STACK_TOP     PLATFORM_CORE3_STACK_TOP
 
 /*
  * Phase 5 — cold store (content-addressed jam blobs) at fixed PA.

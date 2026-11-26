@@ -2,13 +2,6 @@
 #include <stddef.h>
 #include "noun.h"
 #include "i2_admission_metrics.h"
-#include "m38_resource_wave_b_qualification.h"
-#if defined(M38_D8_WAVE_B_B0)
-#include "m38_resource_b0_observability.h"
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-#include "m38_resource_b3_observability.h"
-#endif
 #include "memory.h"
 #include "blake3.h"
 #include "uart.h"
@@ -26,11 +19,6 @@ static uint8_t *persist_ptr;
 static uint8_t *scratch_ptr;
 static int      heap_mode;     /* HEAP_MODE_PERSIST | HEAP_MODE_SCRATCH */
 static int      persist_sel;   /* 0 or 1 — active semispace */
-static uint8_t *persist_tx_saved_ptr;
-static int      persist_tx_saved_sel;
-static int      persist_tx_active;
-static int      heap_noalloc;
-static uint64_t heap_noalloc_faults;
 static int      noun_tx_live;
 static int      noun_tx_mode;
 static uint8_t *noun_tx_cell_mark;
@@ -42,28 +30,7 @@ static int      code_overflow;
 static uint8_t *code_saved_ptr;
 static uint8_t *code_end = (uint8_t *)(uintptr_t)I3_CODE_BASE;
 #endif
-#if defined(M46_LIVE_REPLACEMENT)
-static uint64_t m46_heap_peak[2], m46_atom_peak, m46_atom_index_peak;
-static void m46_note_heap_peak(void)
-{
-    uint64_t bytes = heap_cells_used(heap_mode) * sizeof(cell_t);
-    if (bytes > m46_heap_peak[heap_mode]) m46_heap_peak[heap_mode] = bytes;
-}
-uint64_t noun_m46_heap_peak_bytes(int mode)
-{
-    return mode == HEAP_MODE_SCRATCH || mode == HEAP_MODE_PERSIST ? m46_heap_peak[mode] : 0;
-}
-uint64_t noun_m46_atom_peak_bytes(void) { return m46_atom_peak; }
-uint64_t noun_m46_atom_index_peak(void) { return m46_atom_index_peak; }
-#endif
 
-#if defined(M38_D8_WAVE_B_B3)
-static uint64_t g_b3_persistent_cells_hwm;
-static uint64_t g_b3_scratch_cells_hwm;
-static uint64_t g_b3_atom_bytes_hwm;
-static uint64_t g_b3_atom_index_occupancy_hwm;
-static uint64_t g_b3_atom_index_probe_depth_hwm;
-#endif
 
 void noun_heap_init(void);   /* forward — also inits atom store */
 
@@ -169,53 +136,12 @@ int heap_scratch_rewind(uint64_t mark)
     return 1;
 }
 
-void heap_persist_reset(void)
-{
-    g_heap_generation++;
-    persist_ptr = persist_base(persist_sel);
-}
-
-void heap_persist_flip(void)
-{
-    /* Allocate into the other half; leave the old half readable until next flip */
-    g_heap_generation++;
-    persist_sel ^= 1;
-    persist_ptr  = persist_base(persist_sel);
-}
-
-void heap_persist_begin_tx(void)
-{
-    persist_tx_saved_ptr = persist_ptr;
-    persist_tx_saved_sel = persist_sel;
-    persist_tx_active = 1;
-    heap_persist_flip();
-}
-
-void heap_persist_commit_tx(void)
-{
-    persist_tx_active = 0;
-}
-
-void heap_persist_abort_tx(void)
-{
-    if (!persist_tx_active)
-        return;
-    g_heap_generation++;
-    persist_ptr = persist_tx_saved_ptr;
-    persist_sel = persist_tx_saved_sel;
-    persist_tx_active = 0;
-}
-
 uint64_t heap_persist_selector(void)
 {
     return (uint64_t)persist_sel;
 }
 
 static void *heap_alloc(size_t bytes) {
-    if (heap_noalloc) {
-        heap_noalloc_faults++;
-        nock_crash("post-promote allocation");
-    }
     bytes = (bytes + 7) & ~(size_t)7;
     if (bytes == 0)
         bytes = 8;
@@ -239,24 +165,11 @@ static void *heap_alloc(size_t bytes) {
         }
         persist_ptr = p + bytes;
     }
-#if defined(M38_D8_WAVE_B_B3)
-    uint64_t used = heap_cells_used(heap_mode);
-    if (heap_mode == HEAP_MODE_SCRATCH) {
-        if (used > g_b3_scratch_cells_hwm) g_b3_scratch_cells_hwm = used;
-    } else if (used > g_b3_persistent_cells_hwm) {
-        g_b3_persistent_cells_hwm = used;
-    }
-#endif
-#if defined(M46_LIVE_REPLACEMENT)
-    m46_note_heap_peak();
-#endif
     return p;
 }
 
 static void *heap_alloc_checked(size_t bytes)
 {
-    if (heap_noalloc)
-        return 0;
     bytes = (bytes + 7) & ~(size_t)7;
     if (bytes == 0)
         bytes = 8;
@@ -280,28 +193,7 @@ static void *heap_alloc_checked(size_t bytes)
         }
         persist_ptr = p + bytes;
     }
-#if defined(M38_D8_WAVE_B_B3)
-    uint64_t used = heap_cells_used(heap_mode);
-    if (heap_mode == HEAP_MODE_SCRATCH) {
-        if (used > g_b3_scratch_cells_hwm) g_b3_scratch_cells_hwm = used;
-    } else if (used > g_b3_persistent_cells_hwm) {
-        g_b3_persistent_cells_hwm = used;
-    }
-#endif
-#if defined(M46_LIVE_REPLACEMENT)
-    m46_note_heap_peak();
-#endif
     return p;
-}
-
-void heap_noalloc_begin(void)
-{
-    heap_noalloc = 1;
-}
-
-void heap_noalloc_end(void)
-{
-    heap_noalloc = 0;
 }
 
 /* ── Cells ──────────────────────────────────────────────────────────────────── */
@@ -346,15 +238,6 @@ void cell_inc(noun n) {
     c->refcount++;
 }
 
-void cell_dec(noun n) {
-    if (!noun_is_cell(n)) return;
-    cell_t *c = (cell_t *)(uintptr_t)cell_ptr(n);
-    if (--c->refcount == 0) {
-        cell_dec(c->head);
-        cell_dec(c->tail);
-    }
-}
-
 /* ── Deep copy (cells → current heap mode; atoms shared) ─────────────────── */
 /*
  * Open-addressed map old cell_ptr → new noun. Linear scan was O(n²) and made
@@ -366,28 +249,9 @@ static uint32_t g_copy_key[COPY_MAP_MAX];
 static noun     g_copy_val[COPY_MAP_MAX];
 static uint8_t  g_copy_used[COPY_MAP_MAX];
 static int64_t  g_copy_fail_after = -1;
-#if defined(M38_D8_NATIVE)
-static int64_t  g_atom_fail_after = -1;
-#endif
 static uint64_t g_copy_entries;
 static uint64_t g_copy_entries_hwm;
 static uint64_t g_copy_mutations;
-#if defined(M38_D8_WAVE_B_B0)
-static M38B0CopyDomain g_b0_copy_domain;
-static uint64_t g_b0_copy_cells[4];
-static uint64_t g_b0_copy_passes;
-static uint64_t g_b0_copy_clear_bytes;
-static uint64_t g_b0_copy_peak_entries;
-static uint64_t g_b0_copy_peak_probe_depth;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-static M38B3CopyDomain g_b3_copy_domain;
-static uint64_t g_b3_copy_cells[4];
-static uint64_t g_b3_copy_passes;
-static uint64_t g_b3_copy_clear_bytes;
-static uint64_t g_b3_copy_peak_entries;
-static uint64_t g_b3_copy_peak_probe_depth;
-#endif
 
 static void copy_entry_inserted(void)
 {
@@ -397,14 +261,6 @@ static void copy_entry_inserted(void)
     i2_admission_metrics_max(
         &g_i2_admission_metrics.copy_cache_entries_hwm,
         g_copy_entries);
-#if defined(M38_D8_WAVE_B_B0)
-    if (g_copy_entries > g_b0_copy_peak_entries)
-        g_b0_copy_peak_entries = g_copy_entries;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    if (g_copy_entries > g_b3_copy_peak_entries)
-        g_b3_copy_peak_entries = g_copy_entries;
-#endif
 }
 
 static void copy_probe(uint32_t probe)
@@ -412,14 +268,6 @@ static void copy_probe(uint32_t probe)
     i2_admission_metrics_max(
         &g_i2_admission_metrics.copy_probe_hwm,
         (uint64_t)probe + 1u);
-#if defined(M38_D8_WAVE_B_B0)
-    if ((uint64_t)probe + 1u > g_b0_copy_peak_probe_depth)
-        g_b0_copy_peak_probe_depth = (uint64_t)probe + 1u;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    if ((uint64_t)probe + 1u > g_b3_copy_peak_probe_depth)
-        g_b3_copy_peak_probe_depth = (uint64_t)probe + 1u;
-#endif
 }
 
 static void copy_map_clear(void)
@@ -430,81 +278,8 @@ static void copy_map_clear(void)
     g_i2_admission_metrics.copy_passes++;
     g_i2_admission_metrics.copy_clear_count++;
     g_i2_admission_metrics.copy_clear_bytes += sizeof g_copy_used;
-#if defined(M38_D8_WAVE_B_B0)
-    g_b0_copy_passes++;
-    g_b0_copy_clear_bytes += sizeof g_copy_used;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    g_b3_copy_passes++;
-    g_b3_copy_clear_bytes += sizeof g_copy_used;
-#endif
 }
 
-#if defined(M38_D8_WAVE_B_B0)
-static void b0_copy_cell_allocated(void)
-{
-    if (g_b0_copy_domain <= M38_B0_COPY_STAGED)
-        g_b0_copy_cells[g_b0_copy_domain]++;
-}
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-static void b3_copy_cell_allocated(void)
-{
-    if (g_b3_copy_domain <= M38_B3_COPY_STAGED)
-        g_b3_copy_cells[g_b3_copy_domain]++;
-}
-#endif
-
-static noun noun_copy_rec(noun n)
-{
-    if (!noun_is_cell(n))
-        return n;   /* direct / indirect atoms — store-stable */
-    uint32_t op = cell_ptr(n);
-    uint32_t h  = op * 2654435761u;
-    /* Lookup existing mapping first */
-    for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
-        copy_probe(k);
-        uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
-        if (!g_copy_used[i])
-            break;
-        if (g_copy_key[i] == op)
-            return g_copy_val[i];
-    }
-    /* Miss: copy children, then insert (children may fill map) */
-    cell_t *c = (cell_t *)(uintptr_t)op;
-    noun nh  = noun_copy_rec(c->head);
-    noun nt  = noun_copy_rec(c->tail);
-    noun neu = alloc_cell(nh, nt);
-#if defined(M38_D8_WAVE_B_B0)
-    b0_copy_cell_allocated();
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    b3_copy_cell_allocated();
-#endif
-    for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
-        copy_probe(k);
-        uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
-        if (!g_copy_used[i]) {
-            if (g_copy_entries >= I2_COPY_MAP_ADMITTED)
-                break;
-            g_copy_key[i]  = op;
-            g_copy_val[i]  = neu;
-            g_copy_used[i] = 1;
-            copy_entry_inserted();
-            return neu;
-        }
-        if (g_copy_key[i] == op)
-            return g_copy_val[i];
-    }
-    nock_crash_meme("copy map full");
-    return NOUN_ZERO;
-}
-
-noun noun_copy(noun n)
-{
-    copy_map_clear();
-    return noun_copy_rec(n);
-}
 
 /* A cell already in the live persist half is the noun we keep. Copying
  * it again would duplicate the kernel on every poke. Scratch cells, and
@@ -562,12 +337,6 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
         g_copy_fail_after--;
     if (!alloc_cell_checked(nh, nt, &neu))
         return 0;
-#if defined(M38_D8_WAVE_B_B0)
-    b0_copy_cell_allocated();
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    b3_copy_cell_allocated();
-#endif
     g_copy_mutations++;
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
         copy_probe(k);
@@ -599,109 +368,14 @@ int noun_copy_checked(noun n, noun *out)
 uint64_t noun_copy_map_hwm(void) { return g_copy_entries_hwm; }
 uint64_t noun_copy_map_capacity(void) { return COPY_MAP_MAX; }
 void noun_copy_map_hwm_reset(void) { g_copy_entries_hwm = 0; }
-void noun_test_copy_mutations_reset(void) { g_copy_mutations = 0; }
-uint64_t noun_test_copy_mutations(void) { return g_copy_mutations; }
 
 void noun_test_copy_fail_after(int64_t cells)
 {
     g_copy_fail_after = cells;
 }
 
-#if defined(M38_D8_WAVE_B_B0)
-void noun_b0_copy_metrics_reset(void)
-{
-    g_b0_copy_domain = M38_B0_COPY_NONE;
-    for (uint32_t i = 0; i < 4; i++) g_b0_copy_cells[i] = 0;
-    g_b0_copy_passes = 0;
-    g_b0_copy_clear_bytes = 0;
-    g_b0_copy_peak_entries = 0;
-    g_b0_copy_peak_probe_depth = 0;
-}
 
-void noun_b0_copy_domain_set(M38B0CopyDomain domain)
-{
-    g_b0_copy_domain = domain <= M38_B0_COPY_STAGED ? domain : M38_B0_COPY_NONE;
-}
 
-uint64_t noun_b0_copy_cells(M38B0CopyDomain domain)
-{
-    return domain <= M38_B0_COPY_STAGED ? g_b0_copy_cells[domain] : 0;
-}
-
-uint64_t noun_b0_copy_passes(void) { return g_b0_copy_passes; }
-uint64_t noun_b0_copy_clear_bytes(void) { return g_b0_copy_clear_bytes; }
-uint64_t noun_b0_copy_peak_entries(void) { return g_b0_copy_peak_entries; }
-uint64_t noun_b0_copy_peak_probe_depth(void) { return g_b0_copy_peak_probe_depth; }
-#endif
-
-#if defined(M38_D8_WAVE_B_B3)
-void noun_b3_metrics_reset(void)
-{
-    g_b3_copy_domain = M38_B3_COPY_NONE;
-    for (uint32_t i = 0; i < 4; i++) g_b3_copy_cells[i] = 0;
-    g_b3_copy_passes = 0;
-    g_b3_copy_clear_bytes = 0;
-    g_b3_copy_peak_entries = 0;
-    g_b3_copy_peak_probe_depth = 0;
-    g_b3_persistent_cells_hwm = heap_cells_used(HEAP_MODE_PERSIST);
-    g_b3_scratch_cells_hwm = heap_cells_used(HEAP_MODE_SCRATCH);
-    g_b3_atom_bytes_hwm = atom_store_bytes_used();
-    g_b3_atom_index_occupancy_hwm = atom_store_index_occupancy();
-    g_b3_atom_index_probe_depth_hwm = atom_store_probe_hwm();
-}
-
-void noun_b3_metrics_begin_row(void)
-{
-    g_b3_copy_domain = M38_B3_COPY_NONE;
-    for (uint32_t i = 0; i < 4; i++) g_b3_copy_cells[i] = 0;
-    g_b3_copy_passes = 0;
-    g_b3_copy_clear_bytes = 0;
-    g_b3_copy_peak_entries = 0;
-    g_b3_copy_peak_probe_depth = 0;
-}
-
-void noun_b3_copy_domain_set(M38B3CopyDomain domain)
-{
-    g_b3_copy_domain = domain <= M38_B3_COPY_STAGED ? domain : M38_B3_COPY_NONE;
-}
-
-void noun_b3_metrics_read(M38B3Metrics *out)
-{
-    if (!out) return;
-    out->persistent_cells_current = heap_cells_used(HEAP_MODE_PERSIST);
-    out->scratch_cells_current = heap_cells_used(HEAP_MODE_SCRATCH);
-    out->persistent_cells_hwm = g_b3_persistent_cells_hwm;
-    out->scratch_cells_hwm = g_b3_scratch_cells_hwm;
-    out->atom_bytes_current = atom_store_bytes_used();
-    out->atom_bytes_hwm = g_b3_atom_bytes_hwm;
-    out->atom_index_occupancy_current = atom_store_index_occupancy();
-    out->atom_index_occupancy_hwm = g_b3_atom_index_occupancy_hwm;
-    out->atom_index_probe_depth_hwm = g_b3_atom_index_probe_depth_hwm;
-    out->copied_session_a_cells = g_b3_copy_cells[M38_B3_COPY_SESSION_A];
-    out->copied_session_b_cells = g_b3_copy_cells[M38_B3_COPY_SESSION_B];
-    out->copied_staged_cells = g_b3_copy_cells[M38_B3_COPY_STAGED];
-    out->copy_map_passes = g_b3_copy_passes;
-    out->copy_map_clear_bytes = g_b3_copy_clear_bytes;
-    out->copy_map_peak_entries = g_b3_copy_peak_entries;
-    out->copy_map_peak_probe_depth = g_b3_copy_peak_probe_depth;
-}
-#endif
-
-#if defined(M38_D8_NATIVE)
-void noun_test_atom_fail_after(int64_t atoms)
-{
-    g_atom_fail_after = atoms;
-}
-#endif
-
-noun noun_persist(noun n)
-{
-    int old = heap_mode;
-    heap_mode = HEAP_MODE_PERSIST;
-    noun p = noun_copy(n);
-    heap_mode = old;
-    return p;
-}
 
 /* ── Atom store ──────────────────────────────────────────────────────────────
  *
@@ -728,25 +402,11 @@ static uint32_t atom_tx_slot_count;
 static uint64_t atom_index_occupancy;
 static uint64_t atom_probe_hwm;
 
-#if defined(M38_D8_WAVE_B_B3)
-static void b3_note_atom_hwm(void)
-{
-    uint64_t bytes = atom_store_bytes_used();
-    if (bytes > g_b3_atom_bytes_hwm) g_b3_atom_bytes_hwm = bytes;
-    if (atom_index_occupancy > g_b3_atom_index_occupancy_hwm)
-        g_b3_atom_index_occupancy_hwm = atom_index_occupancy;
-    if (atom_probe_hwm > g_b3_atom_index_probe_depth_hwm)
-        g_b3_atom_index_probe_depth_hwm = atom_probe_hwm;
-}
-#endif
 
 static void atom_note_probes(uint64_t probes)
 {
     if (probes > atom_probe_hwm) {
         atom_probe_hwm = probes;
-#if defined(M38_D8_WAVE_B_B3)
-        b3_note_atom_hwm();
-#endif
     }
 }
 
@@ -783,8 +443,6 @@ atom_t *atom_store_get(uint64_t hash62) {
 
 static atom_t *atom_store_alloc_checked(uint64_t size_limbs)
 {
-    if (heap_noalloc)
-        return 0;
     size_t bytes = ((sizeof(atom_t) + size_limbs * sizeof(uint64_t)) + 7)
                  & ~(size_t)7;
     if (bytes == 0)
@@ -794,13 +452,6 @@ static atom_t *atom_store_alloc_checked(uint64_t size_limbs)
     if (p > top || (size_t)(top - p) < bytes)
         return 0;
     atom_data_ptr = p + bytes;
-#if defined(M46_LIVE_REPLACEMENT)
-    uint64_t used = atom_store_bytes_used();
-    if (used > m46_atom_peak) m46_atom_peak = used;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    b3_note_atom_hwm();
-#endif
     return (atom_t *)p;
 }
 
@@ -861,12 +512,6 @@ int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
         *out = (noun)limbs[0];   /* direct(v) == v */
         return 1;
     }
-#if defined(M38_D8_NATIVE)
-    if (g_atom_fail_after == 0)
-        return 0;
-    if (g_atom_fail_after > 0)
-        g_atom_fail_after--;
-#endif
 
     /* Compute canonical byte length (trim trailing zero bytes of last limb) */
     size_t byte_len = (size - 1) * 8 + last_limb_bytes(limbs[size - 1]);
@@ -925,12 +570,6 @@ int make_atom_checked(const uint64_t *limbs, uint64_t size, noun *out) {
     idx[empty].hash62 = hash62;
     idx[empty].ptr = a;
     atom_index_occupancy++;
-#if defined(M46_LIVE_REPLACEMENT)
-    if (atom_index_occupancy > m46_atom_index_peak) m46_atom_index_peak = atom_index_occupancy;
-#endif
-#if defined(M38_D8_WAVE_B_B3)
-    b3_note_atom_hwm();
-#endif
     if (noun_tx_live) {
         if (atom_tx_slot_count >= ATOM_INDEX_SLOTS) {
             idx[empty].hash62 = 0;
@@ -1044,24 +683,9 @@ uint64_t atom_store_bytes_used(void)
     return (uint64_t)(atom_data_ptr - (uint8_t *)(uintptr_t)ATOM_DATA_BASE);
 }
 
-uint64_t atom_store_capacity_bytes(void)
-{
-    return ATOM_DATA_SIZE;
-}
-
 uint64_t atom_store_index_occupancy(void)
 {
     return atom_index_occupancy;
-}
-
-uint64_t atom_store_index_capacity(void)
-{
-    return ATOM_INDEX_SLOTS;
-}
-
-uint64_t atom_store_probe_hwm(void)
-{
-    return atom_probe_hwm;
 }
 
 /* ── cord_from_bytes ─────────────────────────────────────────────────────────
@@ -1133,9 +757,6 @@ void noun_heap_init(void) {
     g_heap_generation++;
     persist_sel = 0;
     persist_ptr = persist_base(0);
-    persist_tx_active = 0;
-    heap_noalloc = 0;
-    heap_noalloc_faults = 0;
     noun_tx_live = 0;
     atom_tx_slot_count = 0;
     g_copy_mutations = 0;
@@ -1162,109 +783,6 @@ int noun_eq(noun a, noun b) {
     }
 
     return 0;
-}
-
-/* ── pill_load ───────────────────────────────────────────────────────────── */
-
-/*
- * PILL format v2:
- *   bytes  0-7:   uint64_t (LE) = byte count of jam data
- *   byte   8:     kernel shape  (0=Arvo, 1=Shrine)
- *   bytes  9-12:  uint32_t (LE) version (0 = unversioned)
- *   bytes 13-15:  reserved
- *   bytes  16+:   raw jam bytes (16-byte aligned)
- *
- * Static scratch avoids stack overflow for large pills (~1MB limit).
- */
-#define PILL_MAX_BYTES  PILL_SCRATCH_SIZE
-#define PILL_MAX_LIMBS  (PILL_MAX_BYTES / 8U)
-
-int noun_pill_shape = 0;       /* 0=Arvo, 1=Shrine; set by pill_load */
-uint32_t noun_pill_version = 0;
-
-/* Embedded pill: linked into .rodata via src/pill_embed.s (.incbin pill.bin). */
-extern uint8_t _pill_embed_start[];
-extern uint8_t _pill_embed_end[];
-
-noun pill_load(void) {
-    /*
-     * Priority 1: loader at PILL_BASE (QEMU -device loader, or the Pi
-     * firmware initramfs). Priority 2: embedded pill.bin (M12 only).
-     *
-     * I3_HOST never falls back to .rodata: the jam is at PILL_BASE.
-     *
-     * Do NOT put large scratch in .bss (overlays FORTH_BASE ~0x90000).
-     * Small pills: stack buffer. Large: high RAM at PILL_SCRATCH_BASE.
-     */
-    volatile uint8_t *q = (volatile uint8_t *)(uintptr_t)PILL_BASE;
-    uint64_t nbytes = 0;
-    int i;
-    for (i = 0; i < 8; i++)
-        nbytes |= (uint64_t)q[i] << (i * 8);
-
-    const volatile uint8_t *base;
-#if defined(I3_HOST)
-    if (nbytes == 0)
-        return 0;
-    base = q;
-#else
-    if (nbytes > 0) {
-        base = q;
-    } else {
-        base = (const volatile uint8_t *)_pill_embed_start;
-        if ((const uint8_t *)base >= _pill_embed_end)
-            return 0;
-        nbytes = 0;
-        for (i = 0; i < 8; i++)
-            nbytes |= (uint64_t)base[i] << (i * 8);
-    }
-#endif
-
-    if (nbytes == 0)
-        return 0;
-    if (nbytes > PILL_MAX_BYTES) {
-        uart_puts("pill: nbytes too large\r\n");
-        return 0;
-    }
-
-    noun_pill_shape = (int)base[8];
-    noun_pill_version = (uint32_t)base[9]
-                      | ((uint32_t)base[10] << 8)
-                      | ((uint32_t)base[11] << 16)
-                      | ((uint32_t)base[12] << 24);
-
-    uint64_t nlimbs = (nbytes + 7) / 8;
-    if (nlimbs == 0)
-        nlimbs = 1;
-    if (nlimbs > PILL_MAX_LIMBS)
-        nlimbs = PILL_MAX_LIMBS;
-
-    uint64_t limbs_local[64];
-    uint64_t *limbs;
-    if (nlimbs <= 64) {
-        limbs = limbs_local;
-    } else {
-        limbs = (uint64_t *)(uintptr_t)PILL_SCRATCH_BASE;
-    }
-
-    {
-        uint8_t *dst = (uint8_t *)limbs;
-        uint64_t copy = nbytes;
-        uint64_t j;
-        if (copy > nlimbs * 8)
-            copy = nlimbs * 8;
-        for (j = 0; j < copy; j++)
-            dst[j] = base[16 + j];
-        for (j = copy; j < nlimbs * 8; j++)
-            dst[j] = 0;
-    }
-
-    {
-        uint64_t sig = nlimbs;
-        while (sig > 1 && limbs[sig - 1] == 0)
-            sig--;
-        return make_atom(limbs, sig);
-    }
 }
 
 #if defined(I3_COMPACT)
@@ -1422,7 +940,7 @@ int atom_store_compact(int (*live)(uint64_t), void (*mid)(void), atom_compact_t 
     st->bytes_before = atom_store_bytes_used();
     st->idx_before = atom_index_occupancy;
     st->mismatch = 0;
-    if (noun_tx_live || heap_noalloc || !pin)
+    if (noun_tx_live || !pin)
         return 0;
     while (src < atom_data_ptr) {
         atom_t *a = (atom_t *)src;

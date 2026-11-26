@@ -20,4 +20,3 @@ void blake3_hash(const uint8_t *input, size_t inlen, uint8_t out[32]);
 
 /* Run the official BLAKE3 test vectors (input[i] = i % 251, lengths 0, 1,
    63, 64, 65, 1024, 1025).  Returns 1 if all pass, 0 on any mismatch. */
-int blake3_selftest(void);

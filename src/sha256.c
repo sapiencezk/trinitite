@@ -107,18 +107,3 @@ void sha256_hash(const uint8_t *data, uint64_t len, uint8_t digest[32])
     sha256_ctx_t ctx;
     sha256_init(&ctx); sha256_update(&ctx, data, len); sha256_final(&ctx, digest);
 }
-
-void hmac_sha256(const uint8_t *key, uint64_t key_len,
-                 const uint8_t *data, uint64_t data_len,
-                 uint8_t digest[32])
-{
-    uint8_t block_key[64], inner[32];
-    for (uint32_t i = 0; i < 64u; i++) block_key[i] = 0;
-    if (key_len > 64u) { sha256_hash(key, key_len, block_key); key_len = 32u; }
-    else for (uint32_t i = 0; i < key_len; i++) block_key[i] = key[i];
-    for (uint32_t i = 0; i < 64u; i++) block_key[i] ^= 0x36u;
-    sha256_ctx_t ctx;
-    sha256_init(&ctx); sha256_update(&ctx, block_key, 64); sha256_update(&ctx, data, data_len); sha256_final(&ctx, inner);
-    for (uint32_t i = 0; i < 64u; i++) block_key[i] ^= (uint8_t)(0x36u ^ 0x5cu);
-    sha256_init(&ctx); sha256_update(&ctx, block_key, 64); sha256_update(&ctx, inner, 32); sha256_final(&ctx, digest);
-}
