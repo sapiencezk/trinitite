@@ -12,9 +12,6 @@
 #if defined(COLD_LITE_LOG)
 #include "i3_ring.h"
 #endif
-#if defined(I3_CKPT_TEST_REBASEFAULT)
-#include "cold_media_fake_test.h"
-#endif
 #if defined(I3_L1_PROBE)
 #include "i3_l1_probe.h"
 #endif
@@ -781,10 +778,7 @@ static void put_goof(noun goof)
  * interprets nothing (decision 164). */
 #define I3_CKPT_STATE_AXIS 27
 
-/* Bounds. Defaults are the production rule; the I3_CKPT_TEST_* knobs
- * (Makefile I3_CKPT_TEST=cells|jam|stack|wrapper, test builds only) shrink
- * one bound so a QEMU run reaches that skip leg with a real state.
- * Row 317 (3), Q7: row 212 (4)'s rule, a checkpoint is written only if its
+/* Bounds. Row 317 (3), Q7: row 212 (4)'s rule, a checkpoint is written only if its
  * cue fits the 128k-cell cue bound, in place of #10's stand-in (65,536
  * cells and jam.c's 128 KiB writer). The bound is ckpt_cue_limits: the
  * host's cue limits with at most I3_CKPT_CUE_MAX_CELLS cells and at most
@@ -793,40 +787,23 @@ static void put_goof(noun goof)
  * and the size check below only skip a state that cannot fit before it is
  * written to media. */
 #define I3_CKPT_CUE_MAX_CELLS CKPT_CUE_MAX_CELLS /* ckpt_jam.h */
-#if defined(I3_CKPT_TEST_CELLS)
-#define I3_CKPT_CELLS_MAX 8u
-#else
 #define I3_CKPT_CELLS_MAX I3_CKPT_CUE_MAX_CELLS
-#endif
-#if defined(I3_CKPT_TEST_JAM)
-#define I3_CKPT_JAM_MAX 8u
-#else
 #define I3_CKPT_JAM_MAX CKPT_JAM_MAX_BYTES
-#endif
 /* The walk's own visited set (at most half full) and stack. A pending entry
  * is a sibling left on the way down, so the stack holds at most the noun's
  * depth plus one; past I3_CUE_MAX_DEPTH the state could not cue anyway. */
 #define I3_CKPT_SET_BITS 18u
 #define I3_CKPT_SET_SIZE (1u << I3_CKPT_SET_BITS)
 #define I3_CKPT_STACK_SLOTS 65536u
-#if defined(I3_CKPT_TEST_STACK)
-#define I3_CKPT_STACK_MAX 2u
-#else
 #define I3_CKPT_STACK_MAX I3_CKPT_STACK_SLOTS
-#endif
-#if defined(I3_CKPT_TEST_WRAPPER)
-#define I3_CKPT_WRAPPER_TAG 1u
-#else
 #define I3_CKPT_WRAPPER_TAG 0u
-#endif
-/* Boot-side test knobs (row 212 PR 1b, tests/checkpoint_boot.py): the
+/* Boot-side test knobs (row 212 PR 1b; 1499kernel tools/lite_checkpoint_boot.py): the
  * writer stores a deliberately bad header for every N >= I3_CKPT_TEST_FROM
  * (default 1, i.e. all), so a flag-on boot of that log must reject it and
  * fall back (row 212 (3)). hdrshape drops the kernel-blake3 field, hdrsid
  * names a state id that is not in the store, hdrd flips one bit of D. The
  * state blob itself is written and verified as usual. */
-#if defined(I3_CKPT_TEST_HDRSHAPE) || defined(I3_CKPT_TEST_HDRSID) || defined(I3_CKPT_TEST_HDRD) \
-    || defined(I3_CKPT_TEST_CRASH)
+#if defined(I3_CKPT_TEST_HDRSHAPE) || defined(I3_CKPT_TEST_HDRSID) || defined(I3_CKPT_TEST_HDRD)
 #if !defined(I3_CKPT_TEST_FROM)
 #define I3_CKPT_TEST_FROM 1
 #endif
@@ -985,25 +962,6 @@ static const char *ckpt_cells(noun state, uint32_t *out)
     return 0;
 }
 
-#if defined(I3_CKPT_TEST_CRASH)
-/* Test knob (row 212 PR 1c, tests/recorder_ring.py crash leg): for every
- * N >= I3_CKPT_TEST_FROM the state blob and a header with one bit of D
- * flipped (a damaged write) are stored and flushed, then the node stops dead
- * before the header is verified, as a power cut between writing and
- * verifying a checkpoint would. Never returns for such N. */
-static void halt(void);
-static int ckpt_test_crash(uint64_t n)
-{
-    if (!I3_CKPT_BAD_HDR(n))
-        return 0;
-    nv_flush();
-    uart_puts("I3H ckpt test crash event=");
-    put_u64(n);
-    uart_puts("\r\nI3H terminal=test-crash\r\n");
-    halt();
-    return 1;
-}
-#endif
 
 #if defined(COLD_LITE_LOG)
 /* Row 212 (2) as amended (1499kernel #263, 5091bb19), running log, PR 1c:
@@ -1054,33 +1012,6 @@ static void compact_arm(uint64_t n, const uint8_t d[I3_DIGEST_BYTES])
     g_cmp_pending = 1;
 }
 
-#if defined(I3_CKPT_TEST_CMPBEFORE) || defined(I3_CKPT_TEST_CMPCOPY) || defined(I3_CKPT_TEST_CMPAFTER) \
-    || defined(I3_CKPT_TEST_CMPFLIP) || defined(I3_CKPT_TEST_CMPREBUILD) || defined(I3_CKPT_TEST_CMPSKIP)
-#if !defined(I3_CKPT_TEST_FROM)
-#define I3_CKPT_TEST_FROM 1
-#endif
-#define I3_CMP_TEST 1
-/* Test knobs (tests/compaction.py): the first compaction at N >= FROM stops
- * dead at one crash point (before the copy, mid-copy, after the copy, after
- * the flip, mid-rebuild), as a power cut there would; cmpskip makes that
- * copy fail instead, so the transaction aborts and the node keeps running. */
-static int g_cmp_test_done;
-static void halt(void);
-static void cmp_test_stop(const char *at)
-{
-    uart_puts("I3H compact test crash event=");
-    put_u64(g_cmp_n);
-    uart_puts(" at=");
-    uart_puts(at);
-    uart_puts("\r\nI3H terminal=test-crash\r\n");
-    halt();
-}
-static int cmp_test_now(void)
-{
-    return !g_cmp_test_done && g_cmp_n >= (uint64_t)I3_CKPT_TEST_FROM;
-}
-static void cmp_test_mid(void) { cmp_test_stop("rebuild"); }
-#endif
 
 #define CMP_VIS_BITS 17u
 #define CMP_VIS_N (1u << CMP_VIS_BITS)
@@ -1273,10 +1204,6 @@ static void compact_run(void)
     g_cmp_pending = 0;
     if (!g_ready || g_stop || g_replaying)
         return;
-#if defined(I3_CMP_TEST) && defined(I3_CKPT_TEST_CMPBEFORE)
-    if (cmp_test_now())
-        cmp_test_stop("before");
-#endif
     /* The core is [battery [sample context]] with battery and context in
      * the code region, and every host root cell sits there too. */
     if (!noun_is_cell(g_kernel)) {
@@ -1310,20 +1237,7 @@ static void compact_run(void)
     t0 = cntvct();
     heap_compact_begin();
     heap_set_mode(HEAP_MODE_PERSIST);
-#if defined(I3_CMP_TEST) && (defined(I3_CKPT_TEST_CMPCOPY) || defined(I3_CKPT_TEST_CMPSKIP))
-    if (cmp_test_now())
-        noun_test_copy_fail_after(32);
-#endif
     if (!noun_copy_checked(sample, &copy)) {
-#if defined(I3_CMP_TEST) && (defined(I3_CKPT_TEST_CMPCOPY) || defined(I3_CKPT_TEST_CMPSKIP))
-        noun_test_copy_fail_after(-1);
-#if defined(I3_CKPT_TEST_CMPCOPY)
-        if (cmp_test_now())
-            cmp_test_stop("copy");
-#else
-        g_cmp_test_done = 1;
-#endif
-#endif
         heap_compact_abort();
         heap_set_mode(mode);
         compact_skip(n, "copy");
@@ -1336,10 +1250,6 @@ static void compact_run(void)
         return;
     }
     t1 = cntvct();
-#if defined(I3_CMP_TEST) && defined(I3_CKPT_TEST_CMPAFTER)
-    if (cmp_test_now())
-        cmp_test_stop("after-copy");
-#endif
     /* (4) axis 27 of the new core must hash to D */
     mark = heap_scratch_mark();
     heap_set_mode(HEAP_MODE_SCRATCH);
@@ -1355,10 +1265,6 @@ static void compact_run(void)
     g_kernel = core;
     heap_compact_commit();
     t2 = cntvct();
-#if defined(I3_CMP_TEST) && defined(I3_CKPT_TEST_CMPFLIP)
-    if (cmp_test_now())
-        cmp_test_stop("after-flip");
-#endif
     /* (6) atom store rebuild, work tables in scratch above its bump mark */
     mark = heap_scratch_mark();
     base = (HEAP_SCRATCH_BASE + mark + 0xFFFFu) & ~(uint64_t)0xFFFFu;
@@ -1394,11 +1300,7 @@ static void compact_run(void)
         compact_skip(n, "rebuild-walk");
         return;
     }
-#if defined(I3_CMP_TEST) && defined(I3_CKPT_TEST_CMPREBUILD)
-    if (!atom_store_compact(cmp_live, cmp_test_now() ? cmp_test_mid : 0, &st)) {
-#else
-    if (!atom_store_compact(cmp_live, 0, &st)) {
-#endif
+    if (!atom_store_compact(cmp_live, &st)) {
         (void)heap_scratch_rewind(mark);
         heap_set_mode(mode);
         compact_skip(n, "rebuild-index");
@@ -1409,10 +1311,6 @@ static void compact_run(void)
     t4 = cntvct();
     (void)heap_scratch_rewind(mark);
     heap_set_mode(mode);
-#if defined(I3_CMP_TEST)
-    if (cmp_test_now())
-        g_cmp_test_done = 1;
-#endif
     uart_puts("I3H compact ok event=");
     put_u64(n);
     uart_puts(" half=");
@@ -1486,20 +1384,6 @@ static void ckpt_verified(uint64_t n, noun state)
         xs[0] = tas("i3-base");
         xs[1] = direct(g_last_ck_n);
         xs[2] = direct(n);
-#if defined(I3_CKPT_TEST_REBASEFAULT)
-        /* Test knob (tests/recorder_ring.py rebase-fault leg, COLD_MEDIA=fake):
-         * the first base move meets a cold media timeout at its first
-         * transfer, before any sector is submitted, so the move fails and
-         * nothing is dropped. */
-        static int rebase_fault_armed;
-        if (!rebase_fault_armed) {
-            rebase_fault_armed = 1;
-            uart_puts("I3H ckpt test rebase-fault event=");
-            put_u64(n);
-            uart_puts("\r\n");
-            cold_media_fake_fault_arm(COLD_MEDIA_FAKE_TIMEOUT, 1);
-        }
-#endif
         if (tuple(xs, 3, &marker)
             && cold_log_rebase(g_last_ck_n, after, marker) == 0
             && cold_log_base(&now) == 0) {
@@ -1654,7 +1538,7 @@ static void ckpt_maybe_write(void)
 #elif defined(I3_CKPT_TEST_HDRSID)
         if (I3_CKPT_BAD_HDR(n))
             xs[2] = direct(sid ^ 1u);
-#elif defined(I3_CKPT_TEST_HDRD) || defined(I3_CKPT_TEST_CRASH)
+#elif defined(I3_CKPT_TEST_HDRD)
         if (I3_CKPT_BAD_HDR(n))
             hdig[0] ^= 1u;
 #endif
@@ -1663,16 +1547,9 @@ static void ckpt_maybe_write(void)
             why = "alloc";
         /* The header read back must jam to the same bytes as the one
          * written (all five fields), not merely be a cell. */
-#if defined(I3_CKPT_TEST_CRASH)
-        else if (!(hid = cold_store(hdr)) || ckpt_test_crash(n)
-                 || !noun_is_cell(loaded = cold_load_scratch(hid, &limits))
-                 || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2, I3_DIGEST_BYTES))
-            why = "verify-header";
-#else
         else if (!(hid = cold_store(hdr)) || !noun_is_cell(loaded = cold_load_scratch(hid, &limits))
                  || !ckpt_digest(loaded, hd2, 0) || !digest_eq(hd, hd2, I3_DIGEST_BYTES))
             why = "verify-header";
-#endif
     }
     if (!why)
         nv_flush();

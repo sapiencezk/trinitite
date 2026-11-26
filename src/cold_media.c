@@ -23,26 +23,7 @@ typedef struct __attribute__((packed)) {
 typedef char cold_media_descriptor_size_check[
     sizeof(cold_media_descriptor_t) == COLD_MEDIA_SECTOR_BYTES ? 1 : -1];
 
-#if defined(COLD_MEDIA_FAKE)
-cold_media_status_t cold_media_fake_probe(uint64_t *, int *, uint64_t);
-cold_media_status_t cold_media_fake_sector_read(
-    uint64_t, uint8_t *, uint64_t);
-cold_media_status_t cold_media_fake_sector_write(
-    uint64_t, const uint8_t *, uint64_t, int *);
-cold_media_status_t cold_media_fake_barrier(uint64_t);
-void cold_media_fake_backend_reset(void);
-#if defined(COLD_MEDIA_RING)
-/* The fake ring extent (cold_media_fake.c): sector s of the ring. */
-cold_media_status_t cold_media_fake_ring_read(uint64_t, uint8_t *);
-cold_media_status_t cold_media_fake_ring_write(uint64_t, const uint8_t *, int *);
-cold_media_status_t cold_media_fake_ring_barrier(void);
-#endif
-#define backend_probe cold_media_fake_probe
-#define backend_read cold_media_fake_sector_read
-#define backend_write cold_media_fake_sector_write
-#define backend_barrier cold_media_fake_barrier
-#define backend_reset cold_media_fake_backend_reset
-#elif defined(COLD_MEDIA_RPI4_SD)
+#if   defined(COLD_MEDIA_RPI4_SD)
 cold_media_status_t rpi4_sd_probe(uint64_t *, int *, uint64_t);
 cold_media_status_t rpi4_sd_sector_read(uint64_t, uint8_t *, uint64_t);
 cold_media_status_t rpi4_sd_sector_write(
@@ -439,12 +420,8 @@ cold_media_status_t cold_media_ring_load(uint8_t *window, uint64_t bytes)
             status = COLD_MEDIA_TIMEOUT;
             break;
         }
-#if defined(COLD_MEDIA_FAKE)
-        status = cold_media_fake_ring_read(s, window + s * COLD_MEDIA_SECTOR_BYTES);
-#else
         status = backend_read(COLD_MEDIA_RING_START_LBA + s,
                               window + s * COLD_MEDIA_SECTOR_BYTES, chunk);
-#endif
         if (status != COLD_MEDIA_OK)
             break;
     }
@@ -476,15 +453,9 @@ cold_media_status_t cold_media_ring_write(const uint8_t *window, uint64_t off,
             status = COLD_MEDIA_TIMEOUT;
             break;
         }
-#if defined(COLD_MEDIA_FAKE)
-        status = cold_media_fake_ring_write(s,
-                                            window + s * COLD_MEDIA_SECTOR_BYTES,
-                                            &submitted);
-#else
         status = backend_write(COLD_MEDIA_RING_START_LBA + s,
                                window + s * COLD_MEDIA_SECTOR_BYTES,
                                chunk, &submitted);
-#endif
         if (status != COLD_MEDIA_OK) {
             if (submitted)
                 status = COLD_MEDIA_WRITE_UNKNOWN;
@@ -503,11 +474,7 @@ cold_media_status_t cold_media_ring_barrier(void)
     if (status != COLD_MEDIA_OK)
         return status;
     g_owner = 1;
-#if defined(COLD_MEDIA_FAKE)
-    status = cold_media_fake_ring_barrier();
-#else
     status = backend_barrier(ring_deadline(5));
-#endif
     g_owner = 0;
     if (status != COLD_MEDIA_OK)
         g_ring_reset_required = 1;

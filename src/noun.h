@@ -120,7 +120,7 @@ void heap_scratch_floor_set(void);
 void atom_store_pin(void);
 uint64_t atom_store_pin_bytes(void);
 int atom_store_rehash_ok(uint64_t hash62);
-int atom_store_compact(int (*live)(uint64_t), void (*mid)(void), atom_compact_t *st);
+int atom_store_compact(int (*live)(uint64_t), atom_compact_t *st);
 uint64_t atom_store_index_occupancy(void);
 uint64_t noun_copy_map_hwm(void);
 uint64_t noun_copy_map_capacity(void);
@@ -132,9 +132,6 @@ void  cell_inc(noun n);   /* increment refcount */
 
 /* Deep-copy cells into the *current* heap mode (atoms shared via store). */
 int   noun_copy_checked(noun n, noun *out);
-/* Deterministic test hook: fail a checked deep copy after N new cells.
- * Negative disables injection. */
-void  noun_test_copy_fail_after(int64_t cells);
 
 /* Nock equality: structural, O(1) for atoms via word compare */
 int   noun_eq(noun a, noun b);

@@ -29,7 +29,7 @@ src/
   bounded_cue.c / .h     the bounded cue
   bignum.c, tip5.c, blake3.c, sha256.c
   cold.c / .h            the cold store: blobs, log, superblocks, base, compaction
-  cold_media*.c, cold_nv*.c  media backends: none, semihost file, fake, Pi 4 SD
+  cold_media*.c, cold_nv*.c  media backends: none, semihost file, Pi 4 SD
   digital_out.c          rpi4b: GPIO 17/27/22 driven low at boot
   uart.c, runtime_stats.c (timer reads), freestanding.c, setjmp.s
   memory.h, platform.h   the memory map (single source of truth)

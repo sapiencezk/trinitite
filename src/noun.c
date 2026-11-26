@@ -248,10 +248,8 @@ void cell_inc(noun n) {
 static uint32_t g_copy_key[COPY_MAP_MAX];
 static noun     g_copy_val[COPY_MAP_MAX];
 static uint8_t  g_copy_used[COPY_MAP_MAX];
-static int64_t  g_copy_fail_after = -1;
 static uint64_t g_copy_entries;
 static uint64_t g_copy_entries_hwm;
-static uint64_t g_copy_mutations;
 
 static void copy_entry_inserted(void)
 {
@@ -331,13 +329,8 @@ static int noun_copy_checked_rec(noun n, noun *out, uint32_t depth)
     if (!noun_copy_checked_rec(c->head, &nh, depth + 1)
         || !noun_copy_checked_rec(c->tail, &nt, depth + 1))
         return 0;
-    if (g_copy_fail_after == 0)
-        return 0;
-    if (g_copy_fail_after > 0)
-        g_copy_fail_after--;
     if (!alloc_cell_checked(nh, nt, &neu))
         return 0;
-    g_copy_mutations++;
     for (uint32_t k = 0; k < COPY_MAP_MAX; k++) {
         copy_probe(k);
         uint32_t i = (h + k) & (COPY_MAP_MAX - 1u);
@@ -368,11 +361,6 @@ int noun_copy_checked(noun n, noun *out)
 uint64_t noun_copy_map_hwm(void) { return g_copy_entries_hwm; }
 uint64_t noun_copy_map_capacity(void) { return COPY_MAP_MAX; }
 void noun_copy_map_hwm_reset(void) { g_copy_entries_hwm = 0; }
-
-void noun_test_copy_fail_after(int64_t cells)
-{
-    g_copy_fail_after = cells;
-}
 
 
 
@@ -759,7 +747,6 @@ void noun_heap_init(void) {
     persist_ptr = persist_base(0);
     noun_tx_live = 0;
     atom_tx_slot_count = 0;
-    g_copy_mutations = 0;
     scratch_ptr = (uint8_t *)(uintptr_t)HEAP_SCRATCH_BASE;
     heap_mode   = HEAP_MODE_PERSIST;  /* pill load / cold boot into persist */
     atom_store_init();
@@ -929,14 +916,13 @@ int atom_store_rehash_ok(uint64_t hash62)
 
 /* Row 221 (6): keep every record in the boot prefix or answered live by
  * `live`, slide each kept record down in allocation order, then rebuild the
- * 65,536-slot index in place. No second copy of the store. `mid`, if set, is
- * called once halfway through the slide (test knob). Returns 0, touching
+ * 65,536-slot index in place. No second copy of the store. Returns 0, touching
  * nothing, when the index and the records disagree. */
-int atom_store_compact(int (*live)(uint64_t), void (*mid)(void), atom_compact_t *st)
+int atom_store_compact(int (*live)(uint64_t), atom_compact_t *st)
 {
     atom_index_entry_t *idx = (atom_index_entry_t *)ATOM_INDEX_BASE;
     uint8_t *src = (uint8_t *)(uintptr_t)ATOM_DATA_BASE, *dst = src, *pin = atom_pin;
-    uint64_t t0, t1, k = 0, d = 0, n = 0, half, dg = 0xCBF29CE484222325ULL;
+    uint64_t t0, t1, k = 0, d = 0, n = 0, dg = 0xCBF29CE484222325ULL;
     st->bytes_before = atom_store_bytes_used();
     st->idx_before = atom_index_occupancy;
     st->mismatch = 0;
@@ -951,15 +937,12 @@ int atom_store_compact(int (*live)(uint64_t), void (*mid)(void), atom_compact_t 
     }
     if (st->mismatch)
         return 0;
-    half = n / 2;
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t0));
     src = (uint8_t *)(uintptr_t)ATOM_DATA_BASE;
     n = 0;
     while (src < atom_data_ptr) {
         atom_t *a = (atom_t *)src;
         uint64_t b = atom_rec_bytes(a);
-        if (mid && n == half)
-            mid();
         if (src < pin || live(atom_rec_hash62(a))) {
             dg = rec_digest(dg, src, b);
             if (dst != src) {

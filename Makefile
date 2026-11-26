@@ -85,70 +85,25 @@ endif
 ifneq ($(I3_RING_EVERY),)
 CFLAGS += -DI3_RING_EVERY=$(I3_RING_EVERY)
 endif
-# Test builds only (tests/recorder_ring.py fault legs): I3_RING_TEST=fault
-# with I3_RING_TEST_AT=K (COLD_MEDIA=fake) makes the K-th ring sector write
-# land half and report WRITE_UNKNOWN; I3_RING_TEST=torn (COLD_MEDIA=semihost)
-# skips the first wrap marker, commits the header and stops dead.
-ifneq ($(I3_RING_TEST),)
-ifeq ($(I3_LITE_LOG),)
-$(error I3_RING_TEST requires I3_LITE_LOG=1)
-endif
-ifeq ($(I3_RING_TEST),fault)
-ifneq ($(COLD_MEDIA),fake)
-$(error I3_RING_TEST=fault requires COLD_MEDIA=fake)
-endif
-ifeq ($(I3_RING_TEST_AT),)
-$(error I3_RING_TEST=fault requires I3_RING_TEST_AT=K)
-endif
-CFLAGS += -DI3_RING_TEST_FAULT=1 -DI3_RING_TEST_AT=$(I3_RING_TEST_AT)
-else ifeq ($(I3_RING_TEST),torn)
-ifneq ($(COLD_MEDIA),semihost)
-$(error I3_RING_TEST=torn requires COLD_MEDIA=semihost)
-endif
-CFLAGS += -DI3_RING_TEST_TORN=1
-else
-$(error I3_RING_TEST must be fault or torn)
-endif
-endif
-# Test builds only: I3_CKPT_TEST=cells|jam|stack|wrapper shrinks one checkpoint
-# bound so tests/checkpoint_legs.py reaches that skip leg; persist (row 317
-# Q10) makes the writer see no boot persist room, so every checkpoint skips
-# reason=persist (1499kernel lite_checkpoint_boot.py persist leg); dirty fills
-# the checkpoint region with 0xA5 at boot, as stale RAM, before the reset
-# (lite_checkpoint_boot.py dirty leg); appcells lowers the bundle cue's cells
-# bound to 1,000 so a %load-bundle is refused reason=cells (lite_checkpoint_boot.py
-# depth leg control); hdrshape|hdrsid|hdrd
-# make the writer store a bad header for every N >= I3_CKPT_TEST_FROM (default 1)
-# so tests/checkpoint_boot.py reaches each boot fallback leg (default unset);
-# crash (PR 1c) stores a damaged header for N >= I3_CKPT_TEST_FROM and stops
-# dead before verifying it (tests/recorder_ring.py crash leg); rebasefault
-# (PR 1c, COLD_MEDIA=fake) arms a cold media timeout before the first log
-# base move (tests/recorder_ring.py rebase-fault leg). Row 221 (row 212 (c),
-# I3_LITE_LOG=1 only): cmpbefore|cmpcopy|cmpafter|cmpflip|cmprebuild stop the
-# first compaction at N >= I3_CKPT_TEST_FROM dead at that crash point; cmpskip
-# makes that compaction's copy fail so it aborts (tests/compaction.py).
+# Test builds only (1499kernel tools/lite_checkpoint_boot.py legs): persist
+# (row 317 Q10) makes the writer see no boot persist room, so every checkpoint
+# skips reason=persist; dirty fills the checkpoint region with 0xA5 at boot, as
+# stale RAM, before the reset; appcells lowers the bundle cue's cells bound to
+# 1,000 so a %load-bundle is refused reason=cells (the depth leg's control);
+# hdrshape|hdrsid|hdrd make the writer store a bad header for every
+# N >= I3_CKPT_TEST_FROM (default 1), so each boot fallback leg is reached.
 ifneq ($(I3_CKPT_TEST),)
 ifeq ($(I3_CHECKPOINT_EVERY),)
 $(error I3_CKPT_TEST requires I3_CHECKPOINT_EVERY)
 endif
-ifeq ($(filter $(I3_CKPT_TEST),cells jam stack wrapper persist dirty appcells hdrshape hdrsid hdrd crash rebasefault cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip),)
-$(error I3_CKPT_TEST must be one of cells jam stack wrapper persist dirty appcells hdrshape hdrsid hdrd crash rebasefault cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip)
-endif
-ifneq ($(filter $(I3_CKPT_TEST),cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip),)
-ifneq ($(I3_LITE_LOG),1)
-$(error I3_CKPT_TEST=$(I3_CKPT_TEST) requires I3_LITE_LOG=1)
-endif
-endif
-ifeq ($(I3_CKPT_TEST),rebasefault)
-ifneq ($(COLD_MEDIA)$(I3_LITE_LOG),fake1)
-$(error I3_CKPT_TEST=rebasefault requires COLD_MEDIA=fake and I3_LITE_LOG=1)
-endif
+ifeq ($(filter $(I3_CKPT_TEST),persist dirty appcells hdrshape hdrsid hdrd),)
+$(error I3_CKPT_TEST must be one of persist dirty appcells hdrshape hdrsid hdrd)
 endif
 CFLAGS += -DI3_CKPT_TEST_$(shell echo $(I3_CKPT_TEST) | tr a-z A-Z)=1
 endif
 ifneq ($(I3_CKPT_TEST_FROM),)
-ifeq ($(filter $(I3_CKPT_TEST),hdrshape hdrsid hdrd crash cmpbefore cmpcopy cmpafter cmpflip cmprebuild cmpskip),)
-$(error I3_CKPT_TEST_FROM requires I3_CKPT_TEST=hdrshape|hdrsid|hdrd|crash|cmpbefore|cmpcopy|cmpafter|cmpflip|cmprebuild|cmpskip)
+ifeq ($(filter $(I3_CKPT_TEST),hdrshape hdrsid hdrd),)
+$(error I3_CKPT_TEST_FROM requires I3_CKPT_TEST=hdrshape|hdrsid|hdrd)
 endif
 CFLAGS += -DI3_CKPT_TEST_FROM=$(I3_CKPT_TEST_FROM)
 endif
@@ -183,14 +138,11 @@ MEDIA_OBJS = cold_media.o cold_nv_none.o
 else ifeq ($(COLD_MEDIA),semihost)
 CFLAGS += -DCOLD_MEDIA_SEMIHOST=1
 MEDIA_OBJS = cold_media.o cold_nv.o
-else ifeq ($(COLD_MEDIA),fake)
-CFLAGS += -DCOLD_MEDIA_FAKE=1
-MEDIA_OBJS = cold_media.o cold_media_fake.o cold_nv_none.o
 else ifeq ($(COLD_MEDIA),rpi4-sd)
 CFLAGS += -DCOLD_MEDIA_RPI4_SD=1
 MEDIA_OBJS = cold_media.o cold_media_rpi4_sd.o cold_nv_none.o
 else
-$(error unsupported COLD_MEDIA='$(COLD_MEDIA)' (ram, semihost, fake, rpi4-sd))
+$(error unsupported COLD_MEDIA='$(COLD_MEDIA)' (ram, semihost, rpi4-sd))
 endif
 
 # The Pi's fixed digital output bank is cleared at boot (src/digital_out.c).
@@ -226,9 +178,6 @@ CONFIG_KEY := $(CONFIG_KEY)-i3rb$(I3_RING_BYTES)
 endif
 ifneq ($(I3_RING_EVERY),)
 CONFIG_KEY := $(CONFIG_KEY)-i3re$(I3_RING_EVERY)
-endif
-ifneq ($(I3_RING_TEST),)
-CONFIG_KEY := $(CONFIG_KEY)-i3rt$(I3_RING_TEST)$(I3_RING_TEST_AT)
 endif
 ifneq ($(I3_CKPT_TEST),)
 CONFIG_KEY := $(CONFIG_KEY)-i3ckt$(I3_CKPT_TEST)
@@ -312,10 +261,9 @@ TEST_BUILDS = \
 	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=semihost I3_CHECKPOINT_EVERY=" \
 	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=semihost I3_CHECKPOINT_EVERY=4 I3_CKPT_TEST=persist" \
 	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=semihost I3_CHECKPOINT_EVERY=2 I3_CKPT_TEST=hdrd I3_CKPT_TEST_FROM=3" \
-	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=fake I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_BYTES=32768 I3_RING_EVERY=2 I3_RING_TEST=fault I3_RING_TEST_AT=8" \
-	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=fake I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_BYTES=32768 I3_RING_EVERY=2 I3_CKPT_TEST=rebasefault" \
-	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=semihost I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_BYTES=32768 I3_RING_EVERY=2 I3_RING_TEST=torn" \
-	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=semihost I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_CKPT_TEST=cmpcopy I3_CKPT_TEST_FROM=4" \
+	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=semihost I3_CHECKPOINT_EVERY=4 I3_CKPT_TEST=dirty" \
+	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=semihost I3_CHECKPOINT_EVERY=4 I3_CKPT_TEST=appcells" \
+	"PLATFORM=qemu-virt I3_L1_PROBE=1 COLD_MEDIA=semihost I3_CHECKPOINT_EVERY=2 I3_LITE_LOG=1 I3_RING_BYTES=32768 I3_RING_EVERY=2" \
 	"PLATFORM=rpi4b" \
 	"PLATFORM=rpi4b COLD_MEDIA=rpi4-sd" \
 	"PLATFORM=rpi4b COLD_MEDIA=rpi4-sd I3_LITE_LOG=1"

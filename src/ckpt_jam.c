@@ -34,7 +34,7 @@
 #define I2_JAM_CACHE_ADMITTED CKPT_JAM_CACHE_ADMITTED
 /* The backref cache (12 MiB), the mug memo (4 MiB) and the 4 MiB buffer
  * live in the fixed I3_CKPT_JAM region (memory.h), not in .bss: with them
- * .bss would pass its 24 MiB bound in the fake-media builds. Region memory
+ * .bss would pass its 24 MiB bound. Region memory
  * is not zeroed at boot: ckpt_jam_reset clears the cache and the memo once
  * before first use; besides, jam.c clears the cache's used flags and the
  * buffer on every jam, and the memo's generation starts at its last value

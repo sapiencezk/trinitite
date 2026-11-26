@@ -3,6 +3,11 @@
 `tests/checkpoint_flag_off.sh`, the byte-identity gate named in the sections below, was retired by
 1499kernel row 389: deleting the code no lite image runs changed every image, which ends byte identity
 with those historical bases. `make test-build` builds every flag and test-knob configuration instead.
+The same row deleted this tree's own checkpoint, compaction and ring tests (`tests/checkpoint_*.py`,
+`tests/compaction.py`, `tests/recorder_ring.py`, `tests/ring_full_replay.py`; they imported a 1499kernel
+module that no longer exists) and the knobs only they used: `I3_CKPT_TEST=cells|jam|stack|wrapper|crash|
+rebasefault|cmp*`, `I3_RING_TEST`, `COLD_MEDIA=fake`. The sections below keep them as the record of how each
+PR was checked; 1499kernel's `tools/lite_checkpoint_boot.py` is the live check.
 
 Base: trinitite `i3/cue-input-16m` @ 9927b88c (trinitite#9 merged: row 200 amendment / PLAN row 213; trinitite#8's `jam_hoon_checked`).
 Branch: trinitite `feat/lite-checkpoint-writer`. Sources: PLAN row 212 (in #254), Dwarf's read §7-10

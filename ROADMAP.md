@@ -61,5 +61,5 @@ bytes and work.
 
 An append-only, content-addressed store of jammed blobs and log entries behind
 two checksummed superblocks, in an 8 MB RAM window (`COLD_BASE`) mirrored to
-the selected media: none, a QEMU semihosting file, a fault-injecting fake, or
-the Pi 4's SD card (EMMC2, PIO).
+the selected media: none, a QEMU semihosting file, or the Pi 4's SD card
+(EMMC2, PIO).

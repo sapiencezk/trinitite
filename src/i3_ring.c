@@ -6,8 +6,6 @@
  *   COLD_MEDIA=rpi4-sd  write-through by whole sectors to the ring extent
  *                       (cold_media_ring_*, cold_media.h; loaded whole at
  *                       boot, 5 s per 256 KiB chunk, 60 s in total),
- *   COLD_MEDIA=fake     the same path on the fake backend's ring extent
- *                       (RAM, for the fault tests; the ring must be small),
  *   COLD_MEDIA=semihost the changed bytes go to the host file build/ring.img
  *                       at each i3_ring_flush (QEMU tests reload it with
  *                       -device loader at the window address),
@@ -115,9 +113,6 @@ static uint64_t g_lo = UINT64_MAX, g_hi; /* semihost: changed data bytes */
 static int g_hdr_dirty;
 #if defined(COLD_MEDIA_SEMIHOST)
 static int g_flushed_once;
-#endif
-#if defined(I3_RING_TEST_TORN)
-static int g_torn_fired;
 #endif
 
 static void put_u64(uint64_t n)
@@ -385,23 +380,6 @@ static int fits_below_tail(uint64_t size)
     return end <= (g_h.tail & ~(uint64_t)(RING_SECTOR - 1));
 }
 
-#if defined(I3_RING_TEST_TORN)
-/* Test knob (tests/recorder_ring.py torn leg): at the first wrap that needs a
- * marker, the marker never lands; the moved header is committed and flushed,
- * then the node stops dead (a power cut between the two writes). */
-static void torn_stop(uint64_t n)
-{
-    (void)cold_nv_flush();
-    i3_ring_flush();
-    uart_puts("I3H ring test torn-wrap event=");
-    put_u64(n);
-    uart_puts(" gen=");
-    put_u64(g_h.gen);
-    uart_puts("\r\nI3H terminal=test-torn\r\n");
-    for (;;)
-        __asm__ volatile("wfe");
-}
-#endif
 
 /* Append one record (payload a || b). 1 on success. */
 static int put(uint32_t kind, uint64_t n, const uint8_t *a, uint64_t alen,
@@ -423,11 +401,6 @@ static int put(uint32_t kind, uint64_t n, const uint8_t *a, uint64_t alen,
             /* wrap: the end of the window cannot hold this record */
             if (RING_R - g_h.head >= REC_HDR) {
                 ring_rec_t w = {REC_MAGIC, REC_WRAP, 0, 0, 0, {0}};
-#if defined(I3_RING_TEST_TORN)
-                if (!g_torn_fired) {
-                    g_torn_fired = 1;
-                } else
-#endif
                 {
                     copy(W + g_h.head, &w, sizeof w);
                     /* The marker is durable before the header that relies
@@ -464,12 +437,6 @@ static int put(uint32_t kind, uint64_t n, const uint8_t *a, uint64_t alen,
     }
     if (moved && !hdr_commit())
         return 0;
-#if defined(I3_RING_TEST_TORN)
-    if (g_torn_fired == 1) {
-        g_torn_fired = 2;
-        torn_stop(n);
-    }
-#endif
     uint64_t at = g_h.head;
     ring_rec_t r;
     r.magic = REC_MAGIC;

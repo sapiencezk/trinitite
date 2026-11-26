@@ -82,7 +82,6 @@ Selected at build time:
 ```text
 COLD_MEDIA=ram       logical RAM window, no physical flush (default)
 COLD_MEDIA=semihost  QEMU lab file transport (build/cold.img)
-COLD_MEDIA=fake      deterministic bounded fault adapter (tests)
 COLD_MEDIA=rpi4-sd   Pi 4B BCM2711 EMMC2 PIO target
 ```
 

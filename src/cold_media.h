@@ -73,10 +73,8 @@ cold_media_status_t cold_media_barrier(cold_media_phase_t phase,
                                        uint64_t deadline_tick);
 int cold_media_active(void);
 
-#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 \
-    && defined(I3_LITE_LOG) && (defined(COLD_MEDIA_RPI4_SD) || defined(COLD_MEDIA_FAKE))
-/* Row 212 PR 1c recorder ring (src/i3_ring.c) on sector media: rpi4-sd, and
- * the fake backend for the fault tests (tests/recorder_ring.py fault legs).
+#if defined(I3_CHECKPOINT_EVERY) && I3_CHECKPOINT_EVERY > 0 && defined(I3_LITE_LOG) && defined(COLD_MEDIA_RPI4_SD)
+/* Row 212 PR 1c recorder ring (src/i3_ring.c) on sector media (rpi4-sd).
  *
  * Layout. The ring has its own extent, I3_RING_BYTES / 512 sectors from
  * COLD_MEDIA_RING_START_LBA, after the cold extent (descriptor sector plus
